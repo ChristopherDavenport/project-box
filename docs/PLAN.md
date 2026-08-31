@@ -1,0 +1,449 @@
+# project-box — plan of execution
+
+Companion to [ARCHITECTURE.md](ARCHITECTURE.md), which holds the decisions and
+the reasoning behind them. This document holds the order, the shape of the
+code, and what "done" means at each step.
+
+---
+
+## 1. What this builds
+
+A control plane for **dark software factories**: systems built, verified, and
+deployed end to end by agents, with no human in the execution loop, producing
+evidence an external auditor can test.
+
+### What it does not build
+
+Bounding this matters as much as the phase list, because every item here was
+considered and rejected for a recorded reason.
+
+| Not building | Because |
+|---|---|
+| A Nostr relay | human-shaped, not a ledger, and not auditable as a subservice organization |
+| A per-actor signing scheme | signing only matters when the control plane is outside the trust boundary; here it is not |
+| A git forge or git hosting | GitHub is auditor-legible and already in use; the forge we would otherwise reimplement is 10.8k lines with a formal spec behind it |
+| A Kubernetes controller | Argo or Flux reconciles; the control plane writes env repos and stops |
+| A chat interface | the execution loop has no human in it; the control room is an exception queue, not a channel |
+| A general-purpose CI system | gates run as required status checks on the content plane |
+| Model hosting | the agent runtime speaks ACP to whatever is configured |
+
+---
+
+## 2. Sequencing principles
+
+**Hardest to retrofit goes first.** Multi-tenancy, leases, evidence chaining,
+and agent reproducibility cannot be added to a running system without leaving a
+gap. Deploy targets, dashboards, and knowledge retrieval can.
+
+**Every phase emits evidence from its first line.** Not because the audit needs
+it yet, but because an evidence layer added later has a hole exactly where the
+early work was.
+
+**The audit clock starts last.** A Type II observation window cannot be
+backfilled, so it opens only once the controls it tests are real — Phase 8.
+
+**Local before managed, but not local before proven.** Nothing in phases 0–6
+requires a *provisioned* Spanner instance, a GKE cluster, or a Honeycomb key —
+but the Spanner **code path** runs from Phase 0 against the emulator on every
+commit. Deferring the bill is sensible; deferring the second backend would
+leave the abstraction unproven. Those are separable and this plan separates
+them.
+
+**A property that is not tested is a comment.** Nearly every load-bearing claim
+in the architecture is a property — exclusivity, monotonicity, non-interference,
+determinism, completeness. Section 5 maps each to a test, and phases are not
+done when the code exists but when the property is asserted.
+
+Sizes are relative (S/M/L), not calendar estimates.
+
+---
+
+## 3. Phase dependencies
+
+```
+0 Foundations
+├── 1 Forge ─────────┐
+└── 2 Agent plane ───┴── 3 First closed loop ──┬── 4 Multi-repo + deploy ──┐
+                                               ├── 5 Observability + room ─┼── 7 Deployed ── 8 SOC 2
+                                               └── 6 Knowledge ────────────┘
+```
+
+Phases 1 and 2 are independent of each other and can run in parallel. After
+Phase 3, phases 4, 5, and 6 are mutually independent. Everything converges on 7.
+
+---
+
+## Phase 0 — Foundations · L
+
+Everything stateful gets a tenant-scoped local backend, and evidence exists
+before there is anything to record.
+
+- `internal/store` — the backend seam and the **conformance suite**, written
+  first, asserting the properties that must hold identically on every backend:
+  exclusive claim, strictly-increasing never-reused fencing tokens, append-only
+  chaining, and **tenant non-interference**.
+- Tenant-scoped handles from `tenant.Router`, with tenant leading every primary
+  key. No unscoped constructor exists to forget.
+- **Two backends from the start**: SQLite, and Spanner against the emulator.
+  One implementation is a wrapper, not an abstraction — with only SQLite its
+  semantics silently become the definition, and the mismatch surfaces in Phase
+  7 after everything is built on them.
+- `internal/evidence` — `Append`/`Head`/`Since`/`BySubject`/`Verify`.
+- `internal/authz` wired into the store seam: principals, the action/resource
+  matrix, and delegation as an intersection.
+
+**Exit**
+
+- Conformance green on **both** SQLite and the Spanner emulator from identical
+  backend code — the Go client honours `SPANNER_EMULATOR_HOST`, so only the
+  endpoint differs.
+- CI **fails** if the emulator was unavailable rather than skipping. "Emulator
+  down, tests skipped, all green" is a conformance suite that proves nothing.
+- `Verify` detects both a tampered record and a removed one.
+- Evidence records verify offline, with no service running.
+- No operation on a scope bound to one tenant can observe or affect another,
+  proven per-operation rather than argued.
+
+---
+
+## Phase 1 — Forge · M · depends on 0
+
+Safe concurrent git for a fleet, single repository.
+
+- `Mirror` — bare clones, fetch, ref resolution.
+- `Workspace` materialization, one per (run, repo).
+- `Leaser` on the store, with fencing.
+- `Lander` for one repo, presenting the expected old value on push.
+
+**Exit**
+
+- Two runners cannot hold one ref.
+- A stalled runner's superseded token is rejected **at land**, not at push.
+- The concurrency claims are covered by a test that actually races under
+  `-race`, not by inspection.
+
+---
+
+## Phase 2 — Agent plane · L · depends on 0
+
+An agent becomes a reproducible artifact rather than a configuration.
+
+- `Resolver` — layer composition, deterministic content addressing, `Explain`.
+- ACP runtime driving `claude-agent-acp` from a queue consumer.
+- **Stream interception for tool policy** — the enforcement point, and the
+  reason this phase is L. Everything else here is assembly.
+- Context set materialization: pinned, read-only, nothing outside the set.
+
+**Exit**
+
+- The same request against the same material produces the same `agentref`.
+- A denied tool is denied *at the stream*, verified by a test that tries it.
+- An empty `ToolPolicy` resolves to the most restrictive mode the role allows,
+  never the most permissive.
+- `Explain` renders a bundle, and two bundles diff meaningfully.
+
+---
+
+## Phase 3 — The first closed loop · M · depends on 1, 2
+
+**This phase validates or kills the premise.** Everything before it is
+scaffolding; everything after is scale.
+
+- Minimal queue: WorkItem, claim, park.
+- **Issue ingress only** — one request, one ChangeSet, opened through one
+  route with idempotent delivery. Redelivery is normal traffic and has to be
+  handled from the first route, not retrofitted after an alert storm.
+- One real gate: build and test.
+- `Decision` with `pending` from the start — the three-state answer has to be
+  in the Gate contract before anything depends on two.
+- Wire ingress → run → gate → land, single repo, local only.
+- Evidence at every transition.
+
+**Exit**
+
+- A work item goes from an opened issue to a landed commit unattended, with a
+  complete provenance chain queryable by commit sha.
+- A failing gate parks it instead of landing it.
+
+If autonomous agents cannot reliably produce landable changes, this is where it
+becomes visible — cheaply, before the deploy plane, the control room, or a
+cloud bill exist.
+
+---
+
+## Phase 4 — Multi-repo and deploy · L · depends on 3
+
+- `ChangeSet` across repositories, ordered landing, revert-forward
+  compensation, and an expand/contract check that refuses a member which is not
+  independently safe to land.
+- **Campaign ingress** — predicate evaluation over the Box's repositories, plus
+  the rollout throttle. Campaigns need multi-repo to exist and need the throttle
+  before they are safe to run.
+- Env repos, GitOps reconciliation, promotion between environments.
+- Flux or Argo against a local kind cluster.
+
+**Exit**
+
+- A contract change, its client regeneration, and a chart bump land as one
+  ChangeSet.
+- A deliberately failed mid-landing reverts forward without rewriting history.
+- A landed env commit reconciles into a running workload on kind.
+- A repository present at the host and enrolled nowhere is *reported*, not
+  silently skipped.
+- Editing a service template turns every service whose render no longer matches
+  into campaign work.
+- A campaign with `Batch: 0` throttles to one repository, not to unlimited.
+
+---
+
+## Phase 5 — Observability and control room · M · depends on 3
+
+- OTel spans from the stage runner, correlated by `workitem.id`.
+- Collector gateway: `memory_limiter → redaction → tail_sampling → batch`.
+- Exception queue, review sampling, stop button.
+- **Human approval gate** — requirement policy, direct attestation through the
+  control room, waiting distinguished from parked.
+- **Incident ingress** — severity, preemption of campaign leases, break-glass
+  gated on an open incident, postmortem-before-close.
+
+**Exit**
+
+- A failed run is retained regardless of sampling.
+- Redaction verified against a **deliberately planted** credential, not assumed.
+- The stop button halts new claims within a stated bound.
+- An incident preempts a running campaign, and the preempted runner's land is
+  rejected on its superseded token.
+- Break-glass is refused when no incident is open.
+
+---
+
+## Phase 6 — Knowledge plane · M · depends on 3
+
+- Signed, scoped records with provenance.
+- Retrieval scoped to the requesting work item's target.
+- Invalidation by binding records to the commit or path they describe.
+- A curation job promoting run output into records.
+
+**Exit**
+
+- A record bound to a file that has since changed is flagged stale without
+  anyone marking it.
+- Retrieval returns nothing outside the requesting agent's granted scopes.
+
+---
+
+## Phase 7 — Deployed footing · L · depends on 4, 5, 6
+
+The first phase that costs money. Nothing here changes behaviour — it changes
+where the same behaviour runs.
+
+- Real Spanner behind the conformance suite that has been green on the emulator
+  since Phase 0. What is new is not the code but what the emulator cannot
+  reproduce: real TrueTime, genuine contention, query plans, split behaviour.
+- Schema and index design verified against real hotspot behaviour.
+- GitHub as content plane; the gate runs as a required status check.
+- Honeycomb, plus the long-term telemetry sink.
+- WORM export to a retention-locked bucket.
+- GKE and the reconciler.
+- Tenant provisioning and per-tenant quotas.
+
+**Exit**
+
+- Conformance green on real Spanner with no source changes from what has passed
+  on the emulator for seven phases.
+- Write distribution measured, not assumed.
+- The status check blocks a merge that fails fencing.
+- An export lands with its retention lock set.
+
+---
+
+## Phase 8 — SOC 2 readiness · M · depends on 7
+
+- Control documentation and the mapping in ARCHITECTURE.md, agreed with the
+  auditor.
+- Break-glass procedure, written and **exercised**.
+- Vendor management: GCP, GitHub, Anthropic, Honeycomb.
+- Reviewer sampling cadence in the control room.
+- **Evidence dry run** — someone samples 25 changes at random and produces
+  complete evidence for each, unaided.
+
+**Exit:** the dry run succeeds without manual reconstruction. *Then* the
+observation window opens.
+
+---
+
+## 4. Package layout
+
+`✓` exists today.
+
+```
+cmd/
+  boxd/               control plane daemon
+  box/                CLI
+internal/
+  tenant/     ✓       outermost scope, isolation ladder, router
+  authz/      ✓       principals, actors, action/resource grants
+  estate/     ✓       repository discovery, facts, enrollment gaps
+  approval/   ✓       human gate: requirements, sources, self-approval rules
+  store/              backend seam + conformance suite
+    sqlite/           local backend
+    spanner/          emulator and production, one code path
+  evidence/   ✓       hash-chained signed records, WORM export
+  forge/      ✓       mirrors, leases, workspaces, ChangeSets, gates, landing,
+                      scoped credential minting
+  provision/  ✓       repository creation and integration
+  admission/  ✓       required repository restrictions, checked before acting
+  agent/      ✓       layered definitions, resolver, bundles
+    acp/              runtime and stream interception
+  ingress/    ✓       campaigns, issues, incidents, routes, delivery dedup
+  queue/              work items, claims, retries, exception queue
+  knowledge/          scoped signed records, retrieval, invalidation
+  deploy/             env repos, promotion
+  telemetry/          OTel wiring
+  control/            exception queue, review sampling, stop
+```
+
+---
+
+## 5. Testing strategy
+
+Every "must" in the architecture maps to a test here. Where it does not, the
+claim is decoration.
+
+| Property | How it is asserted | Phase |
+|---|---|---|
+| Exclusive claim | two goroutines race one ref under `-race`; exactly one wins | 0, 1 |
+| Fencing monotonicity | tokens strictly increase across grants; a superseded token is rejected at land | 0, 1 |
+| Tenant non-interference | write as A, read as B, expect nothing — **for every operation** | 0 |
+| Backend equivalence | one conformance suite, every backend, no skips in CI | 0 |
+| Chain integrity | `Verify` catches a tampered record *and* a removed one | 0 |
+| Delegation cannot escalate | an agent acting for a user is denied what that user lacks | 0 |
+| No implicit allow | a principal with an empty grant set can do nothing | 0 |
+| Human vs automation | evidence distinguishes actor from on-behalf-of | 3 |
+| Agent determinism | same request + same material → same `agentref` | 2 |
+| Tool policy | a denied tool is denied at the stream, by a test that tries it | 2 |
+| Partial landing | forced mid-landing failure reverts forward, history intact | 4 |
+| Throttle safety | unset rollout means one, never unlimited | 4 |
+| Delivery idempotency | a redelivered webhook or flapping alert opens one ingress, not many | 3 |
+| Estate completeness | an unenrolled repository is reported rather than skipped | 4 |
+| Fact staleness | a predicate refuses to act on a fact older than its bound | 4 |
+| Render determinism | the same declaration and template render identically | 4 |
+| Credential scoping | a token minted for a run cannot reach a repository outside its context set | 7 |
+| Forge tenant isolation | one tenant's scope cannot mint against another's installation | 7 |
+| Protection before use | a repository stays closed until integration verifies | 7 |
+| Webhook authenticity | an unsigned or wrongly signed delivery is refused | 7 |
+| Admission fails closed | an unreachable forge refuses the action rather than allowing it | 7 |
+| App is not a bypass actor | a repository listing the app as bypass is refused | 7 |
+| Admission is re-checked at land | protection disabled mid-run blocks the landing | 7 |
+| Redaction | a planted credential does not reach the exporter | 5 |
+| Preemption | incident revokes a campaign lease; preempted land is rejected | 5 |
+| Break-glass gating | refused with no open incident | 5 |
+| Stale approval | approval of a superseded revision does not count | 5 |
+| Self-approval | requester cannot approve, directly or via an agent acting for them | 5 |
+| Knowledge staleness | a record bound to a changed file is flagged without marking | 6 |
+| Evidence completeness | 25 sampled changes, complete evidence, unaided | 8 |
+
+### CI gates
+
+Every one blocking, and the gate configuration is itself under change control.
+
+- `gofmt`, `go vet`, `golangci-lint`
+- `go test -race ./...`
+- conformance on SQLite **and** the Spanner emulator — a skipped backend fails
+- `govulncheck`
+
+---
+
+## 6. Decisions already settled
+
+Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
+
+| Decision | Short reason |
+|---|---|
+| OIDC principals and traditional grants; no per-actor keys | signing only helps when the control plane is outside the trust boundary; chain plus WORM were always what carried tamper-evidence |
+| Agents act on behalf of, never as | a log that never separated human from automation cannot have the distinction recovered |
+| Delegation intersects, never unions | delegation that can escalate is not delegation |
+| Not the Buzz relay | human-shaped, not a ledger, not auditable |
+| GitHub as content plane | auditor-legible, already in use, and the forge we would otherwise reimplement is 10.8k lines with a formal spec |
+| Spanner deployed, SQLite local, one conformance suite | the contract is the property, not the mechanism |
+| Both backends from commit one | an interface with one implementation is a wrapper |
+| GitOps; the control plane never applies to clusters | rollback is `git revert`, and no cluster credentials at deploy time |
+| Evidence separate from telemetry | sampled pipelines cannot carry a complete audit trail |
+| Collector in the path | routing to a sink whose retention we control, plus one redaction point |
+| Per-stage traces, not per-WorkItem | hours-long traces and tail sampling are incompatible |
+| Agent layers content-addressed; text first, git for governance | identity is the digest; git governs, it does not define |
+| Multi-tenancy structural from commit one | the one thing that cannot be retrofitted; single-tenant is multi-tenant with one tenant |
+| Tenant carried explicitly, never derived from Box | an id that must be resolved before it is trusted is one an attacker can supply |
+| Three ingress kinds, closed set | no orphan work; the kind sets the authority envelope |
+| Break-glass requires an open incident | an emergency bypass with no incident is the finding an audit looks for |
+| Campaigns reconcile a predicate rather than enumerate | enumeration is wrong the moment a repository is added or retired |
+| Human approval is a Gate, with a pending decision | "not yet" is not "no"; waiting is not parked |
+| Approvals bind to a commit, not a pull request | otherwise an agent lands content no reviewer saw |
+| The estate is observed, not declared | a hand-maintained repository list makes every campaign quietly partial |
+| Deploy artifacts are rendered, not authored | drift is only detectable against a canonical form |
+| Ingress kinds closed, routes open | many sources of work, still only three things they can open |
+| A GitHub App, not a PAT or OAuth app | an app is its own principal; a user token collapses actor and on-behalf-of |
+| Credentials minted per run from the context set | the forge token becomes a projection of the authz decision, not a second grant |
+| Repository creation gated on human approval | it is the one permission that cannot be repository-scoped |
+| Repository restrictions verified before acting, twice | the gate is enforced by config we do not own; a stale check is a memory of a control |
+| The app is never a forge bypass actor | otherwise the only actor that matters is the one the rules exempt |
+| Expand/contract plus revert-forward | there is no atomic commit across git remotes |
+
+## 7. Deferred decisions
+
+Each names the phase by which it must be resolved.
+
+| Decision | By |
+|---|---|
+| Commit signing via `sigstore/gitsign` — needed only once artifacts leave the trust boundary | when they do |
+| Which Trust Services Criteria beyond Security — Confidentiality changes redaction requirements | 2 |
+| Argo CD or Flux | 4 |
+| Kubernetes distributions; provision clusters or deploy onto existing | 4 |
+| Long-term telemetry sink: GCS file exporter or ClickHouse | 5 |
+| `decision_wait`, bounding how long a stage may run before its trace is decided without it | 5 |
+| Embedding model and store for knowledge retrieval | 6 |
+| Whether any tenant needs isolation above logical | 7 |
+| One app or two — splitting repository creation into its own narrowly-installed app | 7 |
+
+## 8. Risks
+
+**The premise.** Autonomous agents may not produce landable changes reliably
+enough to justify the machinery. Phase 3 is positioned early and is cheap to
+abandon precisely because this is the risk that matters.
+
+**Fencing is weaker on GitHub.** No server-side pre-receive hooks on
+github.com, so policy gates the merge rather than the push. Tolerable because
+run branches are disposable, but it is the one finding that would pull a
+self-hosted forge back into scope.
+
+**Injection through context and knowledge.** Agents acting on material other
+agents wrote, unsupervised, is the highest-leverage attack available — poison
+what the factory believes rather than what it runs. Pinned read-only context,
+signed knowledge records, and tool policy at the ACP stream carry the weight;
+an instruction not to follow embedded directions does not.
+
+**Scope.** This is a large program. Phase 3 is a genuine go/no-go, and phases
+5–8 are severable if the loop proves out but the compliance goal moves.
+
+## 9. Glossary
+
+| Term | Meaning |
+|---|---|
+| **Tenant** | the outermost scope; owns Boxes, agents, and evidence |
+| **Box** | a system, not a repository — repos, environments, agents, policy |
+| **Ingress** | where work originates: a campaign, an issue, or an incident |
+| **WorkItem** | one claimable unit of work, traced to exactly one ingress |
+| **Lease** | an exclusive, fenced claim on one ref of one repository |
+| **Fencing token** | strictly increasing per ref, never reused; rejects a stalled or preempted runner's write |
+| **ChangeSet** | branches across one or more repositories, gated and landed together |
+| **Gate** | evaluates a ChangeSet whole and returns a signed verdict |
+| **Bundle** / **agentref** | a resolved, content-addressed agent definition, and its digest |
+| **Evidence record** | a signed, hash-chained fact, keyed by subject for audit sampling |
+| **Break-glass** | an emergency bypass, permitted only under an open incident |
+
+## 10. Next commit
+
+`internal/store` — the seam and the conformance suite, **before** any backend
+exists to satisfy it. Writing the suite first is what stops SQLite's semantics
+from silently becoming the definition, and what makes the Spanner backend a
+peer rather than a port.

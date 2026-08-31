@@ -1,0 +1,86 @@
+package forge
+
+import "context"
+
+// Gate decides whether a [ChangeSet] may land.
+//
+// A gate evaluates the ChangeSet whole. Checking each repository in isolation
+// answers the wrong question: a contract change that is fine on its own and a
+// client regeneration that is fine on its own can still be wrong together, and
+// that pairing is precisely what a multi-repo control plane exists to make
+// routine.
+type Gate interface {
+	// Name identifies the gate in a [Verdict] and in the audit trail.
+	Name() string
+	// Evaluate reports whether the ChangeSet satisfies this gate. A gate that
+	// cannot reach a conclusion *yet* returns [DecisionPending]; one that
+	// cannot reach a conclusion *at all* returns an error, so that
+	// infrastructure trouble is never recorded as a rejected change.
+	//
+	// Evaluate is called repeatedly while a gate is pending and must be
+	// idempotent: asking a human gate twice must not request two approvals.
+	Evaluate(ctx context.Context, cs ChangeSet) (Verdict, error)
+}
+
+// Decision is a gate's answer. Three states, not two: a human gate cannot
+// decide synchronously, and collapsing "not yet" into "no" would fail changes
+// that are merely waiting.
+type Decision string
+
+const (
+	DecisionPass Decision = "pass"
+	DecisionFail Decision = "fail"
+	// DecisionPending means the gate cannot answer yet and the ChangeSet is
+	// waiting on something outside this process — a reviewer, a soak, an
+	// external check. A pending ChangeSet is *waiting*, which is distinct from
+	// *parked*: parking is for work that went wrong, waiting is for work that
+	// is proceeding normally and has not finished.
+	DecisionPending Decision = "pending"
+)
+
+// Verdict is one gate's answer for one ChangeSet.
+type Verdict struct {
+	Gate     string
+	Decision Decision
+	// Reason is the human-readable justification, shown to the agent or
+	// operator who has to act on a rejection.
+	Reason   string
+	Evidence []Evidence
+}
+
+// Evidence is a durable pointer to what a gate actually observed: a test log, a
+// build record, a review, a policy decision. Verdicts are published to the
+// relay and outlive the run that produced them, so evidence is referenced by
+// location rather than inlined.
+type Evidence struct {
+	Kind string
+	// URI locates the evidence. Anything a later reader can dereference: a log
+	// object, an artifact digest, a relay event id.
+	URI    string
+	Digest string
+}
+
+// Resolve reduces a set of verdicts to one decision.
+//
+// A failure anywhere fails the whole ChangeSet, and outranks a pending verdict:
+// there is no point waiting on a reviewer for a change that has already failed
+// its tests. An empty slice fails rather than passes — a ChangeSet no gate
+// examined has not been reviewed, and silence must never read as approval.
+func Resolve(vs []Verdict) Decision {
+	if len(vs) == 0 {
+		return DecisionFail
+	}
+	pending := false
+	for _, v := range vs {
+		switch v.Decision {
+		case DecisionFail:
+			return DecisionFail
+		case DecisionPending:
+			pending = true
+		}
+	}
+	if pending {
+		return DecisionPending
+	}
+	return DecisionPass
+}
