@@ -968,6 +968,15 @@ because two agents in one working tree is not a throughput trade, it is
 corruption — and **env and infra repositories never run optimistic**, because
 their landings ARE deployments.
 
+**The ladder is also the compliance boundary.** SOC 2's change-management
+controls concern changes reaching production; it says nothing about
+non-production environments. So the human-facing controls — approval
+requirements, review sampling — bind at the env-prod promotion and only
+there. Main and staging are autonomous end to end, including the repair
+swarm: below the production boundary the factory owes the auditor nothing
+but the evidence trail it produces anyway. This keeps the audited surface
+small and the throughput surface unencumbered, which is the whole trade.
+
 ### Enforcement on GitHub
 
 github.com has **no server-side pre-receive hooks** — those are Enterprise

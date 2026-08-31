@@ -71,7 +71,9 @@ Sizes are relative (S/M/L), not calendar estimates.
 Phases 1 and 2 are independent of each other and can run in parallel. After
 Phase 3, phases 4, 5, and 6 are mutually independent, with one seam: Phase 5's
 campaign-preemption exit can only be asserted once Phase 4's campaign ingress
-exists. Everything converges on 7.
+exists. Everything converges on 7. Phases 9–12 (added after the Phase 0–6
+merge): 9 builds on the deploy and control planes, 10 on the queue, 11 on
+both, 12 on knowledge — 10 and 12 are independent of 9 and of each other.
 
 ---
 
@@ -294,6 +296,10 @@ of a red production. See ARCHITECTURE "Landing lanes".
 - A lower environment (env-staging) between main and env-prod.
 - The promotion route: a standing predicate — green checks plus soak in the
   environment below — producing a gated deploy ChangeSet upward.
+- Compliance scoping: SOC 2's human-facing controls attach at the PRODUCTION
+  boundary only — approval requirements and review sampling bind to the
+  env-prod promotion, and everything below it (main, staging, the repair
+  swarm) is fully autonomous with no human in any loop.
 
 **Exit**
 
