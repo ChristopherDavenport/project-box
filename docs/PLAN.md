@@ -639,6 +639,21 @@ described the factory's own materialization model. cmd/boxd -agent runs
 real agents on the daemon; the gated live test (BOX_ACP_LIVE) never runs in
 CI — it spends a real session.
 
-Phases 7 and 8 remain blocked on external resources — accounts, billing,
-the auditor. Next code-shaped work: box.yaml multi-Box config for boxd, and
-the live continuity experiment Phase 12 was sized to enable.
+The daemon has its interface (2026-08-31): internal/api serves one
+HTTP+JSON surface — status, exceptions, items, provenance, activity, an SSE
+event stream, POST /v1/ingress as the delegation verb, stop/resume — over a
+unix socket locally (filesystem permissions as auth) and the SAME API over
+TCP for cloud, where a bearer token is required (an open TCP control plane
+refuses to start; the token check is the one seam OIDC replaces at Phase
+7). The API writes intent and never executes: the pump remains the only
+path to work, so network callers get identical stop/budget/fencing
+semantics. Routes are server configuration — a caller names a route, never
+defines one. internal/api.Client is the typed Go client; cmd/box -daemon
+uses it for status/submit/item/provenance/stop/resume. Live-smoked: a
+running boxd drove an ingress to a landed commit purely over its socket,
+and the smoke caught a real forge bug (relative mirror roots resolved from
+the mirror's cwd — NewMirror now demands absolute).
+
+Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
+box.yaml multi-Box config for boxd, review sampling/sign-off endpoints when
+a remote control room needs them, and OIDC at the auth seam.

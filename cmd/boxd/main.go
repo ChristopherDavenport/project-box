@@ -11,9 +11,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -21,10 +23,12 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/agent/acp"
+	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
+	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/pump"
@@ -59,6 +63,8 @@ func run() error {
 	seatName := flag.String("seat", "mason", "seat identity for the agent's continuity")
 	checkCmd := flag.String("check", "go test ./...", "gate/check command")
 	otlp := flag.String("otlp", "", "collector endpoint (host:port); empty = telemetry off")
+	listen := flag.String("listen", "unix:boxd.sock", "API listener: unix:/path or tcp:host:port")
+	token := flag.String("token", "", "bearer token for the API (required for tcp)")
 	flag.Parse()
 
 	t := tenant.ID(*tn)
@@ -128,7 +134,32 @@ func run() error {
 		}},
 	}
 
-	slog.Info("boxd up", "tenant", t, "box", *box, "lane", *lane, "every", *every)
+	routes := map[string]ingress.Route{
+		"issues": {Name: "issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue,
+			Box: *box, Requester: *runner},
+	}
+	apiSrv := &api.Server{
+		Store: s, Tenant: t, Routes: routes,
+		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: *runner},
+		Queue:  q, Token: *token, Box: *box, Runner: *runner, Started: time.Now(),
+	}
+	ln, err := api.Listen(*listen, *token)
+	if err != nil {
+		return err
+	}
+	httpSrv := &http.Server{Handler: apiSrv.Handler()}
+	go func() {
+		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("api server", "err", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		shctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		httpSrv.Shutdown(shctx)
+	}()
+	slog.Info("boxd up", "tenant", t, "box", *box, "lane", *lane, "every", *every, "api", *listen)
 	d := &pump.Daemon{Every: *every, Pump: p,
 		Errs: func(task string, err error) { slog.Error("task failed", "task", task, "err", err) },
 	}

@@ -48,6 +48,15 @@ func NewMirror(root string, tn tenant.ID, leaser forge.Leaser) (*Mirror, error) 
 	if err := tn.Validate(); err != nil {
 		return nil, err
 	}
+	// The root must be absolute: mirror-relative git commands (the lander's
+	// fetch-from-workspace) resolve paths from the MIRROR's directory, so a
+	// relative root points somewhere that exists only by coincidence. Found
+	// by the first live daemon smoke, hidden by every unit test's absolute
+	// TempDir.
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return nil, err
+	}
 	return &Mirror{
 		root: root, tenant: tn, leaser: leaser,
 		repos: map[string]forge.Repo{}, leased: map[string]forge.Lease{},
