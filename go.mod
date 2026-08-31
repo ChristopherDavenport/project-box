@@ -1,6 +1,6 @@
 module github.com/ChristopherDavenport/project-box
 
-go 1.25.0
+go 1.25.13
 
 require (
 	cloud.google.com/go/spanner v1.95.0
