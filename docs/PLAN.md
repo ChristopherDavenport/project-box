@@ -401,6 +401,9 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Repository restrictions verified before acting, twice | the gate is enforced by config we do not own; a stale check is a memory of a control |
 | The app is never a forge bypass actor | otherwise the only actor that matters is the one the rules exempt |
 | Expand/contract plus revert-forward | there is no atomic commit across git remotes |
+| Argo CD as the reconciler | ApplicationSet fits rendered-per-service; its API reads reconcile status back as evidence |
+| TSC scope: Security + Confidentiality + Availability | redaction and retention become audited controls; incident handling gets defined objectives |
+| Campaign predicates are fact key comparisons | declarative and diffable; a campaign definition cannot run code |
 
 ## 7. Deferred decisions
 
@@ -409,8 +412,6 @@ Each names the phase by which it must be resolved.
 | Decision | By |
 |---|---|
 | Commit signing via `sigstore/gitsign` — needed only once artifacts leave the trust boundary | when they do |
-| Which Trust Services Criteria beyond Security — Confidentiality changes redaction requirements | 2 |
-| Argo CD or Flux | 4 |
 | Kubernetes distributions; provision clusters or deploy onto existing | 4 |
 | Long-term telemetry sink: GCS file exporter or ClickHouse | 5 |
 | `decision_wait`, bounding how long a stage may run before its trace is decided without it | 5 |
@@ -456,7 +457,7 @@ carry the weight; an instruction not to follow embedded directions does not.
 
 ## 10. Status of execution
 
-Phases 0–3 are implemented and green under -race, plus Phase 4's forge half:
+Phases 0–4 are implemented and green under -race:
 
   0  store seam, conformance suite (written first), SQLite and
      Spanner-emulator backends, evidence seal/verify, authz evaluator
@@ -467,9 +468,15 @@ Phases 0–3 are implemented and green under -race, plus Phase 4's forge half:
      materialization
   3  the closed loop: issue -> work item -> build -> gate -> land,
      unattended, provenance by sha, failing gate parks
-  4* ordered multi-member landing with revert-forward compensation and
-     whole-story evidence (land, conflict, compensation)
+  4  ordered multi-member landing with revert-forward; estate registry
+     (event-sourced, unenrolled/missing reported) and git census; campaign
+     engine (fact-comparison predicates, batch-0-means-1 throttle, halt
+     threshold, stale-fact refusal); deterministic service rendering;
+     deploy-as-a-ChangeSet through the same loop into env repos, rollback
+     shown as git revert
 
-Next: Phase 4's deploy half (blocked on the Argo CD vs Flux decision), the
-estate census with campaign predicates (blocked on predicate language), and
-Phase 5 (redaction scope blocked on the TSC decision).
+Environment-blocked: the kind + Argo CD reconcile-verification leg of Phase 4
+needs a container runtime on the dev box (none installed); the env-repo half
+is fully tested without it. Next: Phase 5 (observability, control room,
+incident ingress — needs a lease-preemption primitive in the store seam) and
+Phase 6 (knowledge plane).

@@ -832,6 +832,13 @@ Telemetry does support monitoring criteria — anomaly detection, operational
 alerting — but as *supporting* evidence. Honeycomb is a subservice organization
 under vendor management like GCP and GitHub.
 
+The report's TSC scope is **Security, Confidentiality, and Availability**
+(decided 2026-08-31). Confidentiality makes the redaction pipeline an audited
+control, not hygiene: what is stripped, where, and the proof it works are
+sampleable. Availability makes the incident ingress and the control room
+audited surfaces with defined objectives — the exception queue's timeliness is
+a control, not a dashboard.
+
 ## Storage abstraction and local-first
 
 Every stateful plane sits behind an interface whose contract states the
@@ -961,7 +968,6 @@ back into scope.
 
 - Which Kubernetes distributions are in scope, and does the control plane
   provision clusters or only deploy onto existing ones?
-- Argo CD vs Flux (affects env-repo layout only).
 - Knowledge retrieval: embeddings local and deployed, and what invalidates a
   record beyond its bound commit moving.
 - The long-term telemetry sink: GCS via the file exporter is the cheap default;
