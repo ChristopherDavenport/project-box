@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
@@ -90,10 +91,17 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	}
 
 	rt := &Runtime{Command: b.Command, Dir: ws.Dir, Env: b.Env}
+	started := time.Now()
 	res, err := rt.Run(ctx, bundle, prompt(bundle, task, contextDir))
+	elapsed := time.Since(started)
 	if err != nil {
 		return "", err
 	}
+	// The run's shape on the record: what it cost and how it ended, for the
+	// capacity plane and for experiments that compare runs.
+	b.record(ctx, ws.Run, "agent-result", bundle.Ref,
+		fmt.Sprintf(`{"stop":%q,"tool_calls":%d,"denied":%d,"escalated":%v,"wall_ms":%d}`,
+			res.StopReason, len(res.ToolCalls), len(res.Denied), res.Escalated != "", elapsed.Milliseconds()))
 	if reason := escalation(res); reason != "" {
 		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason}
 	}
