@@ -44,6 +44,9 @@ type Ingress struct {
 	Box    string
 	// Title is what a human reads in the control room.
 	Title string
+	// Note carries the delivery's payload as the ingress's own words — the
+	// task text intake hands the work item.
+	Note string `json:"note,omitempty"`
 	// Requester is the authenticated subject whose authority this work
 	// inherits. Routed work copies it from the route; the external system
 	// that fired the route is identified by the route and its delivery,

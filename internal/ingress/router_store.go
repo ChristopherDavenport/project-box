@@ -66,7 +66,7 @@ func (s *StoreRouter) Open(ctx context.Context, r Route, d Delivery) (Ingress, b
 		return ing, false, err
 	}
 
-	ing := Ingress{ID: id, Kind: r.Opens, Tenant: s.Tenant, Box: r.Box, Requester: r.Requester}
+	ing := Ingress{ID: id, Kind: r.Opens, Tenant: s.Tenant, Box: r.Box, Requester: r.Requester, Note: string(d.Payload)}
 	body, err := json.Marshal(ing)
 	if err != nil {
 		return Ingress{}, false, err
@@ -80,6 +80,15 @@ func (s *StoreRouter) Open(ctx context.Context, r Route, d Delivery) (Ingress, b
 		return Ingress{}, false, err
 	}
 	ing.Opened = rec.At
+	// The ingress index is what standing operation folds: intake creates an
+	// item for every ingress that lacks one, which is the whole "step up
+	// ingress and step back" contract.
+	if _, err := s.Store.Log().Append(ctx, evidence.Record{
+		Tenant: s.Tenant, Scope: "index/ingress", Kind: "indexed", Subject: id,
+		Actor: r.Requester, Body: body,
+	}); err != nil {
+		return Ingress{}, false, err
+	}
 	return ing, true, nil
 }
 

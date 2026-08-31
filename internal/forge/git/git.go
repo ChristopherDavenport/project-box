@@ -315,3 +315,10 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	}
 	return out.String(), nil
 }
+
+// RevParse resolves a rev in a working tree — the one plumbing call builders
+// outside this package need, exported so they need not shell git themselves.
+func RevParse(ctx context.Context, dir, rev string) (string, error) {
+	out, err := run(ctx, dir, "rev-parse", rev)
+	return strings.TrimSpace(out), err
+}
