@@ -13,6 +13,7 @@ package provision
 import (
 	"context"
 
+	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -23,8 +24,8 @@ type RepoSpec struct {
 	Name   string
 	// Role is the forge role the repository will be enrolled as, which
 	// determines what integration it needs and what authority agents can hold
-	// over it.
-	Role string
+	// over it; see [forge.Role] for the closed set.
+	Role forge.Role
 	Box  string
 	// Template names the scaffold to render into the new repository.
 	Template string
@@ -36,7 +37,7 @@ type RepoSpec struct {
 // **Protection precedes use.** A repository that exists without required checks
 // is a repository an agent can land in ungated, and creation-then-protection
 // leaves exactly that window open. So a new repository starts closed — no agent
-// holds a lease on it — and is opened only once [Integrator.Verify] confirms
+// holds a lease on it — and is opened only once [Provisioner.Verify] confirms
 // every item here. A partially integrated repository is not a fast start, it is
 // a hole with a scaffold in it.
 type Integration struct {
@@ -50,7 +51,10 @@ type Integration struct {
 	// Enrolled reports whether the estate records it against a Box and role.
 	Enrolled bool
 	// Rendered reports whether derived artifacts — chart values, environment
-	// entries — have landed for a service.
+	// entries — have landed for a service. For a role with nothing to render
+	// — a library, a contract — Integrate sets it true: vacuous completion,
+	// recorded rather than special-cased, so [Integration.Complete] stays
+	// role-agnostic.
 	Rendered bool
 }
 

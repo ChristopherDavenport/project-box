@@ -45,17 +45,17 @@ type Verdict struct {
 	// Reason is the human-readable justification, shown to the agent or
 	// operator who has to act on a rejection.
 	Reason   string
-	Evidence []Evidence
+	Evidence []EvidenceRef
 }
 
-// Evidence is a durable pointer to what a gate actually observed: a test log, a
-// build record, a review, a policy decision. Verdicts are published to the
-// relay and outlive the run that produced them, so evidence is referenced by
-// location rather than inlined.
-type Evidence struct {
+// EvidenceRef is a durable pointer to what a gate actually observed: a test
+// log, a build record, a review, a policy decision. Verdicts are recorded in
+// the evidence log and outlive the run that produced them, so evidence is
+// referenced by location rather than inlined.
+type EvidenceRef struct {
 	Kind string
 	// URI locates the evidence. Anything a later reader can dereference: a log
-	// object, an artifact digest, a relay event id.
+	// object, an artifact digest, an evidence record id.
 	URI    string
 	Digest string
 }

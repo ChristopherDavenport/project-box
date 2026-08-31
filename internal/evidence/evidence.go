@@ -1,15 +1,14 @@
 // Package evidence records what the factory did, in a form an external auditor
 // can test.
 //
-// Two properties matter, and they come from different places. The hash chain
+// Three properties matter, and they come from different places. The hash chain
 // carries ordering and no-omission: each record names the previous record in
 // its scope, so removing or reordering anything breaks the chain. Attribution
 // comes from authentication — the control plane records the subject it
 // authenticated, in the same way CloudTrail-style logging does. Retention
-// comes from
-// exporting to storage that is immutable by the people being audited — a
-// retention-locked bucket — because a database the operator can write is not
-// evidence of anything to someone auditing that operator.
+// comes from exporting to storage that is immutable by the people being
+// audited — a retention-locked bucket — because a database the operator can
+// write is not evidence of anything to someone auditing that operator.
 //
 // Git already provides ordering for content changes, since every commit names
 // its parent. This package covers what git does not record:
@@ -85,20 +84,21 @@ type Log interface {
 	Append(ctx context.Context, r Record) (Record, error)
 	// Head returns the newest record in a scope, or a zero Record if the scope
 	// is empty.
-	Head(ctx context.Context, scope string) (Record, error)
+	Head(ctx context.Context, t tenant.ID, scope string) (Record, error)
 	// Since walks a scope forward from a sequence number. The error half of
 	// each pair reports a failure mid-walk, which a bare sequence could only
 	// swallow.
-	Since(ctx context.Context, scope string, seq uint64) iter.Seq2[Record, error]
+	Since(ctx context.Context, t tenant.ID, scope string, seq uint64) iter.Seq2[Record, error]
 	// BySubject returns every record about one subject, across scopes. This is
 	// the auditor's query: given a sampled commit, produce everything that
-	// happened to it.
-	BySubject(ctx context.Context, subject string) iter.Seq2[Record, error]
+	// happened to it. The query spans scopes but never tenants: chains are
+	// per-tenant, and so is an audit.
+	BySubject(ctx context.Context, t tenant.ID, subject string) iter.Seq2[Record, error]
 	// Verify walks a scope and reports the first record whose chain link does
 	// not hold. A nil error means the scope is intact as
 	// stored — it says nothing about records never written, which is what
 	// export and anchoring are for.
-	Verify(ctx context.Context, scope string) error
+	Verify(ctx context.Context, t tenant.ID, scope string) error
 }
 
 // Sink writes a sealed range of a chain somewhere it cannot later be altered.
@@ -107,11 +107,16 @@ type Log interface {
 // Deployed it is a retention-locked bucket, and the lock is the control an
 // auditor actually tests.
 type Sink interface {
-	Export(ctx context.Context, scope string, from, to uint64) (Export, error)
+	Export(ctx context.Context, t tenant.ID, scope string, from, to uint64) (Export, error)
 }
 
-// Export records one write to a Sink, so the export itself is auditable.
+// Export records one write to a Sink, so the export itself is auditable. An
+// export is verifiable offline: each record's ID is recomputable from its
+// canonical serialization and every Prev link is checkable from the bytes
+// alone, with no service running — Head ties the object to the chain, and
+// Digest ties it to itself.
 type Export struct {
+	Tenant   tenant.ID
 	Scope    string
 	From, To uint64
 	// Head is the ID of the last record covered, tying the export to the chain

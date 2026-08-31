@@ -65,8 +65,8 @@ func (l Lease) Expired(now time.Time) bool {
 	return !now.Before(l.Expires)
 }
 
-// Request asks for a lease over a ref.
-type Request struct {
+// LeaseRequest asks for a lease over a ref.
+type LeaseRequest struct {
 	Tenant tenant.ID
 	Repo   string
 	Ref    string
@@ -80,16 +80,16 @@ type Request struct {
 // Leaser allocates exclusive claims over (repo, ref) pairs across every runner
 // in the control plane.
 //
-// Implementations must be linearizable. An eventually consistent store — a relay
-// serving replica-routed reads, say — can hand two runners a stale "unheld" for
-// the same ref and admit both, which is two agents in one working tree or two
-// landings racing one branch. Because the relay is itself backed by Spanner, a
-// grant and the event recording it commit together rather than the second being
-// a publish that can fail.
+// Implementations must be linearizable. An eventually consistent store — one
+// serving replica-routed reads, say — can hand two runners a stale "unheld"
+// for the same ref and admit both, which is two agents in one working tree or
+// two landings racing one branch. Because the evidence log shares the
+// allocation store, a grant and the record of it commit together rather than
+// the second being a publish that can fail.
 type Leaser interface {
 	// Acquire claims a ref, returning [ErrHeld] if a live claim already
 	// exists. It does not block.
-	Acquire(ctx context.Context, req Request) (Lease, error)
+	Acquire(ctx context.Context, req LeaseRequest) (Lease, error)
 	// Renew extends a claim, returning a lease bearing the same token.
 	// It reports [ErrExpired] or [ErrStaleToken] if the claim did not
 	// survive, in which case the caller must abandon its workspace rather

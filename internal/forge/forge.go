@@ -40,7 +40,9 @@ const (
 	RoleEnv Role = "env"
 )
 
-// Repo is a repository enrolled in a Box.
+// Repo is the forge layer's working view of a repository enrolled in a Box —
+// a projection of the estate's enrollment record, derived from it rather than
+// edited independently.
 type Repo struct {
 	// Name identifies the repo within its Box and is stable across remote
 	// moves.
@@ -76,7 +78,7 @@ type ChangeSet struct {
 	Box string
 	Run string
 	// Intent is the human-readable reason this change exists, carried through
-	// to the commit messages and to the relay.
+	// to the commit messages and the evidence records.
 	Intent  string
 	Members []Member
 	Created time.Time

@@ -14,6 +14,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -43,9 +44,11 @@ type Ingress struct {
 	Box    string
 	// Title is what a human reads in the control room.
 	Title string
-	// Requester is the authenticated subject that opened this, or a reference
-	// to the external system that did. Autonomous origination still names one:
-	// work with no principal behind it has no authorization to inherit.
+	// Requester is the authenticated subject whose authority this work
+	// inherits. Routed work copies it from the route; the external system
+	// that fired the route is identified by the route and its delivery,
+	// never by this field. Autonomous origination still names one: work with
+	// no principal behind it has no authorization to inherit.
 	Requester string
 	Opened    time.Time
 	// Closed is zero while open.
@@ -76,10 +79,14 @@ func (i Ingress) MayBreakGlass() bool {
 type Campaign struct {
 	// Predicate is what "done" means, evaluated per repository.
 	Predicate string
-	// Scope narrows which repositories are considered, by role or by name.
-	// Empty means every repository in the Box.
-	Scope []string
-	Rollout
+	// Roles narrows which repositories are considered by forge role, Repos
+	// by canonical name. Both empty means every repository in the Box. Two
+	// fields rather than one mixed list: a repository named "service" must
+	// never be confusable with the role.
+	Roles []forge.Role
+	Repos []string
+	// Rollout throttles this campaign's landings.
+	Rollout Rollout
 }
 
 // Rollout throttles a campaign.
@@ -98,6 +105,7 @@ type Rollout struct {
 }
 
 // Severity orders incidents against each other and against ordinary work.
+// Higher is more urgent.
 type Severity int
 
 // Incident carries what closing one requires.
@@ -138,14 +146,19 @@ const (
 // closes the loop — the same sweep that tells us what exists tells us what is
 // wrong with it.
 type Route struct {
-	Name string
-	Kind RouteKind
+	// Tenant owns this route, and every ingress it opens. Routes are
+	// configured per tenant; work cannot be opened into a tenant the route
+	// does not name.
+	Tenant tenant.ID
+	Name   string
+	Kind   RouteKind
 	// Opens is which ingress kind this route produces. A route opens exactly
 	// one kind: a scanner that sometimes files an issue and sometimes raises an
 	// incident is two routes, so that each has its own policy.
 	Opens Kind
-	// Box scopes what this route may open work against. Empty means the
-	// tenant's default Box; it never means every Box.
+	// Box scopes what this route may open work against. It is required: a
+	// route is a standing authority grant, and one that could open work in
+	// every Box would have unbounded blast radius.
 	Box string
 	// Requester is the principal whose authority routed work inherits. A route
 	// with no principal behind it can open nothing — autonomous work still has
@@ -174,10 +187,11 @@ type Delivery struct {
 
 // Router turns deliveries into ingresses.
 type Router interface {
-	// Admit records a delivery and returns the ingress it opened. A repeated
-	// key returns the existing ingress with opened false, rather than an
-	// error: redelivery is normal traffic, not a fault.
-	Admit(ctx context.Context, r Route, d Delivery) (ing Ingress, opened bool, err error)
+	// Open records a delivery and returns the ingress it opened, which
+	// inherits the route's Tenant, Box, and Requester. A repeated key returns
+	// the existing ingress with opened false, rather than an error:
+	// redelivery is normal traffic, not a fault.
+	Open(ctx context.Context, r Route, d Delivery) (ing Ingress, opened bool, err error)
 }
 
 // Evaluator answers which repositories a campaign still has work in.

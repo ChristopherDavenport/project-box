@@ -141,13 +141,16 @@ anyone notices.
 
 ### The estate is itself a source of work
 
-This is the loop that ties the three planes together:
+This is the loop that ties the planes together:
 
 ```
 census ──▶ predicate ──▶ campaign ──▶ ChangeSet ──▶ env repo ──▶ cluster
    ▲                                                               │
    └───────────────────────── observe ─────────────────────────────┘
 ```
+
+The ChangeSet → env repo hop elides the standard loop: campaign ChangeSets pass
+gates and land like any other work — nothing here bypasses review.
 
 The same sweep that tells us what exists tells us what is wrong with it. A
 repository missing required checks, running an unsupported runtime, or enrolled
@@ -281,9 +284,9 @@ security-relevant predicate.
 ### Webhooks, and where delivery keys come from
 
 The app is also how events arrive: one endpoint, HMAC-signed, verified before
-anything is admitted. Delivery identifiers are the natural idempotency key for
-ingress routes — the requirement stated earlier has an obvious source rather
-than a synthesized one.
+any delivery opens anything. Delivery identifiers are the natural idempotency
+key for ingress routes — the idempotency requirement stated under Ingress
+below has an obvious source rather than a synthesized one.
 
 ### The forge audit log is not sufficient
 
@@ -322,7 +325,7 @@ webhooks, schedules, alerts, scanners, census findings, reconciler drift.
 
 A route opens exactly one kind. A scanner that sometimes files an issue and
 sometimes raises an incident is two routes, so each carries its own policy
-rather than deciding severity implicitly at admission.
+rather than deciding severity implicitly at intake.
 
 Every route names a **requester** whose authority routed work inherits. A route
 with no principal behind it can open nothing, which is the same rule autonomous
@@ -382,11 +385,11 @@ the same mechanism, which is a reasonable sign it was cut in the right place.
 | Estate | what repositories exist, and what is true of them | local clones | forge API |
 | Ingress | campaigns, issues, incidents, and the routes that open them | SQLite | Spanner |
 | Queue | work items, claims, retries, dependencies | SQLite | Spanner |
-| Agent | composed definitions, skills, context sets | git + resolver | same |
+| Agent | composed definitions, skills, context sets | layers (inline / files / git) + resolver | same |
 | Forge | mirrors, leases, workspaces, ChangeSets, landing | filesystem + local remote | GitHub |
-| Knowledge | scoped, signed, invalidatable records | SQLite + local vectors | Spanner |
-| Deploy | env repos reconciled into clusters | kind + Flux/Argo | GKE + Argo CD |
-| Evidence | hash-chained signed log, WORM export | SQLite + directory | Spanner + locked GCS |
+| Knowledge | scoped, attributed, invalidatable records | SQLite + local vectors | Spanner |
+| Deploy | env repos reconciled into clusters | kind + Flux/Argo | GKE + Flux/Argo |
+| Evidence | hash-chained log, WORM export | SQLite + directory | Spanner + locked GCS |
 | Telemetry | traces and metrics for operating the factory | collector → files | collector → Honeycomb + GCS |
 | Control room | exception queue, review sampling, stop | one binary | same binary |
 
@@ -443,6 +446,10 @@ duties rests on:
 | approve | | | | | ✓ | ✓ |
 | open ingress | | | | | | ✓ |
 | break-glass | | | | | | ✓ |
+
+One action exists in the vocabulary but appears in no row: `admin:tenant`,
+tenant administration. It is deferred with tenant lifecycle, and no role above
+holds it.
 
 A builder cannot land its own work. That is the whole segregation-of-duties
 argument, expressed as an absent grant rather than as a convention.
@@ -667,18 +674,21 @@ is why the pinning and the tool policy carry the real weight.
 
 ### What each layer provides
 
-- **Signature** — integrity and attribution, from the format alone.
+- **Attribution** — from authentication, not signatures: every record carries
+  the authenticated actor, the on-behalf-of principal, and the grant that
+  permitted the action.
 - **Hash chain** — ordering and no-omission. Each record carries the previous
   record's hash, per scope; removing or reordering anything breaks the chain.
-- **Git** — already a hash chain. Every commit names its parent, and NIP-GS
-  signs it. Content changes are tamper-evident as a side effect of using git
-  properly, which covers a large share of the audit surface for free.
+- **Git** — already a hash chain. Every commit names its parent, so content
+  changes are tamper-evident as a side effect of using git properly, which
+  covers a large share of the audit surface for free.
 - **WORM export** — periodic export to a retention-locked GCS bucket. Immutable
   *by the people being audited*, which is the property auditors test. Spanner is
   not WORM; the export is what satisfies retention.
 - **Checkpoint anchoring** — optional. Publish chain heads somewhere external at
   interval granularity. A supplementary integrity control, never the evidence
-  store.
+  store. Not built; it is the accepted-risk answer if the dishonest-operator
+  gap ever needs closing (see Identity and permissioning).
 
 ### The provenance chain
 
@@ -686,17 +696,18 @@ is why the pinning and the tool policy carry the real weight.
 ingress → work item → run → changeset → commit sha → image digest → env commit → revision
 ```
 
-Recorded link by link, each link signed. Type II auditors sample: they pick
-changes and demand complete evidence for each, so evidence must be queryable
-**by commit sha**. That is the query the design is built around.
+Recorded link by link, each link an authenticated record in the evidence
+chain. Type II auditors sample: they pick changes and demand complete evidence
+for each, so evidence must be queryable **by commit sha**. That is the query
+the design is built around.
 
 ### Control mapping
 
 | Concern | How it is satisfied | Evidence produced |
 |---|---|---|
-| Change management (CC8.1) | gates are versioned code; verdicts signed; branch protection with required checks and no admin bypass | signed verdicts, ruleset config history |
-| Segregation of duties | builder, gate, and deploy authority are distinct keypairs; agents cannot mint attestations | per-key attribution on every action |
-| Logical access (CC6) | GitOps — the control plane holds no cluster credentials; only the reconciler writes to clusters, from signed env-repo commits | env-repo history, installation scope |
+| Change management (CC8.1) | gates are versioned code; verdicts recorded as authenticated evidence records; branch protection with required checks and no admin bypass | verdict records, ruleset config history |
+| Segregation of duties | builder, gate, and deploy authority are distinct grants — a builder holds no land grant; agents cannot approve their own work | per-principal attribution (actor and on-behalf-of) on every evidence record |
+| Logical access (CC6) | GitOps — the control plane holds no cluster credentials; only the reconciler writes to clusters, from gated env-repo commits | env-repo history, installation scope |
 | Monitoring (CC4.1) | documented periodic human review of a sample of automated changes | sign-off records from the control room |
 | Incident handling (CC7) | exception queue is a first-class workflow with escalation and resolution | parked/resolved transitions |
 | Break-glass | defined, logged, reviewed procedure | every invocation, with reviewer sign-off |
@@ -706,10 +717,11 @@ changes and demand complete evidence for each, so evidence must be queryable
 control and auditors always probe it. "There is no emergency path" is not
 credible. A defined path, every invocation logged, each reviewed, is.
 
-**Automated approval is a stronger control than human review**, which is
-famously rubber-stamped — but only if the gate cannot be bypassed and that fact
-is itself evidenced. GitHub rulesets are readable via API, so gate configuration
-is sampleable over time like any other artifact.
+**The gate's unbypassability is itself evidenced.** The argument that an
+unbypassable automated gate beats rubber-stamped review is made under Human
+approval; it holds only if bypass is impossible and provably so. GitHub
+rulesets are readable via API, so gate configuration is sampleable over time
+like any other artifact.
 
 ## Telemetry
 
@@ -740,7 +752,7 @@ own retention window, well short of an observation period.
 
 **Correlate them instead.** Each evidence record carries the trace id, and each
 span carries the evidence record id. An auditor's question resolves against the
-signed chain; an operator's question resolves against the trace; the join is an
+evidence chain; an operator's question resolves against the trace; the join is an
 id rather than a shared pipeline.
 
 ### Structural, not optional
@@ -831,6 +843,9 @@ Every stateful plane sits behind an interface whose contract states the
 | fencing token | counter column | sequence or counter | commit timestamp |
 | chain append | row + prev hash | row + prev hash | row + prev hash |
 
+*(The Postgres column illustrates that the contract binds more than two
+backends; only SQLite and Spanner are built and run in CI.)*
+
 **The fencing token is a contract, not a timestamp.** It must increase strictly
 across every grant over the same ref and never be reused. Spanner satisfies this
 elegantly — grants over one ref serialize on that row, and commit timestamps
@@ -841,7 +856,7 @@ leak which one it is talking to.
 
 **A store conformance suite is the mechanism that keeps them honest** — one
 suite asserting the linearizability and fencing properties, run against every
-backend in CI. This mirrors upstream Buzz's own approach, where an independent
+backend in CI. This mirrors Buzz's own approach, where an independent
 replay checker judges whether a running implementation emitted a trace the
 formal model accepts.
 
@@ -889,8 +904,8 @@ turns any prompt injection or confused agent into a production change.
 4. **Knowledge integrity** — agents acting on knowledge other agents wrote, with
    no human in the loop, is the highest-leverage attack available: poison what
    the factory believes rather than what it runs. Every knowledge record is
-   signed and scoped, and stale records are invalidated by binding them to the
-   commit or path they describe.
+   scoped and attributed — only a curator grant can write one — and stale
+   records are invalidated by binding them to the commit or path they describe.
 
 ## Landing across repositories
 
@@ -919,8 +934,9 @@ back into scope.
 ## Status
 
 - `internal/forge` — leases with fencing, mirrors, workspaces, ChangeSet, Gate,
-  Lander. Machine primitives; unaffected by the move away from Buzz.
-- `internal/evidence` — hash-chained signed records and WORM export.
+  Lander, scoped credential minting. Machine primitives; unaffected by the
+  move away from Buzz.
+- `internal/evidence` — hash-chained records and WORM export.
 - Next: the store conformance suite, then the SQLite backend, then the queue.
 - Telemetry: OTel spans emitted by the stage runner, correlated by
   `workitem.id` rather than a held-open trace; collector gateway with
@@ -932,14 +948,20 @@ back into scope.
   that keeps it a migration rather than a rewrite.
 - `internal/authz` — principals, actors, the action/resource matrix, and the
   intersection rule for delegation.
+- `internal/estate` — the census, facts with staleness, and the
+  enrolled/observed gap queries (unenrolled, missing).
+- `internal/admission` — required repository restrictions, checked fail-closed
+  before propose and before land.
+- `internal/approval` — the human gate: requirements from policy,
+  revision-bound approvals, self-approval disqualified through delegation.
+- `internal/provision` — repository creation and idempotent integration;
+  protection precedes use.
 
 ## Open
 
 - Which Kubernetes distributions are in scope, and does the control plane
   provision clusters or only deploy onto existing ones?
 - Argo CD vs Flux (affects env-repo layout only).
-- A Go NIP-GS verifier — the half project-box needs for the required status
-  check. `git-sign-nostr` exists in Rust; the spec is written.
 - Knowledge retrieval: embeddings local and deployed, and what invalidates a
   record beyond its bound commit moving.
 - The long-term telemetry sink: GCS via the file exporter is the cheap default;

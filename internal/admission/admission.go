@@ -15,6 +15,8 @@ package admission
 import (
 	"context"
 	"time"
+
+	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
 // Restriction is a property a repository's configuration must have.
@@ -65,7 +67,13 @@ type Finding struct {
 
 // Result is the outcome of checking a repository.
 type Result struct {
+	Tenant tenant.ID
+	// Repo is the repository's canonical key: host/owner/name (see
+	// estate.Enrollment.Repo).
 	Repo string
+	// Phase records which moment this check covered, so evidence of a Result
+	// shows whether a clean answer preceded the lease or the landing.
+	Phase Phase
 	// Required is what was checked, recorded so a later reader knows whether a
 	// clean result means "all good" or "we barely looked".
 	Required []Restriction
@@ -73,8 +81,10 @@ type Result struct {
 	Checked  time.Time
 }
 
-// Admitted reports whether every required restriction held.
-func (r Result) Admitted() bool { return len(r.Findings) == 0 }
+// Admitted reports whether every required restriction was checked and held.
+// An empty Required fails: a repository nothing was checked on is not an
+// admitted one, and silence must never read as approval.
+func (r Result) Admitted() bool { return len(r.Required) > 0 && len(r.Findings) == 0 }
 
 // Fresh reports whether the result is recent enough to act on.
 //
@@ -93,7 +103,7 @@ func (r Result) Fresh(now time.Time, max time.Duration) bool {
 // of check usually fails in practice.
 type Controller interface {
 	// Check evaluates a repository against the required restrictions.
-	Check(ctx context.Context, repo string, required []Restriction) (Result, error)
+	Check(ctx context.Context, t tenant.ID, repo string, phase Phase, required []Restriction) (Result, error)
 }
 
 // Phase is when admission is being evaluated.

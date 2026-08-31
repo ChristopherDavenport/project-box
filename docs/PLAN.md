@@ -69,7 +69,9 @@ Sizes are relative (S/M/L), not calendar estimates.
 ```
 
 Phases 1 and 2 are independent of each other and can run in parallel. After
-Phase 3, phases 4, 5, and 6 are mutually independent. Everything converges on 7.
+Phase 3, phases 4, 5, and 6 are mutually independent, with one seam: Phase 5's
+campaign-preemption exit can only be asserted once Phase 4's campaign ingress
+exists. Everything converges on 7.
 
 ---
 
@@ -179,6 +181,11 @@ cloud bill exist.
 - **Campaign ingress** — predicate evaluation over the Box's repositories, plus
   the rollout throttle. Campaigns need multi-repo to exist and need the throttle
   before they are safe to run.
+- The estate census and facts: discovery, fact collection with staleness,
+  unenrolled/missing reporting — the input campaign predicates read.
+- The managed-services renderer: service declarations render chart values,
+  environment entries, and required checks, so a template edit becomes
+  campaign work.
 - Env repos, GitOps reconciliation, promotion between environments.
 - Flux or Argo against a local kind cluster.
 
@@ -196,7 +203,7 @@ cloud bill exist.
 
 ---
 
-## Phase 5 — Observability and control room · M · depends on 3
+## Phase 5 — Observability and control room · M · depends on 3 (campaign preemption additionally on 4)
 
 - OTel spans from the stage runner, correlated by `workitem.id`.
 - Collector gateway: `memory_limiter → redaction → tail_sampling → batch`.
@@ -219,7 +226,7 @@ cloud bill exist.
 
 ## Phase 6 — Knowledge plane · M · depends on 3
 
-- Signed, scoped records with provenance.
+- Scoped, attributed records with provenance.
 - Retrieval scoped to the requesting work item's target.
 - Invalidation by binding records to the commit or path they describe.
 - A curation job promoting run output into records.
@@ -234,14 +241,18 @@ cloud bill exist.
 
 ## Phase 7 — Deployed footing · L · depends on 4, 5, 6
 
-The first phase that costs money. Nothing here changes behaviour — it changes
-where the same behaviour runs.
+The first phase that costs money. The loop's behaviour does not change — it
+changes where it runs — and the forge-app surface, built against fakes until
+now, meets the real forge here.
 
 - Real Spanner behind the conformance suite that has been green on the emulator
   since Phase 0. What is new is not the code but what the emulator cannot
   reproduce: real TrueTime, genuine contention, query plans, split behaviour.
 - Schema and index design verified against real hotspot behaviour.
 - GitHub as content plane; the gate runs as a required status check.
+- The forge app in earnest: webhook ingress with verified deliveries, admission
+  checks before propose and land, repository provisioning and integration,
+  per-run credential minting — all exercised against real GitHub.
 - Honeycomb, plus the long-term telemetry sink.
 - WORM export to a retention-locked bucket.
 - GKE and the reconciler.
@@ -288,7 +299,7 @@ internal/
   store/              backend seam + conformance suite
     sqlite/           local backend
     spanner/          emulator and production, one code path
-  evidence/   ✓       hash-chained signed records, WORM export
+  evidence/   ✓       hash-chained records, WORM export
   forge/      ✓       mirrors, leases, workspaces, ChangeSets, gates, landing,
                       scoped credential minting
   provision/  ✓       repository creation and integration
@@ -296,8 +307,10 @@ internal/
   agent/      ✓       layered definitions, resolver, bundles
     acp/              runtime and stream interception
   ingress/    ✓       campaigns, issues, incidents, routes, delivery dedup
-  queue/              work items, claims, retries, exception queue
-  knowledge/          scoped signed records, retrieval, invalidation
+  queue/              work items, claims, retries, dependencies
+  knowledge/          scoped attributed records, retrieval, invalidation
+  render/             service declarations → derived artifacts (charts, env
+                      entries, checks)
   deploy/             env repos, promotion
   telemetry/          OTel wiring
   control/            exception queue, review sampling, stop
@@ -324,7 +337,7 @@ claim is decoration.
 | Tool policy | a denied tool is denied at the stream, by a test that tries it | 2 |
 | Partial landing | forced mid-landing failure reverts forward, history intact | 4 |
 | Throttle safety | unset rollout means one, never unlimited | 4 |
-| Delivery idempotency | a redelivered webhook or flapping alert opens one ingress, not many | 3 |
+| Delivery idempotency | a redelivered webhook or re-filed issue opens one ingress; a flapping alert opens one incident, not many | 3, 5 |
 | Estate completeness | an unenrolled repository is reported rather than skipped | 4 |
 | Fact staleness | a predicate refuses to act on a fact older than its bound | 4 |
 | Render determinism | the same declaration and template render identically | 4 |
@@ -384,7 +397,7 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Ingress kinds closed, routes open | many sources of work, still only three things they can open |
 | A GitHub App, not a PAT or OAuth app | an app is its own principal; a user token collapses actor and on-behalf-of |
 | Credentials minted per run from the context set | the forge token becomes a projection of the authz decision, not a second grant |
-| Repository creation gated on human approval | it is the one permission that cannot be repository-scoped |
+| Repository creation defaults to requiring human approval | it is the one permission that cannot be repository-scoped |
 | Repository restrictions verified before acting, twice | the gate is enforced by config we do not own; a stale check is a memory of a control |
 | The app is never a forge bypass actor | otherwise the only actor that matters is the one the rules exempt |
 | Expand/contract plus revert-forward | there is no atomic commit across git remotes |
@@ -419,8 +432,8 @@ self-hosted forge back into scope.
 **Injection through context and knowledge.** Agents acting on material other
 agents wrote, unsupervised, is the highest-leverage attack available — poison
 what the factory believes rather than what it runs. Pinned read-only context,
-signed knowledge records, and tool policy at the ACP stream carry the weight;
-an instruction not to follow embedded directions does not.
+scoped and attributed knowledge records, and tool policy at the ACP stream
+carry the weight; an instruction not to follow embedded directions does not.
 
 **Scope.** This is a large program. Phase 3 is a genuine go/no-go, and phases
 5–8 are severable if the loop proves out but the compliance goal moves.
@@ -436,9 +449,9 @@ an instruction not to follow embedded directions does not.
 | **Lease** | an exclusive, fenced claim on one ref of one repository |
 | **Fencing token** | strictly increasing per ref, never reused; rejects a stalled or preempted runner's write |
 | **ChangeSet** | branches across one or more repositories, gated and landed together |
-| **Gate** | evaluates a ChangeSet whole and returns a signed verdict |
+| **Gate** | evaluates a ChangeSet whole and returns a verdict — pass, fail, or pending — recorded in the evidence chain |
 | **Bundle** / **agentref** | a resolved, content-addressed agent definition, and its digest |
-| **Evidence record** | a signed, hash-chained fact, keyed by subject for audit sampling |
+| **Evidence record** | an authenticated, hash-chained fact, keyed by subject for audit sampling |
 | **Break-glass** | an emergency bypass, permitted only under an open incident |
 
 ## 10. Next commit

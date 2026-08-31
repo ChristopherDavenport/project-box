@@ -14,6 +14,7 @@ import (
 	"iter"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -41,10 +42,14 @@ type Repo struct {
 // been deleted at the host; both are conditions worth surfacing, and neither is
 // expressible if the two are the same record.
 type Enrollment struct {
+	// Repo is the repository's canonical key: host/owner/name, built from
+	// the observed [Repo]'s address fields. Every package that names a
+	// repository by a single string uses this form; a forge.Repo.Name, by
+	// contrast, is local to its Box.
 	Repo string
 	Box  string
-	// Role is the forge role — service, library, contract, chart, infra, env.
-	Role string
+	// Role is the forge role; see [forge.Role] for the closed set.
+	Role forge.Role
 }
 
 // Fact is something the census learned about a repository.
@@ -54,6 +59,8 @@ type Enrollment struct {
 // namespaced by collector so two collectors cannot disagree silently about what
 // a key means.
 type Fact struct {
+	// Repo is the repository's canonical key (host/owner/name); see
+	// [Enrollment.Repo].
 	Repo string
 	// Key is dotted and namespaced, e.g. "go.version",
 	// "branch-protection.required-checks", "container.base-image".
@@ -90,8 +97,8 @@ type Census interface {
 type Registry interface {
 	// Repos returns every observed repository for a tenant.
 	Repos(ctx context.Context, t tenant.ID) iter.Seq2[Repo, error]
-	// Facts returns what is known about one repository.
-	Facts(ctx context.Context, repo string) ([]Fact, error)
+	// Facts returns what is known about one repository within a tenant.
+	Facts(ctx context.Context, t tenant.ID, repo string) ([]Fact, error)
 	// Unenrolled returns observed repositories belonging to no Box.
 	//
 	// This is the method that keeps the estate honest. Work is only ever

@@ -70,15 +70,16 @@ type Actor struct {
 type Action string
 
 const (
-	ActionRead         Action = "read"    // materialize context
-	ActionPropose      Action = "propose" // take a lease, produce a ChangeSet
-	ActionGate         Action = "gate"    // issue a verdict
-	ActionLand         Action = "land"    // move an integration branch
-	ActionDeploy       Action = "deploy"  // write an environment repository
-	ActionWriteKnowled Action = "write:knowledge"
-	ActionOpenIngress  Action = "open:ingress"
-	ActionBreakGlass   Action = "break-glass"
-	ActionAdminTenant  Action = "admin:tenant"
+	ActionRead           Action = "read"    // materialize context
+	ActionPropose        Action = "propose" // take a lease, produce a ChangeSet
+	ActionGate           Action = "gate"    // issue a verdict
+	ActionLand           Action = "land"    // move an integration branch
+	ActionDeploy         Action = "deploy"  // write an environment repository
+	ActionWriteKnowledge Action = "write:knowledge"
+	ActionApprove        Action = "approve" // attest a human approval; see internal/approval
+	ActionOpenIngress    Action = "open:ingress"
+	ActionBreakGlass     Action = "break-glass"
+	ActionAdminTenant    Action = "admin:tenant"
 )
 
 // Resource is what an action is taken against. Zero fields are wildcards, so a
@@ -89,6 +90,8 @@ type Resource struct {
 	Repo   string
 	// RepoRole scopes a grant by what a repository is rather than by name, so
 	// authority over services does not imply authority over environments.
+	// Values are the forge role vocabulary; see forge.Role for the closed
+	// set.
 	RepoRole string
 	Env      string
 }

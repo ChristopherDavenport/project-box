@@ -2,10 +2,10 @@ package forge
 
 import "context"
 
-// Mirror is a bare clone of a member repository kept on one runner and shared
+// A Mirror maintains bare clones of member repositories on one runner, shared
 // by every run on that runner. Sharing the mirror keeps fetches cheap; sharing
-// a *working tree* is what this package exists to prevent, so each run gets its
-// own [Workspace] materialized from the mirror.
+// a *working tree* is what this package exists to prevent, so each run gets
+// its own [Workspace] materialized from the mirror.
 type Mirror interface {
 	// Fetch updates the mirror from the repo's remote.
 	Fetch(ctx context.Context, repo Repo) error

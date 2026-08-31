@@ -20,7 +20,7 @@ type Lander interface {
 }
 
 // Landing records what actually happened, including the half-completed cases.
-// It is the tail of the provenance chain and is published to the relay whether
+// It is the tail of the provenance chain and is recorded as evidence whether
 // the landing succeeded or not.
 type Landing struct {
 	ChangeSet string

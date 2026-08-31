@@ -7,7 +7,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
-// TokenScope is the authority a minted credential should carry.
+// CredentialScope is the authority a minted credential should carry.
 //
 // A forge app installation holds far more than any single run needs, and its
 // credentials can be minted **narrower than the installation** — a subset of
@@ -18,7 +18,7 @@ import (
 // So this is derived from the agent's context set and its role, never chosen by
 // the caller. An agent that may read three repositories gets a credential that
 // can reach three repositories.
-type TokenScope struct {
+type CredentialScope struct {
 	Tenant tenant.ID
 	// Repos limits the credential to these repositories. Empty is not
 	// "everything" — it is refused. A credential with no stated repositories is
@@ -59,5 +59,5 @@ type Minter interface {
 	// Mint issues a credential for exactly the stated scope. It refuses a
 	// scope naming no repositories rather than defaulting to the installation's
 	// full reach.
-	Mint(ctx context.Context, s TokenScope) (Credential, error)
+	Mint(ctx context.Context, s CredentialScope) (Credential, error)
 }

@@ -48,11 +48,13 @@ type ID string
 // ErrInvalid reports an ID that cannot be used as a key prefix.
 var ErrInvalid = errors.New("tenant: invalid id")
 
-var idPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{1,62}$`)
+var idPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
-// Valid reports whether the ID is well-formed. IDs are constrained because they
-// are key prefixes and path components, not display names — a tenant's human
-// name lives elsewhere and may change without moving a single row.
+// Valid reports whether the ID is well-formed: 1–63 characters of lowercase
+// letters, digits, and hyphens, starting and ending alphanumeric — the
+// DNS-label shape, chosen because IDs are key prefixes and path components,
+// not display names. A tenant's human name lives elsewhere and may change
+// without moving a single row.
 func (t ID) Valid() bool { return idPattern.MatchString(string(t)) }
 
 // Validate returns [ErrInvalid] if the ID is not well-formed.

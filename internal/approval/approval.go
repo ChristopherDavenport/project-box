@@ -18,6 +18,8 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/authz"
+	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
 // Source is where an approval came from.
@@ -33,6 +35,10 @@ const (
 
 // Approval is one person's decision.
 type Approval struct {
+	// Tenant owns this approval. An approval is an authority artifact and
+	// grants root in a tenant; one tenant's approval must be indistinguishable
+	// from absent in any other.
+	Tenant tenant.ID
 	// Subject is the authenticated approver.
 	Subject string
 	// Commit is the exact revision approved.
@@ -41,7 +47,9 @@ type Approval struct {
 	// the head it saw, and an agent that pushes again afterwards holds an
 	// approval for something nobody looked at — which is why GitHub has
 	// dismiss-stale-reviews and why this field is checked rather than assumed.
-	Commit string
+	Commit forge.Commit
+	// Repo is the repository's canonical key: host/owner/name (see
+	// estate.Enrollment.Repo).
 	Repo   string
 	Source Source
 	// ExternalID is the review id when Source is SourceGitHub, so the approval
@@ -72,7 +80,7 @@ type Checker interface {
 	// Satisfied reports whether the approvals cover head, and why not when
 	// they do not. The reason is recorded on the verdict, so a reviewer who
 	// approved the wrong revision learns that rather than being ignored.
-	Satisfied(ctx context.Context, req Requirement, head string, requester authz.Actor, approvals []Approval) (bool, string, error)
+	Satisfied(ctx context.Context, req Requirement, head forge.Commit, requester authz.Actor, approvals []Approval) (satisfied bool, reason string, err error)
 }
 
 // SelfApproved reports whether an approval was given by the principal who
@@ -94,7 +102,7 @@ func SelfApproved(a Approval, requester authz.Actor) bool {
 // Approvals of a superseded revision are not counted at all rather than counted
 // and warned about: a stale approval is indistinguishable from no approval for
 // the content actually being landed.
-func Distinct(approvals []Approval, head string, requester authz.Actor) int {
+func Distinct(approvals []Approval, head forge.Commit, requester authz.Actor) int {
 	seen := make(map[string]struct{}, len(approvals))
 	for _, a := range approvals {
 		if a.Commit != head || SelfApproved(a, requester) {
