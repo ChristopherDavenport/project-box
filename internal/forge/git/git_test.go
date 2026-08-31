@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	agentpkg "github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
@@ -364,3 +365,68 @@ func run2(ctx context.Context, dir string, args ...string) (string, error) {
 }
 
 var _ = evidence.Record{} // keep the import honest if assertions change
+
+func TestMaterializeContextIsPinnedNarrowAndReadOnly(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+
+	// Grow the remote past the pin: the materialized tree must not see it.
+	clone := filepath.Join(t.TempDir(), "growth")
+	mustGit(t, "", "clone", f.remote, clone)
+	os.WriteFile(filepath.Join(clone, "later.txt"), []byte("after the pin\n"), 0o644)
+	os.MkdirAll(filepath.Join(clone, "secrets"), 0o755)
+	os.WriteFile(filepath.Join(clone, "secrets", "key.txt"), []byte("out of scope\n"), 0o644)
+	mustGit(t, clone, "add", ".")
+	mustGit(t, clone, "commit", "-m", "growth")
+	mustGit(t, clone, "push", "origin", "HEAD:refs/heads/main")
+	if err := m.Fetch(ctx, f.repo); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	// The materializer makes the tree read-only; hand it back writable so
+	// TempDir cleanup can remove it. Cleanups run LIFO, so this precedes it.
+	t.Cleanup(func() {
+		filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+			if err == nil {
+				os.Chmod(path, 0o755)
+			}
+			return nil
+		})
+	})
+	err := m.MaterializeContext(ctx, dir, agentContext(f.base, "README.md"))
+	if err != nil {
+		t.Fatalf("materialize: %v", err)
+	}
+	// Pinned: only what existed at base. Narrow: only the granted path.
+	if _, err := os.Stat(filepath.Join(dir, "app", "README.md")); err != nil {
+		t.Fatal("granted path missing")
+	}
+	for _, absent := range []string{"later.txt", "secrets"} {
+		if _, err := os.Stat(filepath.Join(dir, "app", absent)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s leaked past the pin or the path grant", absent)
+		}
+	}
+	// No .git: nothing to fetch more history with.
+	if _, err := os.Stat(filepath.Join(dir, "app", ".git")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("materialized context carries a .git")
+	}
+	// Read-only.
+	if err := os.WriteFile(filepath.Join(dir, "app", "README.md"), []byte("scribble"), 0o644); err == nil {
+		t.Fatal("context file was writable")
+	}
+	// Unpinned grants are refused outright.
+	if err := m.MaterializeContext(ctx, t.TempDir(), agentContext("", "")); err == nil {
+		t.Fatal("an unpinned context repo must be refused")
+	}
+}
+
+func agentContext(commit forge.Commit, path string) (set agentpkg.ContextSet) {
+	cr := agentpkg.ContextRepo{Repo: "app", Commit: string(commit)}
+	if path != "" {
+		cr.Paths = []string{path}
+	}
+	set.Repos = []agentpkg.ContextRepo{cr}
+	return set
+}
