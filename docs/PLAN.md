@@ -482,9 +482,15 @@ an open incident (a campaign cannot, a closed incident cannot), break-glass
 gated on an open incident with every invocation recorded (unrecordable means
 unauthorized), and postmortem-before-close.
 
-Environment-blocked: the kind + Argo CD reconcile-verification leg of Phase 4
-needs a container runtime on the dev box (none installed); the env-repo half
-is fully tested without it.
+The kind + Argo CD reconcile-verification leg is DONE (2026-08-31, after
+Docker Desktop WSL integration was enabled): hack/reconcile-e2e.sh stands up
+kind + in-cluster Gitea + Argo CD, hack/deployloop lands an env commit
+through the REAL internal/loop + internal/deploy code, Argo syncs at exactly
+that revision into a 2/2 workload, and rollback is a git revert that Argo
+prunes. Two Argo guardrails found live and encoded in the script: automated
+prune refuses to empty an Application without allowEmpty, and the source
+path must keep existing (git drops empty directories — env repos carry
+services/.gitkeep).
 
 Remaining in Phase 5: OTel spans from the stage runner, the collector
 gateway (redaction ahead of tail sampling, planted-credential test), the
