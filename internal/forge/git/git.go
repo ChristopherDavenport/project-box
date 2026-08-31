@@ -164,60 +164,114 @@ func NewLander(m *Mirror, log evidence.Log) *Lander {
 	return &Lander{m: m, log: log}
 }
 
-// Land pushes a gated ChangeSet. Phase 1 scope: a single member; the ordered
-// multi-member walk with revert-forward compensation is Phase 4, and landing
-// two members without compensation would be worse than refusing.
+// Land pushes a gated ChangeSet: every member fenced up front, then landed in
+// the ChangeSet's dependency order, with revert-forward compensation when a
+// later member fails.
 //
-// Two checks guard the push, in order:
+// Three moments matter:
 //
-//  1. The fencing check. The member's lease is presented to the leaser by
-//     renewal — this is the moment a stalled or preempted runner's superseded
-//     token is refused, and it is authoritative because the leaser, not the
-//     runner, judges it.
-//  2. The content check. The push presents the expected old value
-//     (--force-with-lease=<branch>:<base>), so a concurrent mover of the
-//     branch is detected rather than overwritten. Git's per-ref CAS is the
-//     last line of defence under the lease, not a substitute for it.
+//  1. The fencing check, for every member BEFORE anything moves. A stalled or
+//     preempted runner's superseded token is refused here, authoritatively,
+//     because the leaser judges it — and checking all members first means a
+//     dead lease on member three cannot strand members one and two landed.
+//  2. The content check, per push. Each push presents the expected old value
+//     (--force-with-lease=<branch>:<base>), so a branch moved out-of-band is
+//     detected, never overwritten. Git's per-ref CAS is the last line of
+//     defence under the lease, not a substitute for it.
+//  3. Compensation. There is no atomic commit across remotes, so a failure at
+//     member k reverts the k-1 that landed — forward, as new commits whose
+//     trees restore the base, in reverse landing order. Published history is
+//     never rewritten. A compensation push that itself fails is an incident:
+//     the Landing says exactly what is half-done.
 //
-// Both the refusal and the landing are evidence, keyed by the head commit —
-// the provenance chain's first requirement is that the audit query works.
+// Every placement, refusal, and compensation is evidence keyed by commit.
 func (l *Lander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing, error) {
-	if len(cs.Members) != 1 {
-		return forge.Landing{}, fmt.Errorf("git: phase 1 lander lands exactly one member, got %d", len(cs.Members))
+	if len(cs.Members) == 0 {
+		return forge.Landing{}, errors.New("git: empty ChangeSet")
 	}
-	mem := cs.Members[0]
-	repo, ok := l.m.Repo(mem.Repo)
-	if !ok {
-		return forge.Landing{}, fmt.Errorf("git: repo %q not established by Fetch", mem.Repo)
+	for _, mem := range cs.Members {
+		if _, ok := l.m.Repo(mem.Repo); !ok {
+			return forge.Landing{}, fmt.Errorf("git: repo %q not established by Fetch", mem.Repo)
+		}
+	}
+	// Fence every member before anything moves.
+	for _, mem := range cs.Members {
+		if _, err := l.m.leaser.Renew(ctx, mem.Lease, time.Until(mem.Lease.Expires)); err != nil {
+			l.record(ctx, cs, "land-refused", string(mem.Head), fmt.Sprintf(`{"repo":%q,"reason":%q}`, mem.Repo, err.Error()))
+			return forge.Landing{Failed: mem.Repo}, fmt.Errorf("git: fencing refused land of %s: %w", mem.Repo, err)
+		}
 	}
 
-	if _, err := l.m.leaser.Renew(ctx, mem.Lease, time.Until(mem.Lease.Expires)); err != nil {
-		l.record(ctx, cs, "land-refused", string(mem.Head), fmt.Sprintf(`{"reason":%q}`, err.Error()))
-		return forge.Landing{Failed: mem.Repo}, fmt.Errorf("git: fencing refused land of %s: %w", mem.Repo, err)
+	landing := forge.Landing{ChangeSet: cs.ID}
+	for _, mem := range cs.Members {
+		if err := l.push(ctx, cs, mem); err != nil {
+			landing.Failed = mem.Repo
+			l.record(ctx, cs, "land-conflict", string(mem.Head), fmt.Sprintf(`{"repo":%q,"branch":%q,"expected_base":%q}`, mem.Repo, mem.Branch, mem.Base))
+			comp, cerr := l.compensate(ctx, cs, landing.Landed)
+			landing.Compensated = comp
+			landing.Finished = time.Now().UTC()
+			if cerr != nil {
+				return landing, fmt.Errorf("git: land of %s failed (%v) AND compensation failed: %w — landing is half-done", mem.Repo, err, cerr)
+			}
+			return landing, fmt.Errorf("git: land of %s refused, %d earlier member(s) reverted forward: %w", mem.Repo, len(comp), err)
+		}
+		now := time.Now().UTC()
+		landing.Landed = append(landing.Landed, forge.Placement{
+			Repo: mem.Repo, Branch: mem.Branch, Was: mem.Base, Now: mem.Head, At: now,
+		})
+		l.record(ctx, cs, "land", string(mem.Head),
+			fmt.Sprintf(`{"repo":%q,"branch":%q,"was":%q,"now":%q}`, mem.Repo, mem.Branch, mem.Base, mem.Head))
 	}
+	landing.Finished = time.Now().UTC()
+	return landing, nil
+}
 
+// push collects the member's head from its workspace and lands it with the
+// expected old value presented.
+func (l *Lander) push(ctx context.Context, cs forge.ChangeSet, mem forge.Member) error {
+	repo, _ := l.m.Repo(mem.Repo)
 	mirror := l.m.mirrorDir(mem.Repo)
 	ws := l.m.workDir(cs.Run, mem.Repo)
 	if _, err := run(ctx, mirror, "fetch", ws, string(mem.Head)); err != nil {
-		return forge.Landing{}, fmt.Errorf("git: collect %s from workspace: %w", mem.Head, err)
+		return fmt.Errorf("collect %s from workspace: %w", mem.Head, err)
 	}
 	lease := fmt.Sprintf("--force-with-lease=refs/heads/%s:%s", mem.Branch, mem.Base)
 	if _, err := run(ctx, mirror, "push", repo.Remote, string(mem.Head)+":refs/heads/"+mem.Branch, lease); err != nil {
-		l.record(ctx, cs, "land-conflict", string(mem.Head), fmt.Sprintf(`{"branch":%q,"expected_base":%q}`, mem.Branch, mem.Base))
-		return forge.Landing{Failed: mem.Repo}, fmt.Errorf("git: push refused — branch %s moved from expected %s: %w", mem.Branch, mem.Base, err)
+		return fmt.Errorf("push refused — branch %s moved from expected %s: %w", mem.Branch, mem.Base, err)
 	}
+	return nil
+}
 
-	now := time.Now().UTC()
-	landing := forge.Landing{
-		ChangeSet: cs.ID,
-		Landed: []forge.Placement{{
-			Repo: mem.Repo, Branch: mem.Branch, Was: mem.Base, Now: mem.Head, At: now,
-		}},
-		Finished: now,
+// compensate reverts landed placements forward, in reverse landing order: for
+// each, a new commit whose tree is the placement's Was, with the placement's
+// Now as parent. History is never rewritten — the change and its undoing both
+// stay on the branch, which is what an audit of the failure needs.
+func (l *Lander) compensate(ctx context.Context, cs forge.ChangeSet, landed []forge.Placement) ([]forge.Placement, error) {
+	var out []forge.Placement
+	for i := len(landed) - 1; i >= 0; i-- {
+		p := landed[i]
+		repo, _ := l.m.Repo(p.Repo)
+		mirror := l.m.mirrorDir(p.Repo)
+		tree, err := run(ctx, mirror, "rev-parse", string(p.Was)+"^{tree}")
+		if err != nil {
+			return out, err
+		}
+		msg := fmt.Sprintf("Revert forward: undo %s of changeset %s\n\nMember %s failed to land; every member must be independently safe,\nso the landed members are restored to their pre-changeset trees.", p.Now, cs.ID, "later")
+		rev, err := run(ctx, mirror, "commit-tree", strings.TrimSpace(tree), "-p", string(p.Now), "-m", msg)
+		if err != nil {
+			return out, err
+		}
+		revC := forge.Commit(strings.TrimSpace(rev))
+		leaseArg := fmt.Sprintf("--force-with-lease=refs/heads/%s:%s", p.Branch, p.Now)
+		if _, err := run(ctx, mirror, "push", repo.Remote, string(revC)+":refs/heads/"+p.Branch, leaseArg); err != nil {
+			return out, fmt.Errorf("compensation push for %s: %w", p.Repo, err)
+		}
+		now := time.Now().UTC()
+		out = append(out, forge.Placement{Repo: p.Repo, Branch: p.Branch, Was: p.Now, Now: revC, At: now})
+		l.record(ctx, cs, "land-compensated", string(revC),
+			fmt.Sprintf(`{"repo":%q,"branch":%q,"undoes":%q}`, p.Repo, p.Branch, p.Now))
 	}
-	l.record(ctx, cs, "land", string(mem.Head),
-		fmt.Sprintf(`{"repo":%q,"branch":%q,"was":%q,"now":%q}`, mem.Repo, mem.Branch, mem.Base, mem.Head))
-	return landing, nil
+	return out, nil
 }
 
 func (l *Lander) record(ctx context.Context, cs forge.ChangeSet, kind, subject, body string) {

@@ -454,10 +454,22 @@ carry the weight; an instruction not to follow embedded directions does not.
 | **Evidence record** | an authenticated, hash-chained fact, keyed by subject for audit sampling |
 | **Break-glass** | an emergency bypass, permitted only under an open incident |
 
-## 10. Next commit
+## 10. Status of execution
 
-Phase 0 landed: the conformance suite (written before either backend), the
-SQLite and Spanner-emulator backends both green under it, the evidence
-seal/verify helpers, and the authz evaluator with its escalation tests. Next is
-Phase 1 — `forge`: mirrors, workspaces, and the `Leaser`-backed landing path,
-raced under `-race` per the testing table.
+Phases 0–3 are implemented and green under -race, plus Phase 4's forge half:
+
+  0  store seam, conformance suite (written first), SQLite and
+     Spanner-emulator backends, evidence seal/verify, authz evaluator
+  1  git mirrors, leased workspaces, fenced landing (superseded token
+     refused AT land), expected-old-value push
+  2  deterministic composer (agentref), ACP runtime with tool policy
+     enforced at the stream (denied-tool kill), pinned read-only context
+     materialization
+  3  the closed loop: issue -> work item -> build -> gate -> land,
+     unattended, provenance by sha, failing gate parks
+  4* ordered multi-member landing with revert-forward compensation and
+     whole-story evidence (land, conflict, compensation)
+
+Next: Phase 4's deploy half (blocked on the Argo CD vs Flux decision), the
+estate census with campaign predicates (blocked on predicate language), and
+Phase 5 (redaction scope blocked on the TSC decision).
