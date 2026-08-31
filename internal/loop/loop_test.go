@@ -301,3 +301,52 @@ func TestAuthorizationIsEnforcedInThePipeline(t *testing.T) {
 		t.Fatalf("evidence missing the authority story: grant=%v obo=%v", sawGrant, sawOBO)
 	}
 }
+
+// TestEscalationAndHandoff: refusal parks with the agent's reason attributed
+// to the SEAT, and closure runs on settle — the handoff hook fires for
+// parked work too, because "here is where I got stuck" is what the next
+// occupant needs most.
+func TestEscalationAndHandoff(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	var handedOff []queue.WorkItem
+	e.loop.Builder = escalatingBuilder{}
+	e.loop.Handoff = func(_ context.Context, item queue.WorkItem) error {
+		handedOff = append(handedOff, item)
+		return nil
+	}
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-esc"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-esc", "do the impossible"))
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateParked || !strings.Contains(item.Note, "escalated by mason") {
+		t.Fatalf("escalation did not park with attribution: %+v", item)
+	}
+	saw := false
+	for r, err := range e.store.Log().Since(ctx, tn, "workitem/wi-esc", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "escalated" && r.Actor == "mason" && strings.Contains(string(r.Body), "credentials") {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Fatal("escalation evidence missing or unattributed")
+	}
+	if len(handedOff) != 1 || handedOff[0].State != queue.StateParked {
+		t.Fatalf("handoff did not run on settle: %+v", handedOff)
+	}
+}
+
+type escalatingBuilder struct{}
+
+func (escalatingBuilder) Build(context.Context, forge.Workspace, string) (forge.Commit, error) {
+	return "", &Escalation{Seat: "mason", Reason: "task needs credentials I do not hold"}
+}

@@ -598,6 +598,33 @@ soaked green in staging and cleared the human gate, and the end-to-end test
 proves prod never carries the red commit. Fencing was shown identical in
 both lanes by preempting a lease mid-run between build and land.
 
+Phases 10–12 are COMPLETE (2026-08-31, same day as 9):
+
+  10  the work graph — DependsOn enforced at Claim; a pending dependency
+      blocks, a dead one cascades with the cause named leaf by leaf;
+      topological order emerges from claims under three racing runners.
+  11  standing operation — intake turns ingresses into items idempotently,
+      the pump drains within a recorded capacity budget (work waits, spend
+      and refusals are evidence), the daemon ticks it all, and cmd/boxd is
+      the heartbeat as a binary. TestStepUpIngressAndStepBack is the
+      contract by name: three issues opened, nothing else touched, three
+      commits landed.
+  12  seat continuity — seats hand off on EVERY settle (a parked run's
+      "where I got stuck" most of all), wake with their notes as a resolved
+      inline layer (continuity is part of the agentref: different memories
+      are different agents on the record), and hold a private knowledge
+      scope. Refusal is a recorded act: the _box/escalate ACP verb is always
+      acknowledged, and the loop parks with the reason attributed to the
+      seat. The measured continuity-vs-control comparison awaits live
+      agents; the plumbing it needs is what shipped here.
+
+An audit pass also closed three gaps between claimed and asserted:
+OnBehalfOf threading, authz enforcement IN the pipeline (delegation now
+intersects at propose and land, not only in the evaluator's tests), and the
+template-change-to-campaign-work composition.
+
 Phases 7 and 8 remain blocked on external resources — accounts, billing,
-the auditor. Phases 10–12 are code-shaped and unblocked: the work graph,
-standing operation with the capacity plane, and seat continuity.
+the auditor. The next code-shaped work beyond them: the ACP builder adapter
+(wiring acp.Runtime into loop.Builder with seats and escalation end to
+end), box.yaml multi-Box config for boxd, and the live continuity
+experiment Phase 12 was sized to enable.

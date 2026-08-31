@@ -10,6 +10,7 @@ package loop
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -53,6 +54,11 @@ type Loop struct {
 	// so delegation intersects HERE, in the pipeline, not only in the
 	// evaluator's own tests. Nil skips enforcement (bootstrap, tests).
 	Authz authz.Authorizer
+	// Handoff, when set, runs on every settle so closure is part of
+	// finishing: the seat writes its notes before the lights go out, whether
+	// the run landed or parked. Errors are recorded, never fatal — losing a
+	// note must not unsettle settled work.
+	Handoff func(ctx context.Context, item queue.WorkItem) error
 	// Red opens repair work when an optimistic landing goes red, returning
 	// the repair ingress id. Nil means the red is recorded but nobody is
 	// summoned — configure it; see OpenRepair.
@@ -131,7 +137,21 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 		}
 		return err
 	}); serr != nil {
-		return q.Park(ctx, item, claim, "build: "+serr.Error())
+		var esc *Escalation
+		if errors.As(serr, &esc) {
+			// The agent's own act, attributed to the agent: actor is the
+			// seat, not the runner that hosted it.
+			l.Store.Log().Append(ctx, evidence.Record{
+				Tenant: item.Tenant, Scope: "workitem/" + item.ID,
+				Kind: "escalated", Subject: item.ID, Actor: esc.Seat,
+				OnBehalfOf: item.Requester, Body: []byte(esc.Reason),
+				Trace: telemetry.TraceID(ctx),
+			})
+			item, _ = q.Park(ctx, item, claim, esc.Error())
+			return l.settle(ctx, item), nil
+		}
+		item, _ = q.Park(ctx, item, claim, "build: "+serr.Error())
+		return l.settle(ctx, item), nil
 	}
 
 	cs := forge.ChangeSet{
@@ -194,7 +214,8 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	// the same, because the promotion predicate reads only the check chain.
 	checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
 		checks.Status{Green: true, Lane: string(forge.LaneGated)}, l.Runner)
-	return q.Done(ctx, item, claim, head)
+	item, err = q.Done(ctx, item, claim, head)
+	return l.settle(ctx, item), err
 }
 
 // runOptimistic is land-then-check: the lease and the expected-old-value
@@ -264,12 +285,14 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		// The item landed its change; main being red is now the repair
 		// item's problem. Done, with the note carrying the trail.
 		item.Note = note
-		return q.Done(ctx, item, claim, head)
+		item, derr := q.Done(ctx, item, claim, head)
+		return l.settle(ctx, item), derr
 	}
 
 	checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
 		checks.Status{Green: true, Lane: string(forge.LaneOptimistic)}, l.Runner)
-	return q.Done(ctx, item, claim, head)
+	item, derr := q.Done(ctx, item, claim, head)
+	return l.settle(ctx, item), derr
 }
 
 // authorize checks one action when enforcement is on, records the decision
@@ -301,6 +324,30 @@ func (l *Loop) authorize(ctx context.Context, item queue.WorkItem, action authz.
 		return "not authorized: " + d.Reason, nil
 	}
 	return "", nil
+}
+
+// Escalation is an agent declining or escalating instead of grinding: a
+// recorded act with the agent's own reason, not a contrived failure. The
+// loop parks the item with the reason attributed to the seat.
+type Escalation struct {
+	Seat   string
+	Reason string
+}
+
+// Error satisfies error.
+func (e *Escalation) Error() string {
+	return fmt.Sprintf("escalated by %s: %s", e.Seat, e.Reason)
+}
+
+// settle runs the handoff hook after any settle; closure over termination.
+func (l *Loop) settle(ctx context.Context, item queue.WorkItem) queue.WorkItem {
+	if l.Handoff == nil {
+		return item
+	}
+	if err := l.Handoff(ctx, item); err != nil {
+		l.record(ctx, item, "handoff-failed", item.ID, err.Error())
+	}
+	return item
 }
 
 func (l *Loop) record(ctx context.Context, item queue.WorkItem, kind, subject, body string) {

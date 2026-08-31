@@ -54,6 +54,11 @@ type Result struct {
 	ToolCalls []string
 	// Denied lists permission requests refused by policy.
 	Denied []string
+	// Escalated carries the agent's own reason for declining or escalating
+	// the task — the "_box/escalate" extension verb. Refusal is a recorded
+	// act, not a contrived failure: the caller parks the work with this
+	// reason attributed to the agent.
+	Escalated string
 }
 
 // Run executes one prompt under a bundle's policy and blocks until the agent
@@ -105,6 +110,20 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			}
 			mu.Unlock()
 			return permissionResponse(p, ok, reason), nil
+		case "_box/escalate":
+			// Extension verb: the agent declines or escalates on its own
+			// judgement. Acknowledged always — a refusal channel that could
+			// itself be refused would teach agents not to use it.
+			var p struct {
+				Reason string `json:"reason"`
+			}
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			res.Escalated = p.Reason
+			mu.Unlock()
+			return map[string]any{"acknowledged": true}, nil
 		case "session/update":
 			var u sessionUpdate
 			if err := json.Unmarshal(params, &u); err != nil {

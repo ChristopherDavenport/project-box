@@ -90,6 +90,23 @@ func TestRogueToolKillsSession(t *testing.T) {
 	}
 }
 
+// TestEscalationIsARecordedAct: the agent declines with its reason; the
+// runtime carries it out, acknowledged — never refused.
+func TestEscalationIsARecordedAct(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "escalate").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Escalated != "task needs credentials I do not hold" {
+		t.Fatalf("escalation lost: %+v", res)
+	}
+	if contains(res.Text, "refused") {
+		t.Fatal("the refusal channel was refused")
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && (haystack == needle || len(haystack) > 0 && (func() bool {
 		for i := 0; i+len(needle) <= len(haystack); i++ {
@@ -190,6 +207,13 @@ func fakeAgent(scenario string) {
 					"sessionId": sessionID,
 					"update":    map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": report}},
 				})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "escalate":
+				resp := f.request("_box/escalate", map[string]any{"reason": "task needs credentials I do not hold"})
+				if res, ok := resp["result"].(map[string]any); !ok || res["acknowledged"] != true {
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "escalation refused?!"}}})
+				}
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "rogue":
 				// Execute a denied tool without asking, then dawdle: only the
