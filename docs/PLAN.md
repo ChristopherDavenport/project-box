@@ -283,6 +283,69 @@ observation window opens.
 
 ---
 
+## Phase 9 — Environment ladder and the optimistic lane · L · depends on 4, 5
+
+The posture decided 2026-08-31: not afraid of a red integration branch, afraid
+of a red production. See ARCHITECTURE "Landing lanes".
+
+- Lane policy per repository role and branch; env and infra never optimistic.
+- Optimistic path in the loop: land after build, run gates as post-land
+  checks, open repair work through a red-main route on failure.
+- A lower environment (env-staging) between main and env-prod.
+- The promotion route: a standing predicate — green checks plus soak in the
+  environment below — producing a gated deploy ChangeSet upward.
+
+**Exit**
+
+- A deliberately breaking commit lands on an optimistic main, its post-land
+  check fails, and a repair item opens — nothing rolls back by itself.
+- Promotion to staging refuses the red commit and takes the next green one.
+- env-prod provably never receives a commit that has not soaked green in
+  staging.
+- Fencing behaves identically in both lanes: a superseded token is refused at
+  an optimistic land exactly as at a gated one.
+
+## Phase 10 — The work graph · M · depends on 3
+
+Dependency edges between work items — the Beads-shaped gap.
+
+- Edges on WorkItem; an item is claimable only when its dependencies settled.
+- A failed or parked dependency parks its dependents with the cause named.
+
+**Exit:** a diamond dependency executes in topological order under concurrent
+runners; parking the root parks the leaves, each naming the root as why.
+
+## Phase 11 — Standing operation · L · depends on 9, 10
+
+The daemon and the capacity plane — loops, not invocations.
+
+- boxd: schedules fire routes, the census sweeps, campaigns advance, claimable
+  work is pumped to runners, without a human starting anything.
+- Capacity: token and runner budgets per tenant and per Box; work waits rather
+  than overdrawing; spend is recorded like everything else.
+- The stop button halts the daemon's claims within the same stated bound.
+
+**Exit:** an overnight unattended run processes a seeded backlog within its
+budget and leaves the evidence to prove both the work and the spend; stop
+halts new claims mid-run.
+
+## Phase 12 — Seat continuity · M · depends on 6
+
+The engineering half of model welfare, testable rather than assumed.
+
+- Seats: persistent named identities distinct from runs; a seat-scoped
+  knowledge scope only that seat's runs write.
+- Closure: the loop's settle path invokes Curate — handoff notes are part of
+  finishing, not an afterthought.
+- Wake: a seat's recent record and handoff notes injected at resolve time as
+  a generated layer, so the next run starts with continuity, not amnesia.
+- A decline/escalate verb on the ACP surface: refusal as a recorded act that
+  parks with the agent's stated reason, not a contrived failure.
+
+**Exit:** a seat's second run demonstrably receives its predecessor's
+handoff; an agent's escalation parks the item with the reason attributed to
+the agent; measured against a no-continuity control on the same tasks.
+
 ## 4. Package layout
 
 `✓` exists today.
@@ -355,6 +418,10 @@ claim is decoration.
 | Self-approval | requester cannot approve, directly or via an agent acting for them | 5 |
 | Knowledge staleness | a record bound to a changed file is flagged without marking | 6 |
 | Evidence completeness | 25 sampled changes, complete evidence, unaided | 8 |
+| Optimistic lane safety | red main opens repair work; promotion refuses unsoaked commits; fencing identical in both lanes | 9 |
+| Graph ordering | diamond dependency runs in topo order; failed root parks leaves with cause | 10 |
+| Budget refusal | work waits rather than overdrawing a tenant budget | 11 |
+| Seat continuity | second run receives predecessor's handoff; escalation parks with agent-attributed reason | 12 |
 
 ### CI gates
 
@@ -404,6 +471,9 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Argo CD as the reconciler | ApplicationSet fits rendered-per-service; its API reads reconcile status back as evidence |
 | TSC scope: Security + Confidentiality + Availability | redaction and retention become audited controls; incident handling gets defined objectives |
 | Campaign predicates are fact key comparisons | declarative and diffable; a campaign definition cannot run code |
+| Landing discipline is per-lane policy | optimistic into main where a Box chooses; env/infra and promotion always gated; fencing never optimistic |
+| A lower environment between main and prod | red main is allowed, red prod is not; promotion requires soak plus green |
+| Thunderdome adopted as a lane, not a stance | swarm-repair needs the attribution and reversibility this substrate provides |
 
 ## 7. Deferred decisions
 
@@ -454,6 +524,9 @@ carry the weight; an instruction not to follow embedded directions does not.
 | **Bundle** / **agentref** | a resolved, content-addressed agent definition, and its digest |
 | **Evidence record** | an authenticated, hash-chained fact, keyed by subject for audit sampling |
 | **Break-glass** | an emergency bypass, permitted only under an open incident |
+| **Lane** | a landing discipline (optimistic or gated), chosen per repo role and branch by Box policy |
+| **Promotion** | a gated deploy ChangeSet moving a soaked, green commit up the environment ladder |
+| **Seat** | a persistent agent identity across runs, with its own knowledge scope and handoff |
 
 ## 10. Status of execution
 
@@ -507,7 +580,9 @@ recorded selections and sign-offs (the CC4.1 mechanism), all behind cmd/box.
 Phase 6's curation job promotes a landed run's drafts into bound, attributed
 knowledge — a parked run curates nothing.
 
-Remaining: Phase 7 (deployed footing — real Spanner, the GitHub App,
-Honeycomb + the long-term sink, GKE; needs accounts and billing) and Phase 8
-(SOC 2 readiness — needs the auditor engagement). Both blocked on external
-resources rather than code.
+Phases 7 and 8 (deployed footing; SOC 2 readiness) remain blocked on
+external resources — accounts, billing, the auditor. Phases 9–12, adopted
+2026-08-31 from the Yegge review and the merge-into-main directive, are
+code-shaped and unblocked: the environment ladder with the optimistic lane,
+the work graph, standing operation with the capacity plane, and seat
+continuity.

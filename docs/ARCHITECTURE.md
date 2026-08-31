@@ -926,6 +926,48 @@ a platform. Two mechanisms together:
   A failure at member *k* is compensated by reverting forward the ones that
   landed; published history is never rewritten.
 
+### Landing lanes and the environment ladder
+
+Landing discipline is a **per-lane policy**, not one global stance (decided
+2026-08-31). The posture: we are not afraid of a red integration branch — we
+are afraid of a red production. What protects production is the environment
+ladder, so the integration branch can trade ceremony for throughput.
+
+**The optimistic lane** — service repositories' integration branches, where a
+Box's policy chooses it. A built change lands immediately after the lease and
+the expected-old-value check; the gates run **after** landing, as checks on the
+branch. A red check does not roll anything back by itself — it opens repair
+work through its own ingress route, and agents swarm it the way they diagnose
+anything else. This is the Thunderdome posture (see Prior art), made auditable
+by machinery the ceremony-free version lacks: every landing, failure, and
+repair is on the evidence chain, keyed by sha, and revert-forward is the
+repair primitive of last resort rather than a bisection queue.
+
+**The gated lane** — environment repositories, infrastructure, campaign waves,
+and anything a Box's policy names. Gates pass, then land. Unchanged.
+
+**The ladder** is what makes the optimistic lane safe: main promotes to a
+lower environment, and only soaked, green commits promote upward.
+
+```
+main (optimistic) ──green checks──▶ env-staging ──soak + green──▶ env-prod
+     red? repair work opens            reconciled live              gated lane,
+     and swarms; promotion             where breakage is            always
+     simply does not happen            allowed to surface
+```
+
+Promotion is not new machinery. It is a deploy ChangeSet into the next env
+repo — the gated lane — produced by a standing route whose predicate is "the
+candidate is green and has soaked N in the environment below." A commit that
+never goes green never promotes; nothing rolls back, it just never advances.
+Production cannot receive what staging has not survived.
+
+Two invariants survive the lanes unchanged: **fencing is never optimistic** —
+the lease and the superseded-token refusal apply identically in both lanes,
+because two agents in one working tree is not a throughput trade, it is
+corruption — and **env and infra repositories never run optimistic**, because
+their landings ARE deployments.
+
 ### Enforcement on GitHub
 
 github.com has **no server-side pre-receive hooks** — those are Enterprise
@@ -937,6 +979,55 @@ and the integration branch is what needs protecting. A stalled runner holding a
 superseded token can push to its own branch but cannot land. It is a real
 weakening of fencing, and the one argument that would pull a self-hosted forge
 back into scope.
+
+## Prior art and divergences
+
+Assessed 2026-08-31 against Yegge's "The Shape of Things to Come" (the
+Continuous Thunderdome) and "Model Welfare for Agentic Engineers". Recorded so
+the agreements are inherited deliberately and the disagreements are decisions.
+
+**Convergent by independent derivation:** role agents with standing duties
+(his Gargoyle/Scryer/Sheriff, our roles and routes); issues auto-implemented
+behind guardrails (his Wish Factory, our issue ingress through the loop);
+governance as first-class structure (his City's law and offices, our authz
+matrix, admission, break-glass-under-incident); institutional memory that is
+never falsified (his bead audit discipline — ours is stronger, being
+tamper-evident by construction rather than by norm); bespoke harnesses over
+bought ones (the layer system exists so each Box composes its own).
+
+**His sharpest prediction is our design center.** He gives human code review a
+year, "kept on life support only by SOC 2." This system is built for exactly
+that world: unbypassable machine gates plus sampled human review instead of
+per-change approval. The prediction and the plan are the same bet from two
+directions.
+
+**The Thunderdome, partially adopted.** He argues merge queues collapse at
+agent commit rates; land everything and swarm the failures. The optimistic
+lane above adopts that for integration branches — and notes what his account
+handwaves: swarm-diagnosis of a red main runs on attribution and
+reversibility, which is precisely provenance-by-sha and revert-forward. The
+Thunderdome needs this substrate to be auditable; the substrate can express
+the Thunderdome as policy. Environments and fencing stay gated, which is the
+half SOC 2 keeps.
+
+**Model welfare, the engineering half.** His seat/session distinction and
+wake-with-purpose map onto resolved bundles (role, context, task — not
+amnesia); exclusive leases are his "resources others cannot touch"; the
+evidence chain is his honesty discipline. What the plan lacked and now
+schedules (Phase 12): closure — a reflection step wiring Curate into the
+loop's settle path instead of ending runs mid-thought; per-seat continuity —
+a seat-scoped knowledge scope injected at resolve time, the thing we
+correctly rejected in Buzz's engrams for SHARED knowledge and then never
+replaced for seats; and a first-class decline/escalate verb on the ACP
+surface, so refusal is a recorded act rather than a contrived failure. His
+empirical claim — continuity, recognition, and honest records measurably
+improve agent output — is testable on this substrate, and Phase 12 is sized
+to test it rather than assume it.
+
+**Genuinely absent here, adopted as work:** dependency edges between work
+items (his Beads graph; Phase 10), and standing operation with a capacity
+plane — the daemon, schedules, and token/runner budgeting his overnight
+loops rest on (Phase 11).
 
 ## Status
 
