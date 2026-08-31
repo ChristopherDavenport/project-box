@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/checks"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/forge/git"
@@ -42,7 +43,27 @@ type Loop struct {
 	Branch  string
 	Builder Builder
 	Gates   Gates
-	TTL     time.Duration
+	// Lane is the landing discipline; empty means gated. Env and infra
+	// repositories refuse the optimistic lane at Run.
+	Lane forge.Lane
+	// Red opens repair work when an optimistic landing goes red, returning
+	// the repair ingress id. Nil means the red is recorded but nobody is
+	// summoned — configure it; see OpenRepair.
+	Red func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error)
+	TTL time.Duration
+}
+
+// OpenRepair wires Red to an ingress route: the red commit's sha is the
+// delivery key, so however many post-land checks report the same red, one
+// repair item exists.
+func OpenRepair(router *ingress.StoreRouter, route ingress.Route) func(context.Context, queue.WorkItem, forge.Commit, string) (string, error) {
+	return func(ctx context.Context, _ queue.WorkItem, head forge.Commit, reason string) (string, error) {
+		ing, _, err := router.Open(ctx, route, ingress.Delivery{Key: "red-" + string(head), Payload: []byte(reason)})
+		if err != nil {
+			return "", err
+		}
+		return ing.ID, nil
+	}
 }
 
 // ItemFor turns an admitted ingress into a work item. The ingress link is
@@ -55,6 +76,9 @@ func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 // where it ended: done, parked, waiting, or failed — an error return means
 // the loop itself broke, not that the change was judged and refused.
 func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, error) {
+	if err := forge.ValidateLane(l.Lane, l.Repo.Role); err != nil {
+		return item, err
+	}
 	q := &queue.Queue{Store: l.Store, Runner: l.Runner, TTL: l.TTL}
 	item, claim, err := q.Claim(ctx, item)
 	if err != nil {
@@ -104,6 +128,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 		}},
 	}
 
+	if l.Lane == forge.LaneOptimistic {
+		return l.runOptimistic(ctx, q, item, claim, ws, cs, head)
+	}
+
 	var verdicts []forge.Verdict
 	var gateInfra error
 	gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
@@ -143,6 +171,80 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	}); lerr != nil {
 		return q.Park(ctx, item, claim, "land: "+lerr.Error())
 	}
+	// Green by construction: the gates passed before the land. Recorded all
+	// the same, because the promotion predicate reads only the check chain.
+	checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
+		checks.Status{Green: true, Lane: string(forge.LaneGated)}, l.Runner)
+	return q.Done(ctx, item, claim, head)
+}
+
+// runOptimistic is land-then-check: the lease and the expected-old-value
+// check guard the landing exactly as in the gated lane — fencing is never
+// optimistic — and the gates run afterwards as checks on the branch. A red
+// check opens repair work; nothing rolls back by itself.
+func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, ws forge.Workspace, cs forge.ChangeSet, head forge.Commit) (queue.WorkItem, error) {
+	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
+		_, err := git.NewLander(l.Mirror, l.Store.Log()).Land(ctx, cs)
+		return err
+	}); lerr != nil {
+		// The landing itself was refused — a superseded token or a moved
+		// branch. Nothing reached main, so there is nothing to repair.
+		return q.Park(ctx, item, claim, "land: "+lerr.Error())
+	}
+
+	var verdicts []forge.Verdict
+	var infra error
+	telemetry.Stage(ctx, "post-land-check", item, func(ctx context.Context) error {
+		for _, g := range l.Gates(ws) {
+			v, err := g.Evaluate(ctx, cs)
+			if err != nil {
+				infra = fmt.Errorf("check %s could not conclude: %v", g.Name(), err)
+				return infra
+			}
+			body, _ := json.Marshal(v)
+			l.record(ctx, item, "gate", string(head), string(body))
+			verdicts = append(verdicts, v)
+		}
+		if forge.Resolve(verdicts) != forge.DecisionPass {
+			return fmt.Errorf("post-land checks not green")
+		}
+		return nil
+	})
+	if infra != nil {
+		// The change landed; the judgement failed. That is an unchecked
+		// commit on main — record red so promotion never takes it, and park
+		// the item for a person.
+		checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
+			checks.Status{Green: false, Lane: string(forge.LaneOptimistic), Note: infra.Error()}, l.Runner)
+		return q.Park(ctx, item, claim, infra.Error())
+	}
+
+	switch forge.Resolve(verdicts) {
+	case forge.DecisionPending:
+		// Below the production boundary there are no humans in any loop; a
+		// gate that cannot answer without one does not belong in this lane.
+		return item, fmt.Errorf("loop: optimistic lane cannot wait on a human gate — human approval binds at the production boundary; move gate to the promotion")
+	case forge.DecisionFail:
+		reason := reasons(verdicts)
+		checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
+			checks.Status{Green: false, Lane: string(forge.LaneOptimistic), Note: reason}, l.Runner)
+		note := "landed red: " + reason
+		if l.Red != nil {
+			repair, rerr := l.Red(ctx, item, head, reason)
+			if rerr != nil {
+				return q.Park(ctx, item, claim, note+" — AND opening repair failed: "+rerr.Error())
+			}
+			l.record(ctx, item, "repair-opened", string(head), fmt.Sprintf(`{"ingress":%q}`, repair))
+			note += "; repair opened: " + repair
+		}
+		// The item landed its change; main being red is now the repair
+		// item's problem. Done, with the note carrying the trail.
+		item.Note = note
+		return q.Done(ctx, item, claim, head)
+	}
+
+	checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
+		checks.Status{Green: true, Lane: string(forge.LaneOptimistic)}, l.Runner)
 	return q.Done(ctx, item, claim, head)
 }
 

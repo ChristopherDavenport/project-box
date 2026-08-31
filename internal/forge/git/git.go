@@ -114,6 +114,13 @@ func (m *Mirror) Checkout(ctx context.Context, l forge.Lease, at forge.Commit) (
 	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
 		return forge.Workspace{}, err
 	}
+	// A re-claimed run re-materializes: a leftover tree from an earlier
+	// attempt of the SAME run (a promotion retried after its approval
+	// arrived, say) is stale, and the renewed lease above is the authority
+	// that says so.
+	if err := os.RemoveAll(dir); err != nil {
+		return forge.Workspace{}, err
+	}
 	if _, err := run(ctx, "", "clone", "--no-checkout", m.mirrorDir(l.Repo), dir); err != nil {
 		return forge.Workspace{}, fmt.Errorf("git: materialize workspace: %w", err)
 	}

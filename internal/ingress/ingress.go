@@ -136,6 +136,7 @@ const (
 	RouteScanner  RouteKind = "scanner"     // vulnerability and policy scans
 	RouteCensus   RouteKind = "census"      // the estate disagreeing with policy
 	RouteDrift    RouteKind = "drift"       // the reconciler disagreeing with git
+	RouteRedMain  RouteKind = "red-main"    // post-land checks disagreeing with an optimistic branch
 )
 
 // Route is a configured path from an external event to an [Ingress].

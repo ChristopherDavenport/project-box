@@ -586,9 +586,18 @@ recorded selections and sign-offs (the CC4.1 mechanism), all behind cmd/box.
 Phase 6's curation job promotes a landed run's drafts into bound, attributed
 knowledge — a parked run curates nothing.
 
-Phases 7 and 8 (deployed footing; SOC 2 readiness) remain blocked on
-external resources — accounts, billing, the auditor. Phases 9–12, adopted
-2026-08-31 from the Yegge review and the merge-into-main directive, are
-code-shaped and unblocked: the environment ladder with the optimistic lane,
-the work graph, standing operation with the capacity plane, and seat
-continuity.
+Phase 9 is COMPLETE: lanes (forge.ValidateLane — env/infra refuse
+optimistic), the optimistic loop path (land, then post-land checks; red
+opens idempotent repair work through the red-main route and rolls nothing
+back), the check chain (internal/checks — absence of judgement is not a
+pass), the approval GateAdapter (pending until distinct non-self approvals
+cover the CANDIDATE — the stale-approval and self-approval rows from the
+Phase 5 table are finally asserted here), and the ladder itself
+(internal/ladder): staging takes the latest green, prod takes only what
+soaked green in staging and cleared the human gate, and the end-to-end test
+proves prod never carries the red commit. Fencing was shown identical in
+both lanes by preempting a lease mid-run between build and land.
+
+Phases 7 and 8 remain blocked on external resources — accounts, billing,
+the auditor. Phases 10–12 are code-shaped and unblocked: the work graph,
+standing operation with the capacity plane, and seat continuity.
