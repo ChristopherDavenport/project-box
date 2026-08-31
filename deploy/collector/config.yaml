@@ -1,0 +1,68 @@
+# The collector gateway: one instance in the telemetry path (a deployment the
+# factory exports to, not a sidecar), giving the four things the architecture
+# names — tail sampling, fan-out to sinks with different retention, ONE
+# redaction point, and buffering.
+#
+# Pipeline order is load-bearing:
+#   memory_limiter  first, or the collector is an outage waiting to happen
+#   redaction       BEFORE sampling, so unredacted attributes never sit in
+#                   the sampling buffer; under a Confidentiality-scoped
+#                   report this processor is an audited control
+#   tail_sampling   keep everything that failed; sample the routine
+#   batch           last
+#
+# Locally the sink is a file. Deployed, the Honeycomb OTLP exporter and the
+# long-term sink join the exporters list (Phase 7); retention is the sink's
+# property, never the collector's.
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 256
+    spike_limit_mib: 64
+  redaction:
+    allow_all_keys: true
+    # Values matching these patterns are masked wherever they appear. The
+    # first line of defence is the closed attribute set in
+    # internal/telemetry; this is the second, and the one that is sampleable
+    # as a control.
+    blocked_values:
+      - 'AKIA[0-9A-Z]{16}'                 # AWS access key id
+      - 'ghp_[A-Za-z0-9]{36}'              # GitHub personal access token
+      - 'ghs_[A-Za-z0-9]{36}'              # GitHub app installation token
+      - 'sk-[A-Za-z0-9\-_]{20,}'           # generic sk- API keys
+      - 'xox[baprs]-[A-Za-z0-9\-]{10,}'    # Slack tokens
+      - '-----BEGIN [A-Z ]*PRIVATE KEY-----' # PEM material
+      - '(?i)(password|passwd|secret|token)=[^\s"]{6,}'
+    summary: info
+  tail_sampling:
+    decision_wait: 2s
+    policies:
+      # A sampler must never be the reason an incident cannot be
+      # reconstructed: anything failed is kept, always.
+      - name: keep-error-status
+        type: status_code
+        status_code: {status_codes: [ERROR]}
+      - name: keep-flagged-failures
+        type: boolean_attribute
+        boolean_attribute: {key: failed, value: true}
+      - name: sample-the-routine
+        type: probabilistic
+        probabilistic: {sampling_percentage: 10}
+  batch: {}
+
+exporters:
+  file:
+    path: /out/spans.json
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, redaction, tail_sampling, batch]
+      exporters: [file]

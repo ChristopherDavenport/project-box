@@ -492,9 +492,22 @@ prune refuses to empty an Application without allowEmpty, and the source
 path must keep existing (git drops empty directories — env repos carry
 services/.gitkeep).
 
-Remaining in Phase 5: OTel spans from the stage runner, the collector
-gateway (redaction ahead of tail sampling, planted-credential test), the
-long-term sink, and the control room binary (exception queue, review
-sampling, stop). Remaining in Phase 6: the curation job and an embedding
-retriever behind the existing Query. Then Phase 7 (deployed footing) and
-Phase 8 (SOC 2 readiness).
+Phase 5 observability is in: per-stage traces from the stage runner (each
+stage its own root, closed attribute set — task text and error output proven
+absent from spans), trace ids correlated onto evidence records, ACP tool
+calls as span events (name and permitted flag, never arguments); the
+collector gateway config (memory_limiter -> redaction -> tail_sampling ->
+batch) tested against the REAL collector in docker — a planted AWS key is
+masked before export, a failed span survives sampling that thins the routine
+(4/40 kept in the run), skip-locally/fail-in-CI gated like the emulator.
+Control room: stop button consulted on every claim (not one new claim after
+the stop record lands, stop and resume both evidenced), exception queue that
+shows only what still needs eyes, seed-deterministic review sampling with
+recorded selections and sign-offs (the CC4.1 mechanism), all behind cmd/box.
+Phase 6's curation job promotes a landed run's drafts into bound, attributed
+knowledge — a parked run curates nothing.
+
+Remaining: Phase 7 (deployed footing — real Spanner, the GitHub App,
+Honeycomb + the long-term sink, GKE; needs accounts and billing) and Phase 8
+(SOC 2 readiness — needs the auditor engagement). Both blocked on external
+resources rather than code.

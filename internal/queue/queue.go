@@ -55,6 +55,11 @@ type WorkItem struct {
 	Note string `json:"note,omitempty"`
 }
 
+// ErrStopped reports that the stop button is down: no new claims, tenant-wide,
+// until an operator resumes. In-flight work finishes or parks on its own; the
+// stop is about not STARTING anything while a human decides.
+var ErrStopped = errors.New("queue: claims are stopped")
+
 // Queue submits, claims, and settles work items.
 type Queue struct {
 	Store  store.Store
@@ -76,7 +81,15 @@ func (q *Queue) Submit(ctx context.Context, w WorkItem) (WorkItem, error) {
 
 // Claim takes the item's lease. The lease, not the state fold, is the
 // exclusivity: two runners folding the same chain still cannot both claim.
+//
+// Every claim first consults the stop flag, which is the stop button's stated
+// bound: not one new claim after the stop record lands.
 func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, error) {
+	if stopped, err := q.Stopped(ctx, w.Tenant); err != nil {
+		return w, forge.Lease{}, err
+	} else if stopped {
+		return w, forge.Lease{}, ErrStopped
+	}
 	lease, err := q.Store.Leaser(q.Runner).Acquire(ctx, forge.LeaseRequest{
 		Tenant: w.Tenant, Repo: "_queue", Ref: scope(w.ID), Run: w.ID, TTL: q.TTL,
 	})
@@ -90,10 +103,15 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 	return w, lease, nil
 }
 
-// Park moves the item to the exception queue and frees its claim.
+// Park moves the item to the exception queue and frees its claim. The
+// exception index is what the control room lists; an unparked exception queue
+// is a factory nobody can triage.
 func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
 	w.State, w.Note = StateParked, reason
 	err := q.record(ctx, w, "parked", w.ID, reason)
+	if err == nil {
+		err = q.index(ctx, w.Tenant, "exceptions", w.ID, reason)
+	}
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
 }
@@ -112,6 +130,11 @@ func (q *Queue) Wait(ctx context.Context, w WorkItem, lease forge.Lease, reason 
 func (q *Queue) Done(ctx context.Context, w WorkItem, lease forge.Lease, head forge.Commit) (WorkItem, error) {
 	w.State, w.Head = StateDone, string(head)
 	err := q.record(ctx, w, "done", string(head), "")
+	if err == nil {
+		// The landings index feeds review sampling: an auditor-shaped list of
+		// every settled change, cheap to walk.
+		err = q.index(ctx, w.Tenant, "landings", w.ID, string(head))
+	}
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
 }
@@ -141,6 +164,45 @@ func (q *Queue) Load(ctx context.Context, t tenant.ID, id string) (WorkItem, err
 		return WorkItem{}, fmt.Errorf("queue: no such item %s", id)
 	}
 	return w, nil
+}
+
+// Stop halts new claims for the tenant. The stop is a record, so who pressed
+// it, when, and why survives — and Resume is a second record, never an erasure.
+func (q *Queue) Stop(ctx context.Context, t tenant.ID, actor, why string) error {
+	return q.controlRecord(ctx, t, "stop", actor, why)
+}
+
+// Resume lifts a stop.
+func (q *Queue) Resume(ctx context.Context, t tenant.ID, actor, why string) error {
+	return q.controlRecord(ctx, t, "resume", actor, why)
+}
+
+// Stopped reports the current stop state: the head of the control chain.
+func (q *Queue) Stopped(ctx context.Context, t tenant.ID) (bool, error) {
+	head, err := q.Store.Log().Head(ctx, t, "control/claims")
+	if err != nil {
+		return false, err
+	}
+	return head.Seq > 0 && head.Kind == "stop", nil
+}
+
+func (q *Queue) controlRecord(ctx context.Context, t tenant.ID, kind, actor, why string) error {
+	_, err := q.Store.Log().Append(ctx, evidence.Record{
+		Tenant: t, Scope: "control/claims", Kind: kind, Subject: "claims",
+		Actor: actor, Body: []byte(why),
+	})
+	return err
+}
+
+// index appends to a tenant-wide listing chain; the fold of an index plus
+// Load per item is how the control room enumerates without the store growing
+// a listing primitive.
+func (q *Queue) index(ctx context.Context, t tenant.ID, name, subject, note string) error {
+	_, err := q.Store.Log().Append(ctx, evidence.Record{
+		Tenant: t, Scope: "index/" + name, Kind: "indexed", Subject: subject,
+		Actor: q.Runner, Body: []byte(note),
+	})
+	return err
 }
 
 func (q *Queue) record(ctx context.Context, w WorkItem, kind, subject, note string) error {

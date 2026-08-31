@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	queuepkg "github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -168,5 +169,37 @@ func mustRun(t *testing.T, dir, name string, args ...string) {
 		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@invalid")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%s %v: %v: %s", name, args, err, out)
+	}
+}
+
+func TestCurateBindsPromotedClaimsToTheLandedRun(t *testing.T) {
+	b := base(t)
+	ctx := context.Background()
+	item := queuepkg.WorkItem{ID: "wi-9", Tenant: tn, Box: "shop", Ingress: "ing-1",
+		State: queuepkg.StateDone, Head: "abc123def"}
+	got, err := Curate(ctx, b, item, "http://remote/env.git", "curator-agent", []Draft{
+		{Claim: "the shop API validates before dispatch", Path: "handlers.go"},
+		{Claim: "   "}, // blank drafts are dropped, not stored
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("curated: %+v", got)
+	}
+	r := got[0]
+	if r.Commit != "abc123def" || r.Run != "wi-9" || r.Scope != "box/shop" || r.Path != "handlers.go" {
+		t.Fatalf("binding wrong: %+v", r)
+	}
+	// A run that never landed has nothing to teach.
+	parked := item
+	parked.State = queuepkg.StateParked
+	if _, err := Curate(ctx, b, parked, "http://remote/env.git", "curator-agent", []Draft{{Claim: "x"}}); err == nil {
+		t.Fatal("a parked run curated knowledge")
+	}
+	// The promoted claim is retrievable under the box scope.
+	found, _ := b.Retrieve(ctx, Query{Granted: []string{"box/shop"}})
+	if len(found) != 1 || found[0].Run != "wi-9" {
+		t.Fatalf("retrieve: %+v", found)
 	}
 }
