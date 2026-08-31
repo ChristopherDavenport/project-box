@@ -475,8 +475,20 @@ Phases 0–4 are implemented and green under -race:
      deploy-as-a-ChangeSet through the same loop into env repos, rollback
      shown as git revert
 
+Phase 5's security core is also in: lease preemption in the store seam
+(conformance-tested on both backends — a LIVE holder is displaced and fenced
+by the same token mechanism as a stalled one), preemption authorized only by
+an open incident (a campaign cannot, a closed incident cannot), break-glass
+gated on an open incident with every invocation recorded (unrecordable means
+unauthorized), and postmortem-before-close.
+
 Environment-blocked: the kind + Argo CD reconcile-verification leg of Phase 4
 needs a container runtime on the dev box (none installed); the env-repo half
-is fully tested without it. Next: Phase 5 (observability, control room,
-incident ingress — needs a lease-preemption primitive in the store seam) and
-Phase 6 (knowledge plane).
+is fully tested without it.
+
+Remaining in Phase 5: OTel spans from the stage runner, the collector
+gateway (redaction ahead of tail sampling, planted-credential test), the
+long-term sink, and the control room binary (exception queue, review
+sampling, stop). Remaining in Phase 6: the curation job and an embedding
+retriever behind the existing Query. Then Phase 7 (deployed footing) and
+Phase 8 (SOC 2 readiness).

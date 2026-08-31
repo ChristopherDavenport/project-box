@@ -223,6 +223,38 @@ func Run(t *testing.T, open func(t *testing.T) Harness) {
 		_, _ = la, lb
 	})
 
+	t.Run("lease/preempt-fences-live-holder", func(t *testing.T) {
+		tn := tid(t)
+		worker, incident := s.Leaser("runner-a"), s.Leaser("runner-inc")
+		held, err := worker.Acquire(ctx, req(tn, "repo", "refs/heads/main", "run-1", ttl))
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		// The holder is LIVE — not stalled, not expired — and is preempted
+		// anyway. Same fence, no new mechanism.
+		taken, err := incident.Preempt(ctx, req(tn, "repo", "refs/heads/main", "incident-run", ttl))
+		if err != nil {
+			t.Fatalf("preempt over a live claim: %v", err)
+		}
+		if taken.Token <= held.Token {
+			t.Fatalf("preempting token %d not greater than displaced %d", taken.Token, held.Token)
+		}
+		if _, err := worker.Renew(ctx, held, ttl); !errors.Is(err, forge.ErrStaleToken) {
+			t.Fatalf("displaced holder's renew: want ErrStaleToken, got %v", err)
+		}
+		// Its release is a harmless no-op that cannot free the incident's claim.
+		if err := worker.Release(ctx, held); err != nil {
+			t.Fatalf("displaced release: %v", err)
+		}
+		if _, err := worker.Acquire(ctx, req(tn, "repo", "refs/heads/main", "run-2", ttl)); !errors.Is(err, forge.ErrHeld) {
+			t.Fatalf("incident's claim must survive: got %v", err)
+		}
+		// The incident's own lease behaves normally afterwards.
+		if _, err := incident.Renew(ctx, taken, ttl); err != nil {
+			t.Fatalf("incident renew: %v", err)
+		}
+	})
+
 	t.Run("chain/append-assigns-and-links", func(t *testing.T) {
 		tn := tid(t)
 		log := s.Log()

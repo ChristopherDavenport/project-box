@@ -171,6 +171,45 @@ func (l *leaser) Acquire(ctx context.Context, req forge.LeaseRequest) (forge.Lea
 	return out, err
 }
 
+// Preempt supersedes whatever claim exists; see the interface contract for
+// why no authority check lives here.
+func (l *leaser) Preempt(ctx context.Context, req forge.LeaseRequest) (forge.Lease, error) {
+	if err := req.Tenant.Validate(); err != nil {
+		return forge.Lease{}, err
+	}
+	now := l.s.now().UTC()
+	expires := now.Add(req.TTL)
+	var out forge.Lease
+	err := l.s.write(ctx, func(tx *sql.Tx) error {
+		var token int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT token FROM leases WHERE tenant=? AND repo=? AND ref=?`,
+			string(req.Tenant), req.Repo, req.Ref).Scan(&token)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			token = 1
+			_, err = tx.ExecContext(ctx,
+				`INSERT INTO leases (tenant, repo, ref, runner, run, token, held, expires_ns) VALUES (?,?,?,?,?,?,1,?)`,
+				string(req.Tenant), req.Repo, req.Ref, l.runner, req.Run, token, expires.UnixNano())
+		case err == nil:
+			token++
+			_, err = tx.ExecContext(ctx,
+				`UPDATE leases SET token=?, held=1, runner=?, run=?, expires_ns=? WHERE tenant=? AND repo=? AND ref=?`,
+				token, l.runner, req.Run, expires.UnixNano(), string(req.Tenant), req.Repo, req.Ref)
+		}
+		if err != nil {
+			return err
+		}
+		out = forge.Lease{
+			Tenant: req.Tenant, Repo: req.Repo, Ref: req.Ref,
+			Runner: l.runner, Run: req.Run,
+			Token: forge.Token(token), Expires: expires,
+		}
+		return nil
+	})
+	return out, err
+}
+
 func (l *leaser) Renew(ctx context.Context, lease forge.Lease, ttl time.Duration) (forge.Lease, error) {
 	now := l.s.now().UTC()
 	expires := now.Add(ttl)

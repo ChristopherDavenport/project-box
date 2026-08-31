@@ -156,6 +156,35 @@ func (l *leaser) Acquire(ctx context.Context, req forge.LeaseRequest) (forge.Lea
 	}, nil
 }
 
+// Preempt supersedes whatever claim exists; the new grant's commit timestamp
+// is necessarily greater than the displaced one's, so the fence follows from
+// the same property Acquire relies on.
+func (l *leaser) Preempt(ctx context.Context, req forge.LeaseRequest) (forge.Lease, error) {
+	if err := req.Tenant.Validate(); err != nil {
+		return forge.Lease{}, err
+	}
+	var expires time.Time
+	resp, err := l.s.c.ReadWriteTransaction(ctx, func(ctx context.Context, txn *gspanner.ReadWriteTransaction) error {
+		now, err := dbNow(ctx, txn)
+		if err != nil {
+			return err
+		}
+		expires = now.Add(req.TTL)
+		return txn.BufferWrite([]*gspanner.Mutation{gspanner.InsertOrUpdate("leases",
+			[]string{"tenant", "repo", "ref", "runner", "run", "held", "granted_at", "expires_at"},
+			[]any{string(req.Tenant), req.Repo, req.Ref, l.runner, req.Run, true, gspanner.CommitTimestamp, expires},
+		)})
+	})
+	if err != nil {
+		return forge.Lease{}, err
+	}
+	return forge.Lease{
+		Tenant: req.Tenant, Repo: req.Repo, Ref: req.Ref,
+		Runner: l.runner, Run: req.Run,
+		Token: forge.Token(resp.UnixNano()), Expires: expires,
+	}, nil
+}
+
 func (l *leaser) Renew(ctx context.Context, lease forge.Lease, ttl time.Duration) (forge.Lease, error) {
 	var expires time.Time
 	_, err := l.s.c.ReadWriteTransaction(ctx, func(ctx context.Context, txn *gspanner.ReadWriteTransaction) error {
