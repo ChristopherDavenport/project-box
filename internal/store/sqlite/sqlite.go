@@ -1,0 +1,376 @@
+// Package sqlite is the local backend: one file, zero services, full
+// conformance. It exists so the whole factory model can be proven on a laptop
+// before a Spanner instance is provisioned — and so the store seam has two
+// implementations from the first commit, keeping either from becoming the
+// definition.
+package sqlite
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"iter"
+	"time"
+
+	_ "modernc.org/sqlite" // pure-Go driver: no cgo, cross-compiles, one static binary
+
+	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/tenant"
+)
+
+// schema uses STRICT tables so a type mismatch is an error rather than a
+// silently stored value, and enforces append-only on the chain with triggers —
+// the property holds in the database, not merely in this package's discipline.
+// Lease rows survive release (held=0) so the token counter never resets: a
+// token, once superseded, can never come back.
+const schema = `
+CREATE TABLE IF NOT EXISTS leases (
+	tenant     TEXT    NOT NULL,
+	repo       TEXT    NOT NULL,
+	ref        TEXT    NOT NULL,
+	runner     TEXT    NOT NULL,
+	run        TEXT    NOT NULL,
+	token      INTEGER NOT NULL,
+	held       INTEGER NOT NULL,
+	expires_ns INTEGER NOT NULL,
+	PRIMARY KEY (tenant, repo, ref)
+) STRICT, WITHOUT ROWID;
+
+CREATE TABLE IF NOT EXISTS chain (
+	tenant       TEXT    NOT NULL,
+	scope        TEXT    NOT NULL,
+	seq          INTEGER NOT NULL,
+	id           TEXT    NOT NULL,
+	prev         TEXT    NOT NULL,
+	kind         TEXT    NOT NULL,
+	subject      TEXT    NOT NULL,
+	actor        TEXT    NOT NULL,
+	on_behalf_of TEXT    NOT NULL,
+	grant_id     TEXT    NOT NULL,
+	body         BLOB    NOT NULL,
+	at_ns        INTEGER NOT NULL,
+	trace        TEXT    NOT NULL,
+	PRIMARY KEY (tenant, scope, seq)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS chain_by_subject ON chain (tenant, subject, at_ns);
+
+CREATE TRIGGER IF NOT EXISTS chain_no_update BEFORE UPDATE ON chain
+BEGIN SELECT RAISE(ABORT, 'evidence chain is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS chain_no_delete BEFORE DELETE ON chain
+BEGIN SELECT RAISE(ABORT, 'evidence chain is append-only'); END;
+`
+
+// Store is a SQLite-backed store.Store.
+type Store struct {
+	w, r *sql.DB // one writer, many readers: the WAL two-pool pattern
+	now  func() time.Time
+}
+
+// Option configures Open.
+type Option func(*Store)
+
+// WithClock substitutes the store's clock, for expiry tests that should not
+// wait in real time. The default is time.Now.
+func WithClock(now func() time.Time) Option {
+	return func(s *Store) { s.now = now }
+}
+
+// Open opens (creating if absent) the store at path.
+func Open(path string, opts ...Option) (*Store, error) {
+	// Pragmas ride the DSN because they are per-connection and database/sql
+	// opens connections lazily — an Exec after Open would configure one
+	// connection and leave its siblings on defaults.
+	base := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", path)
+	w, err := sql.Open("sqlite", base+"&_txlock=immediate")
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: open writer: %w", err)
+	}
+	w.SetMaxOpenConns(1) // writer-vs-writer contention is resolved here, not by SQLITE_BUSY
+	r, err := sql.Open("sqlite", base)
+	if err != nil {
+		w.Close()
+		return nil, fmt.Errorf("sqlite: open reader: %w", err)
+	}
+	s := &Store{w: w, r: r, now: time.Now}
+	for _, o := range opts {
+		o(s)
+	}
+	if _, err := w.Exec(schema); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("sqlite: apply schema: %w", err)
+	}
+	return s, nil
+}
+
+// Close closes both pools.
+func (s *Store) Close() error {
+	return errors.Join(s.w.Close(), s.r.Close())
+}
+
+// Leaser returns the allocator bound to one runner identity.
+func (s *Store) Leaser(runner string) forge.Leaser {
+	return &leaser{s: s, runner: runner}
+}
+
+// Log returns the evidence log.
+func (s *Store) Log() evidence.Log { return &log{s: s} }
+
+type leaser struct {
+	s      *Store
+	runner string
+}
+
+func (l *leaser) Acquire(ctx context.Context, req forge.LeaseRequest) (forge.Lease, error) {
+	if err := req.Tenant.Validate(); err != nil {
+		return forge.Lease{}, err
+	}
+	now := l.s.now().UTC()
+	expires := now.Add(req.TTL)
+	var out forge.Lease
+	err := l.s.write(ctx, func(tx *sql.Tx) error {
+		var token int64
+		var held int64
+		var expNS int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT token, held, expires_ns FROM leases WHERE tenant=? AND repo=? AND ref=?`,
+			string(req.Tenant), req.Repo, req.Ref).Scan(&token, &held, &expNS)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			token = 1
+			_, err = tx.ExecContext(ctx,
+				`INSERT INTO leases (tenant, repo, ref, runner, run, token, held, expires_ns) VALUES (?,?,?,?,?,?,1,?)`,
+				string(req.Tenant), req.Repo, req.Ref, l.runner, req.Run, token, expires.UnixNano())
+			if err != nil {
+				return err
+			}
+		case err != nil:
+			return err
+		case held == 1 && now.UnixNano() < expNS:
+			return forge.ErrHeld
+		default:
+			// Released, or expired with no successor yet: supersede. The
+			// counter bumps in both paths, so the old token is dead forever.
+			token++
+			_, err = tx.ExecContext(ctx,
+				`UPDATE leases SET token=?, held=1, runner=?, run=?, expires_ns=? WHERE tenant=? AND repo=? AND ref=?`,
+				token, l.runner, req.Run, expires.UnixNano(), string(req.Tenant), req.Repo, req.Ref)
+			if err != nil {
+				return err
+			}
+		}
+		out = forge.Lease{
+			Tenant: req.Tenant, Repo: req.Repo, Ref: req.Ref,
+			Runner: l.runner, Run: req.Run,
+			Token: forge.Token(token), Expires: expires,
+		}
+		return nil
+	})
+	return out, err
+}
+
+// Preempt supersedes whatever claim exists; see the interface contract for
+// why no authority check lives here.
+func (l *leaser) Preempt(ctx context.Context, req forge.LeaseRequest) (forge.Lease, error) {
+	if err := req.Tenant.Validate(); err != nil {
+		return forge.Lease{}, err
+	}
+	now := l.s.now().UTC()
+	expires := now.Add(req.TTL)
+	var out forge.Lease
+	err := l.s.write(ctx, func(tx *sql.Tx) error {
+		var token int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT token FROM leases WHERE tenant=? AND repo=? AND ref=?`,
+			string(req.Tenant), req.Repo, req.Ref).Scan(&token)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			token = 1
+			_, err = tx.ExecContext(ctx,
+				`INSERT INTO leases (tenant, repo, ref, runner, run, token, held, expires_ns) VALUES (?,?,?,?,?,?,1,?)`,
+				string(req.Tenant), req.Repo, req.Ref, l.runner, req.Run, token, expires.UnixNano())
+		case err == nil:
+			token++
+			_, err = tx.ExecContext(ctx,
+				`UPDATE leases SET token=?, held=1, runner=?, run=?, expires_ns=? WHERE tenant=? AND repo=? AND ref=?`,
+				token, l.runner, req.Run, expires.UnixNano(), string(req.Tenant), req.Repo, req.Ref)
+		}
+		if err != nil {
+			return err
+		}
+		out = forge.Lease{
+			Tenant: req.Tenant, Repo: req.Repo, Ref: req.Ref,
+			Runner: l.runner, Run: req.Run,
+			Token: forge.Token(token), Expires: expires,
+		}
+		return nil
+	})
+	return out, err
+}
+
+func (l *leaser) Renew(ctx context.Context, lease forge.Lease, ttl time.Duration) (forge.Lease, error) {
+	now := l.s.now().UTC()
+	expires := now.Add(ttl)
+	err := l.s.write(ctx, func(tx *sql.Tx) error {
+		var token, held, expNS int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT token, held, expires_ns FROM leases WHERE tenant=? AND repo=? AND ref=?`,
+			string(lease.Tenant), lease.Repo, lease.Ref).Scan(&token, &held, &expNS)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return forge.ErrExpired
+		case err != nil:
+			return err
+		case forge.Token(token) != lease.Token:
+			return forge.ErrStaleToken
+		case held == 0, now.UnixNano() >= expNS:
+			return forge.ErrExpired
+		}
+		_, err = tx.ExecContext(ctx,
+			`UPDATE leases SET expires_ns=? WHERE tenant=? AND repo=? AND ref=?`,
+			expires.UnixNano(), string(lease.Tenant), lease.Repo, lease.Ref)
+		return err
+	})
+	if err != nil {
+		return forge.Lease{}, err
+	}
+	lease.Expires = expires
+	return lease, nil
+}
+
+func (l *leaser) Release(ctx context.Context, lease forge.Lease) error {
+	return l.s.write(ctx, func(tx *sql.Tx) error {
+		// Guarded by token: a superseded holder's release matches nothing and
+		// is a no-op by design — the claim it thinks it is dropping is not its
+		// claim any more.
+		_, err := tx.ExecContext(ctx,
+			`UPDATE leases SET held=0 WHERE tenant=? AND repo=? AND ref=? AND token=? AND held=1`,
+			string(lease.Tenant), lease.Repo, lease.Ref, int64(lease.Token))
+		return err
+	})
+}
+
+type log struct{ s *Store }
+
+func (g *log) Append(ctx context.Context, r evidence.Record) (evidence.Record, error) {
+	if err := r.Tenant.Validate(); err != nil {
+		return evidence.Record{}, err
+	}
+	if r.Scope == "" {
+		return evidence.Record{}, errors.New("sqlite: evidence record needs a scope")
+	}
+	if r.At.IsZero() {
+		r.At = g.s.now()
+	}
+	r.At = r.At.UTC()
+	err := g.s.write(ctx, func(tx *sql.Tx) error {
+		var seq int64
+		var prev string
+		err := tx.QueryRowContext(ctx,
+			`SELECT seq, id FROM chain WHERE tenant=? AND scope=? ORDER BY seq DESC LIMIT 1`,
+			string(r.Tenant), r.Scope).Scan(&seq, &prev)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		r.Seq = uint64(seq) + 1
+		r.Prev = prev
+		r, err = evidence.Seal(r)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO chain (tenant, scope, seq, id, prev, kind, subject, actor, on_behalf_of, grant_id, body, at_ns, trace)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			string(r.Tenant), r.Scope, int64(r.Seq), r.ID, r.Prev, r.Kind, r.Subject,
+			r.Actor, r.OnBehalfOf, r.Grant, r.Body, r.At.UnixNano(), r.Trace)
+		return err
+	})
+	if err != nil {
+		return evidence.Record{}, err
+	}
+	return r, nil
+}
+
+const recordCols = `tenant, scope, seq, id, prev, kind, subject, actor, on_behalf_of, grant_id, body, at_ns, trace`
+
+func scanRecord(rows interface{ Scan(...any) error }) (evidence.Record, error) {
+	var r evidence.Record
+	var tn string
+	var seq, atNS int64
+	err := rows.Scan(&tn, &r.Scope, &seq, &r.ID, &r.Prev, &r.Kind, &r.Subject,
+		&r.Actor, &r.OnBehalfOf, &r.Grant, &r.Body, &atNS, &r.Trace)
+	if err != nil {
+		return evidence.Record{}, err
+	}
+	r.Tenant = tenant.ID(tn)
+	r.Seq = uint64(seq)
+	r.At = time.Unix(0, atNS).UTC()
+	return r, nil
+}
+
+func (g *log) Head(ctx context.Context, t tenant.ID, scope string) (evidence.Record, error) {
+	row := g.s.r.QueryRowContext(ctx,
+		`SELECT `+recordCols+` FROM chain WHERE tenant=? AND scope=? ORDER BY seq DESC LIMIT 1`,
+		string(t), scope)
+	r, err := scanRecord(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return evidence.Record{}, nil
+	}
+	return r, err
+}
+
+func (g *log) Since(ctx context.Context, t tenant.ID, scope string, seq uint64) iter.Seq2[evidence.Record, error] {
+	return g.query(ctx,
+		`SELECT `+recordCols+` FROM chain WHERE tenant=? AND scope=? AND seq>=? ORDER BY seq`,
+		string(t), scope, int64(seq))
+}
+
+func (g *log) BySubject(ctx context.Context, t tenant.ID, subject string) iter.Seq2[evidence.Record, error] {
+	return g.query(ctx,
+		`SELECT `+recordCols+` FROM chain WHERE tenant=? AND subject=? ORDER BY at_ns, scope, seq`,
+		string(t), subject)
+}
+
+func (g *log) Verify(ctx context.Context, t tenant.ID, scope string) error {
+	return evidence.VerifyScope(ctx, g, t, scope)
+}
+
+func (g *log) query(ctx context.Context, q string, args ...any) iter.Seq2[evidence.Record, error] {
+	return func(yield func(evidence.Record, error) bool) {
+		rows, err := g.s.r.QueryContext(ctx, q, args...)
+		if err != nil {
+			yield(evidence.Record{}, err)
+			return
+		}
+		defer rows.Close()
+		for rows.Next() {
+			r, err := scanRecord(rows)
+			if !yield(r, err) {
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+		if err := rows.Err(); err != nil {
+			yield(evidence.Record{}, err)
+		}
+	}
+}
+
+// write runs fn in an immediate write transaction on the single-connection
+// writer pool. Immediate matters: a deferred transaction upgrades its lock at
+// the first write and that upgrade is where SQLITE_BUSY bites mid-flight.
+func (s *Store) write(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.w.BeginTx(ctx, nil) // _txlock=immediate in the writer DSN makes this BEGIN IMMEDIATE
+	if err != nil {
+		return err
+	}
+	if err := fn(tx); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}

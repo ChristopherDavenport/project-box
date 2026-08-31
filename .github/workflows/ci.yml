@@ -1,0 +1,38 @@
+# Every gate blocks, and this file is itself under change control — the claim
+# "our storage properties are asserted on every backend on every commit" is a
+# control, and controls have to be sampleable.
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    services:
+      # The Spanner conformance leg is REQUIRED: with SPANNER_EMULATOR_HOST
+      # unset and CI set, the suite fails rather than skipping. "Emulator
+      # down, tests skipped, all green" proves nothing.
+      spanner-emulator:
+        # 1.5.25 has a concurrency bug ("Invalid transaction ID. Transaction
+        # ID must be >= 17") under parallel read-write transactions — found by
+        # this suite's race tests on CI's first run. 1.5.52 verified against
+        # the same conformance suite in docker before pinning.
+        image: gcr.io/cloud-spanner-emulator/emulator:1.5.52
+        ports:
+          - 9010:9010
+    env:
+      SPANNER_EMULATOR_HOST: localhost:9010
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test -race ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...

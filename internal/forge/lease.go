@@ -99,4 +99,14 @@ type Leaser interface {
 	// error: the claim is gone either way, and the successor's token protects
 	// it.
 	Release(ctx context.Context, l Lease) error
+	// Preempt claims a ref EVEN IF a live claim exists, superseding it. The
+	// displaced holder's token is dead from this commit on: its renew fails,
+	// its land is refused, and fencing makes the takeover safe with no new
+	// mechanism — preemption and the stalled-runner case are the same thing.
+	//
+	// The store does not ask why. Whether a caller MAY preempt is an
+	// authorization question — an open incident, per policy — decided in
+	// authz and recorded in evidence, not here. A mechanical layer that
+	// second-guessed authority would end up trusted with it.
+	Preempt(ctx context.Context, req LeaseRequest) (Lease, error)
 }

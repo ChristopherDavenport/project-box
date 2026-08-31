@@ -401,6 +401,9 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Repository restrictions verified before acting, twice | the gate is enforced by config we do not own; a stale check is a memory of a control |
 | The app is never a forge bypass actor | otherwise the only actor that matters is the one the rules exempt |
 | Expand/contract plus revert-forward | there is no atomic commit across git remotes |
+| Argo CD as the reconciler | ApplicationSet fits rendered-per-service; its API reads reconcile status back as evidence |
+| TSC scope: Security + Confidentiality + Availability | redaction and retention become audited controls; incident handling gets defined objectives |
+| Campaign predicates are fact key comparisons | declarative and diffable; a campaign definition cannot run code |
 
 ## 7. Deferred decisions
 
@@ -409,8 +412,6 @@ Each names the phase by which it must be resolved.
 | Decision | By |
 |---|---|
 | Commit signing via `sigstore/gitsign` — needed only once artifacts leave the trust boundary | when they do |
-| Which Trust Services Criteria beyond Security — Confidentiality changes redaction requirements | 2 |
-| Argo CD or Flux | 4 |
 | Kubernetes distributions; provision clusters or deploy onto existing | 4 |
 | Long-term telemetry sink: GCS file exporter or ClickHouse | 5 |
 | `decision_wait`, bounding how long a stage may run before its trace is decided without it | 5 |
@@ -454,9 +455,59 @@ carry the weight; an instruction not to follow embedded directions does not.
 | **Evidence record** | an authenticated, hash-chained fact, keyed by subject for audit sampling |
 | **Break-glass** | an emergency bypass, permitted only under an open incident |
 
-## 10. Next commit
+## 10. Status of execution
 
-`internal/store` — the seam and the conformance suite, **before** any backend
-exists to satisfy it. Writing the suite first is what stops SQLite's semantics
-from silently becoming the definition, and what makes the Spanner backend a
-peer rather than a port.
+Phases 0–4 are implemented and green under -race:
+
+  0  store seam, conformance suite (written first), SQLite and
+     Spanner-emulator backends, evidence seal/verify, authz evaluator
+  1  git mirrors, leased workspaces, fenced landing (superseded token
+     refused AT land), expected-old-value push
+  2  deterministic composer (agentref), ACP runtime with tool policy
+     enforced at the stream (denied-tool kill), pinned read-only context
+     materialization
+  3  the closed loop: issue -> work item -> build -> gate -> land,
+     unattended, provenance by sha, failing gate parks
+  4  ordered multi-member landing with revert-forward; estate registry
+     (event-sourced, unenrolled/missing reported) and git census; campaign
+     engine (fact-comparison predicates, batch-0-means-1 throttle, halt
+     threshold, stale-fact refusal); deterministic service rendering;
+     deploy-as-a-ChangeSet through the same loop into env repos, rollback
+     shown as git revert
+
+Phase 5's security core is also in: lease preemption in the store seam
+(conformance-tested on both backends — a LIVE holder is displaced and fenced
+by the same token mechanism as a stalled one), preemption authorized only by
+an open incident (a campaign cannot, a closed incident cannot), break-glass
+gated on an open incident with every invocation recorded (unrecordable means
+unauthorized), and postmortem-before-close.
+
+The kind + Argo CD reconcile-verification leg is DONE (2026-08-31, after
+Docker Desktop WSL integration was enabled): hack/reconcile-e2e.sh stands up
+kind + in-cluster Gitea + Argo CD, hack/deployloop lands an env commit
+through the REAL internal/loop + internal/deploy code, Argo syncs at exactly
+that revision into a 2/2 workload, and rollback is a git revert that Argo
+prunes. Two Argo guardrails found live and encoded in the script: automated
+prune refuses to empty an Application without allowEmpty, and the source
+path must keep existing (git drops empty directories — env repos carry
+services/.gitkeep).
+
+Phase 5 observability is in: per-stage traces from the stage runner (each
+stage its own root, closed attribute set — task text and error output proven
+absent from spans), trace ids correlated onto evidence records, ACP tool
+calls as span events (name and permitted flag, never arguments); the
+collector gateway config (memory_limiter -> redaction -> tail_sampling ->
+batch) tested against the REAL collector in docker — a planted AWS key is
+masked before export, a failed span survives sampling that thins the routine
+(4/40 kept in the run), skip-locally/fail-in-CI gated like the emulator.
+Control room: stop button consulted on every claim (not one new claim after
+the stop record lands, stop and resume both evidenced), exception queue that
+shows only what still needs eyes, seed-deterministic review sampling with
+recorded selections and sign-offs (the CC4.1 mechanism), all behind cmd/box.
+Phase 6's curation job promotes a landed run's drafts into bound, attributed
+knowledge — a parked run curates nothing.
+
+Remaining: Phase 7 (deployed footing — real Spanner, the GitHub App,
+Honeycomb + the long-term sink, GKE; needs accounts and billing) and Phase 8
+(SOC 2 readiness — needs the auditor engagement). Both blocked on external
+resources rather than code.
