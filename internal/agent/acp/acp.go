@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
+	"github.com/ChristopherDavenport/project-box/internal/telemetry"
 )
 
 // ErrPolicyViolation reports that a denied tool appeared on the stream as
@@ -97,6 +98,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				return nil, err
 			}
 			ok, reason := b.Tools.Permits(p.ToolCall.Title)
+			telemetry.ToolCall(ctx, p.ToolCall.Title, ok)
 			mu.Lock()
 			if !ok {
 				res.Denied = append(res.Denied, p.ToolCall.Title)
@@ -114,6 +116,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				res.ToolCalls = append(res.ToolCalls, u.Update.Title)
 				mu.Unlock()
 				if ok, _ := b.Tools.Permits(u.Update.Title); !ok {
+					telemetry.ToolCall(ctx, u.Update.Title, false)
 					// The agent is executing a denied tool without asking.
 					mu.Lock()
 					violated = fmt.Errorf("%w: %q", ErrPolicyViolation, u.Update.Title)

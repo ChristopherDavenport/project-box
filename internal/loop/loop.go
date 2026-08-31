@@ -19,6 +19,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store"
+	"github.com/ChristopherDavenport/project-box/internal/telemetry"
 )
 
 // Builder produces a change in a workspace and returns the commit to land.
@@ -83,11 +84,17 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 		return q.Fail(ctx, item, claim, err.Error())
 	}
 
-	head, err := l.Builder.Build(ctx, ws, item.Task)
-	if err != nil {
-		return q.Park(ctx, item, claim, "build: "+err.Error())
+	var head forge.Commit
+	if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
+		var err error
+		head, err = l.Builder.Build(ctx, ws, item.Task)
+		if err == nil {
+			l.record(ctx, item, "built", string(head), "")
+		}
+		return err
+	}); serr != nil {
+		return q.Park(ctx, item, claim, "build: "+serr.Error())
 	}
-	l.record(ctx, item, "built", string(head), "")
 
 	cs := forge.ChangeSet{
 		ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
@@ -98,16 +105,28 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	}
 
 	var verdicts []forge.Verdict
-	for _, g := range l.Gates(ws) {
-		v, err := g.Evaluate(ctx, cs)
-		if err != nil {
-			// Infrastructure trouble is never recorded as a rejected change.
-			return q.Fail(ctx, item, claim, fmt.Sprintf("gate %s could not conclude: %v", g.Name(), err))
+	var gateInfra error
+	gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
+		for _, g := range l.Gates(ws) {
+			v, err := g.Evaluate(ctx, cs)
+			if err != nil {
+				// Infrastructure trouble is never recorded as a rejected change.
+				gateInfra = fmt.Errorf("gate %s could not conclude: %v", g.Name(), err)
+				return gateInfra
+			}
+			body, _ := json.Marshal(v)
+			l.record(ctx, item, "gate", string(head), string(body))
+			verdicts = append(verdicts, v)
 		}
-		body, _ := json.Marshal(v)
-		l.record(ctx, item, "gate", string(head), string(body))
-		verdicts = append(verdicts, v)
+		if forge.Resolve(verdicts) == forge.DecisionFail {
+			return fmt.Errorf("gates failed") // marks the stage span failed; the reasons go to evidence and the park note
+		}
+		return nil
+	})
+	if gateInfra != nil {
+		return q.Fail(ctx, item, claim, gateInfra.Error())
 	}
+	_ = gerr
 	switch forge.Resolve(verdicts) {
 	case forge.DecisionFail:
 		return q.Park(ctx, item, claim, reasons(verdicts))
@@ -115,8 +134,14 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 		return q.Wait(ctx, item, claim, reasons(verdicts))
 	}
 
-	if _, err := git.NewLander(l.Mirror, l.Store.Log()).Land(ctx, cs); err != nil {
-		return q.Park(ctx, item, claim, "land: "+err.Error())
+	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
+		_, err := git.NewLander(l.Mirror, l.Store.Log()).Land(ctx, cs)
+		if err == nil {
+			telemetry.Outcome(ctx, queue.StateDone, string(head))
+		}
+		return err
+	}); lerr != nil {
+		return q.Park(ctx, item, claim, "land: "+lerr.Error())
 	}
 	return q.Done(ctx, item, claim, head)
 }
@@ -129,6 +154,7 @@ func (l *Loop) record(ctx context.Context, item queue.WorkItem, kind, subject, b
 	l.Store.Log().Append(ctx, evidence.Record{
 		Tenant: item.Tenant, Scope: "workitem/" + item.ID,
 		Kind: kind, Subject: subject, Actor: l.Runner, Body: []byte(body),
+		Trace: telemetry.TraceID(ctx),
 	})
 }
 
