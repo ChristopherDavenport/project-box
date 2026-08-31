@@ -456,7 +456,8 @@ carry the weight; an instruction not to follow embedded directions does not.
 
 ## 10. Next commit
 
-`internal/store` — the seam and the conformance suite, **before** any backend
-exists to satisfy it. Writing the suite first is what stops SQLite's semantics
-from silently becoming the definition, and what makes the Spanner backend a
-peer rather than a port.
+Phase 0 landed: the conformance suite (written before either backend), the
+SQLite and Spanner-emulator backends both green under it, the evidence
+seal/verify helpers, and the authz evaluator with its escalation tests. Next is
+Phase 1 — `forge`: mirrors, workspaces, and the `Leaser`-backed landing path,
+raced under `-race` per the testing table.
