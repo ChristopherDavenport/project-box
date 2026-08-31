@@ -15,7 +15,11 @@ jobs:
       # unset and CI set, the suite fails rather than skipping. "Emulator
       # down, tests skipped, all green" proves nothing.
       spanner-emulator:
-        image: gcr.io/cloud-spanner-emulator/emulator:1.5.25
+        # 1.5.25 has a concurrency bug ("Invalid transaction ID. Transaction
+        # ID must be >= 17") under parallel read-write transactions — found by
+        # this suite's race tests on CI's first run. 1.5.52 verified against
+        # the same conformance suite in docker before pinning.
+        image: gcr.io/cloud-spanner-emulator/emulator:1.5.52
         ports:
           - 9010:9010
     env:
