@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/authz"
 	"github.com/ChristopherDavenport/project-box/internal/checks"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
@@ -46,6 +47,12 @@ type Loop struct {
 	// Lane is the landing discipline; empty means gated. Env and infra
 	// repositories refuse the optimistic lane at Run.
 	Lane forge.Lane
+	// Authz, when set, makes the loop enforce authority instead of assuming
+	// it: propose is checked before the build and land before the landing,
+	// with the runner as principal and the item's requester as delegator —
+	// so delegation intersects HERE, in the pipeline, not only in the
+	// evaluator's own tests. Nil skips enforcement (bootstrap, tests).
+	Authz authz.Authorizer
 	// Red opens repair work when an optimistic landing goes red, returning
 	// the repair ingress id. Nil means the red is recorded but nobody is
 	// summoned — configure it; see OpenRepair.
@@ -69,7 +76,8 @@ func OpenRepair(router *ingress.StoreRouter, route ingress.Route) func(context.C
 // ItemFor turns an admitted ingress into a work item. The ingress link is
 // what keeps "why does this change exist" answerable from the other end.
 func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
-	return queue.WorkItem{ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID, Task: task}
+	return queue.WorkItem{ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID,
+		Requester: ing.Requester, Task: task}
 }
 
 // Run drives one item from claim to settled state. The returned item reports
@@ -83,6 +91,12 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	item, claim, err := q.Claim(ctx, item)
 	if err != nil {
 		return item, fmt.Errorf("loop: claim: %w", err)
+	}
+
+	if deny, err := l.authorize(ctx, item, authz.ActionPropose); err != nil {
+		return q.Fail(ctx, item, claim, err.Error())
+	} else if deny != "" {
+		return q.Park(ctx, item, claim, deny)
 	}
 
 	leaser := l.Store.Leaser(l.Runner)
@@ -162,6 +176,11 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 		return q.Wait(ctx, item, claim, reasons(verdicts))
 	}
 
+	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
+		return q.Fail(ctx, item, claim, err.Error())
+	} else if deny != "" {
+		return q.Park(ctx, item, claim, deny)
+	}
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
 		_, err := git.NewLander(l.Mirror, l.Store.Log()).Land(ctx, cs)
 		if err == nil {
@@ -183,6 +202,11 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 // optimistic — and the gates run afterwards as checks on the branch. A red
 // check opens repair work; nothing rolls back by itself.
 func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, ws forge.Workspace, cs forge.ChangeSet, head forge.Commit) (queue.WorkItem, error) {
+	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
+		return q.Fail(ctx, item, claim, err.Error())
+	} else if deny != "" {
+		return q.Park(ctx, item, claim, deny)
+	}
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
 		_, err := git.NewLander(l.Mirror, l.Store.Log()).Land(ctx, cs)
 		return err
@@ -248,6 +272,37 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 	return q.Done(ctx, item, claim, head)
 }
 
+// authorize checks one action when enforcement is on, records the decision
+// either way, and returns the park-worthy reason on denial. The evidence
+// record carries the grant that permitted the action — why it was allowed,
+// not only that it happened.
+func (l *Loop) authorize(ctx context.Context, item queue.WorkItem, action authz.Action) (string, error) {
+	if l.Authz == nil {
+		return "", nil
+	}
+	actor := authz.Actor{Principal: authz.Principal{Subject: l.Runner, Kind: authz.KindAgent, Tenant: item.Tenant}}
+	if item.Requester != "" && item.Requester != l.Runner {
+		p := authz.Principal{Subject: item.Requester, Kind: authz.KindUser, Tenant: item.Tenant}
+		actor.OnBehalfOf = &p
+	}
+	d, err := l.Authz.Can(ctx, actor, action, authz.Resource{
+		Tenant: item.Tenant, Box: item.Box, Repo: l.Repo.Name, RepoRole: string(l.Repo.Role),
+	})
+	if err != nil {
+		return "", err
+	}
+	l.Store.Log().Append(ctx, evidence.Record{
+		Tenant: item.Tenant, Scope: "workitem/" + item.ID,
+		Kind: "authz", Subject: string(action), Actor: l.Runner,
+		OnBehalfOf: item.Requester, Grant: d.Grant, Body: []byte(d.Reason),
+		Trace: telemetry.TraceID(ctx),
+	})
+	if !d.Allow {
+		return "not authorized: " + d.Reason, nil
+	}
+	return "", nil
+}
+
 func (l *Loop) record(ctx context.Context, item queue.WorkItem, kind, subject, body string) {
 	if body == "" {
 		b, _ := json.Marshal(item)
@@ -255,8 +310,8 @@ func (l *Loop) record(ctx context.Context, item queue.WorkItem, kind, subject, b
 	}
 	l.Store.Log().Append(ctx, evidence.Record{
 		Tenant: item.Tenant, Scope: "workitem/" + item.ID,
-		Kind: kind, Subject: subject, Actor: l.Runner, Body: []byte(body),
-		Trace: telemetry.TraceID(ctx),
+		Kind: kind, Subject: subject, Actor: l.Runner, OnBehalfOf: item.Requester,
+		Body: []byte(body), Trace: telemetry.TraceID(ctx),
 	})
 }
 

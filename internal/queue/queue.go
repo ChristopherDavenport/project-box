@@ -47,8 +47,14 @@ type WorkItem struct {
 	// orphan work, and the queue is where that invariant is enforced rather
 	// than hoped for.
 	Ingress string `json:"ingress"`
-	Task    string `json:"task"`
-	State   State  `json:"state"`
+	// Requester is the principal whose authority this work exercises,
+	// inherited from the ingress. It rides every evidence record as
+	// OnBehalfOf: an audit must separate a change a person made from one an
+	// automation made for them, and a log that never drew that line cannot
+	// have it recovered later.
+	Requester string `json:"requester,omitempty"`
+	Task      string `json:"task"`
+	State     State  `json:"state"`
 	// Head is the commit the item produced, once it has.
 	Head string `json:"head,omitempty"`
 	// Note carries the parked/failed reason.
@@ -212,7 +218,8 @@ func (q *Queue) record(ctx context.Context, w WorkItem, kind, subject, note stri
 	}
 	_, err = q.Store.Log().Append(ctx, evidence.Record{
 		Tenant: w.Tenant, Scope: scope(w.ID),
-		Kind: kind, Subject: subject, Actor: q.Runner, Body: body,
+		Kind: kind, Subject: subject, Actor: q.Runner, OnBehalfOf: w.Requester,
+		Body: body,
 	})
 	return err
 }

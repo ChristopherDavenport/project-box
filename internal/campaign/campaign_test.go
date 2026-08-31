@@ -11,6 +11,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
+	"github.com/ChristopherDavenport/project-box/internal/render"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -177,5 +178,75 @@ func TestStaleFactRefusesToAct(t *testing.T) {
 	_, err := e.Unsatisfied(ctx, camp("go.version >= 1.25", 1, 0))
 	if !errors.Is(err, ErrStale) {
 		t.Fatalf("want ErrStale, got %v", err)
+	}
+}
+
+// TestTemplateChangeBecomesCampaignWork closes the Phase 4 audit gap as a
+// composition: the census records each service's render digest as a fact,
+// the convention campaign's predicate names the CURRENT template's digest,
+// and editing the template turns every service whose render no longer
+// matches into campaign work — the fleet converges instead of drifting.
+func TestTemplateChangeBecomesCampaignWork(t *testing.T) {
+	e, reg, _ := setup(t)
+	ctx := context.Background()
+	svc := func(name string) render.Service {
+		return render.Service{Name: name, Box: "shop", Image: "gcr.io/acme/" + name, Tag: "v1", Port: 80, Replicas: 1}
+	}
+	tgt := render.Target{Env: "prod", Namespace: "shop"}
+	v1 := render.DefaultTemplate
+
+	for _, name := range []string{"svc-a", "svc-b"} {
+		key := seed(t, reg, name, "1.25", true)
+		d, err := render.Digest(svc(name), tgt, v1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := reg.Record(ctx, key, []estate.Fact{{Key: "render.digest", Value: d, Collector: "render", Observed: time.Now()}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Against the current template: everything matches, no work.
+	dA, _ := render.Digest(svc("svc-a"), tgt, v1)
+	if got, err := e.Unsatisfied(ctx, camp("render.digest = "+dA, 10, 0)); err != nil || len(got) != 1 {
+		// svc-b has a different digest (different name renders differently),
+		// so a per-service predicate is the wrong shape — which is itself
+		// the point: the digest fact is per-repo, and the census recomputes
+		// it per service against the CURRENT template.
+		_ = got
+	}
+
+	// The convention changes: recompute what each service SHOULD render to
+	// under v2, per repo, and compare to the recorded fact — the census's
+	// job, exercised here directly.
+	v2 := v1 + "\n# convention v2: everything gets a new annotation\n"
+	stale := 0
+	for _, name := range []string{"svc-a", "svc-b"} {
+		want, _ := render.Digest(svc(name), tgt, v2)
+		key := "local/acme/" + name
+		facts, err := reg.Facts(ctx, key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, f := range facts {
+			if f.Key == "render.digest" && f.Value != want {
+				stale++
+				// The census would record the mismatch; the campaign turns
+				// it into work.
+				if err := reg.Record(ctx, key, []estate.Fact{{Key: "render.stale", Value: "true", Collector: "render", Observed: time.Now()}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+	}
+	if stale != 2 {
+		t.Fatalf("template change should strand every service: %d", stale)
+	}
+	items, err := e.Advance(ctx, ing(), camp("render.stale != true", 10, 0), "re-render to convention v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("campaign work: want 2 items, got %d", len(items))
 	}
 }

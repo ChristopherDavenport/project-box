@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/authz"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
@@ -233,4 +234,70 @@ func mustSh(t *testing.T, dir, name string, args ...string) string {
 		t.Fatal(err)
 	}
 	return out
+}
+
+// TestAuthorizationIsEnforcedInThePipeline closes the audit gap: the
+// evaluator's rules bind the actual loop, not only its own tests. The
+// runner's authority intersects with the requester's — an agent lands
+// nothing its human could not.
+func TestAuthorizationIsEnforcedInThePipeline(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	grants := authz.Static{}
+	e.loop.Authz = &authz.Evaluator{Grants: grants}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-authz"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+
+	// Nobody holds anything: parked at propose, with the denial recorded.
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-az1", "change something"))
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateParked || !strings.Contains(item.Note, "not authorized") {
+		t.Fatalf("ungranted work was not parked: %+v", item)
+	}
+
+	// Runner may propose and land; the REQUESTER may only propose:
+	// delegation intersects in the pipeline, so the land is refused.
+	grants["runner-1"] = []authz.Grant{{ID: "g-runner", Subject: "runner-1", Tenant: string(tn),
+		Actions: []authz.Action{authz.ActionPropose, authz.ActionLand}}}
+	grants["chris"] = []authz.Grant{{ID: "g-chris", Subject: "chris", Tenant: string(tn),
+		Actions: []authz.Action{authz.ActionPropose}}}
+	item2, _ := q.Submit(ctx, ItemFor(ing, "wi-az2", "change again"))
+	item2, err = e.loop.Run(ctx, item2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item2.State != queue.StateParked || !strings.Contains(item2.Note, "delegator") {
+		t.Fatalf("delegation escalated in the pipeline: %+v", item2)
+	}
+
+	// Grant the requester land too: through, with the evidence showing WHO
+	// (actor), FOR WHOM (on-behalf-of), and WHY ALLOWED (the grant).
+	grants["chris"][0].Actions = append(grants["chris"][0].Actions, authz.ActionLand)
+	item3, _ := q.Submit(ctx, ItemFor(ing, "wi-az3", "third time"))
+	item3, err = e.loop.Run(ctx, item3)
+	if err != nil || item3.State != queue.StateDone {
+		t.Fatalf("granted work did not land: %+v %v", item3, err)
+	}
+	sawGrant, sawOBO := false, false
+	for r, err := range e.store.Log().Since(ctx, tn, "workitem/wi-az3", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "authz" && r.Grant == "g-runner" {
+			sawGrant = true
+		}
+		if r.OnBehalfOf == "chris" && r.Actor == "runner-1" {
+			sawOBO = true
+		}
+	}
+	if !sawGrant || !sawOBO {
+		t.Fatalf("evidence missing the authority story: grant=%v obo=%v", sawGrant, sawOBO)
+	}
 }
