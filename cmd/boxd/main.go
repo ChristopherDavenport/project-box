@@ -19,13 +19,17 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent"
+	"github.com/ChristopherDavenport/project-box/internal/agent/acp"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
+	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/pump"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
+	"github.com/ChristopherDavenport/project-box/internal/seat"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/telemetry"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -51,6 +55,8 @@ func run() error {
 	maxConcurrent := flag.Int("max-concurrent", 2, "concurrent runs")
 	maxPerHour := flag.Int("max-per-hour", 0, "run starts per hour, 0 = unlimited")
 	buildCmd := flag.String("build", "", "builder command run in the workspace (commits its own change)")
+	agentBin := flag.String("agent", "", "ACP agent binary (e.g. claude-agent-acp); overrides -build with a real agent")
+	seatName := flag.String("seat", "mason", "seat identity for the agent's continuity")
 	checkCmd := flag.String("check", "go test ./...", "gate/check command")
 	otlp := flag.String("otlp", "", "collector endpoint (host:port); empty = telemetry off")
 	flag.Parse()
@@ -87,6 +93,24 @@ func run() error {
 		return err
 	}
 
+	var builder loop.Builder = shellBuilder{cmd: *buildCmd}
+	var handoff func(context.Context, queue.WorkItem) error
+	if *agentBin != "" {
+		ab := &acp.Builder{
+			Store: s, Tenant: t, Box: *box,
+			Command: []string{*agentBin},
+			Composer: &agent.Composer{Source: agent.StaticLayers{{
+				Name: "builder", Scope: agent.ScopeRole,
+				Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},
+				Instructions: "You are a build agent in an automated factory. Make the requested change precisely and minimally.",
+				Tools:        agent.ToolPolicy{PermissionMode: "acceptEdits"},
+			}}},
+			Seat:   &seat.Seat{Name: *seatName, Base: &knowledge.Base{Store: s, Tenant: t}},
+			Mirror: m,
+		}
+		builder, handoff = ab, ab.Handoff
+	}
+
 	q := &queue.Queue{Store: s, Runner: *runner, TTL: 30 * time.Minute}
 	p := &pump.Pump{
 		Store: s, Tenant: t, Runner: *runner, Queue: q,
@@ -95,7 +119,7 @@ func run() error {
 		Loops: map[string]*loop.Loop{*box: {
 			Store: s, Runner: *runner, Mirror: m, Repo: repo, Branch: *branch,
 			Lane:    forge.Lane(*lane),
-			Builder: shellBuilder{cmd: *buildCmd},
+			Builder: builder, Handoff: handoff,
 			Gates: func(ws forge.Workspace) []forge.Gate {
 				return []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
 					Commands: [][]string{{"sh", "-c", *checkCmd}}}}

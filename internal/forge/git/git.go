@@ -322,3 +322,18 @@ func RevParse(ctx context.Context, dir, rev string) (string, error) {
 	out, err := run(ctx, dir, "rev-parse", rev)
 	return strings.TrimSpace(out), err
 }
+
+// Dirty reports whether a working tree has uncommitted changes.
+func Dirty(ctx context.Context, dir string) (bool, error) {
+	out, err := run(ctx, dir, "status", "--porcelain")
+	return strings.TrimSpace(out) != "", err
+}
+
+// CommitAll stages and commits everything in the tree.
+func CommitAll(ctx context.Context, dir, message string) error {
+	if _, err := run(ctx, dir, "add", "-A"); err != nil {
+		return err
+	}
+	_, err := run(ctx, dir, "commit", "-m", message)
+	return err
+}

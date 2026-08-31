@@ -623,8 +623,22 @@ OnBehalfOf threading, authz enforcement IN the pipeline (delegation now
 intersects at propose and land, not only in the evaluator's tests), and the
 template-change-to-campaign-work composition.
 
+The ACP builder adapter is OPERATIONAL and live-verified (2026-08-31):
+acp.Builder puts a real agent in the loop's Builder seat — bundle resolved
+(wake layer included), agentref on the record BEFORE the run, context
+materialized as a read-only sibling of the workspace, permission mode set
+through the protocol's session/set_mode (fail closed: an agent that refuses
+the mode gets no prompt), the working contract enforced (commit or
+escalate; a run that changed nothing is an error, never a landing — the
+adapter commits leftover work but refuses declared victory over an
+untouched tree), and HANDOFF/ESCALATE both honored through the verb and a
+text fallback. Proven by the fake-agent suite (worker, lazy, escalate,
+rogue) and by a LIVE run: claude-agent-acp 0.70.0 landed a real commit
+through the whole loop in 12 seconds, and its unprompted handoff correctly
+described the factory's own materialization model. cmd/boxd -agent runs
+real agents on the daemon; the gated live test (BOX_ACP_LIVE) never runs in
+CI — it spends a real session.
+
 Phases 7 and 8 remain blocked on external resources — accounts, billing,
-the auditor. The next code-shaped work beyond them: the ACP builder adapter
-(wiring acp.Runtime into loop.Builder with seats and escalation end to
-end), box.yaml multi-Box config for boxd, and the live continuity
-experiment Phase 12 was sized to enable.
+the auditor. Next code-shaped work: box.yaml multi-Box config for boxd, and
+the live continuity experiment Phase 12 was sized to enable.

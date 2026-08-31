@@ -34,9 +34,10 @@ var ErrPolicyViolation = errors.New("acp: denied tool appeared on the stream —
 
 // Runtime runs one agent process per call.
 type Runtime struct {
-	// Command is the agent argv, e.g. {"claude-agent-acp"}. The runtime
-	// appends "--permission-mode" from the bundle, so the mode the resolver
-	// chose — never the harness default — is what the process starts under.
+	// Command is the agent argv, e.g. {"claude-agent-acp"}. The permission
+	// mode the resolver chose is applied through the protocol's
+	// session/set_mode after session/new — no flags, and fail-closed: an
+	// agent that refuses the mode does not get a prompt.
 	Command []string
 	// Dir is the working directory for the agent process: the workspace.
 	Dir string
@@ -70,7 +71,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	argv := append(append([]string{}, rt.Command...), "--permission-mode", b.Tools.PermissionMode)
+	argv := append([]string{}, rt.Command...)
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = rt.Dir
 	cmd.Env = append(os.Environ(), rt.Env...)
@@ -170,6 +171,15 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		"cwd": rt.Dir, "mcpServers": []any{},
 	}, &newRes); err != nil {
 		return Result{}, fmt.Errorf("acp: session/new: %w", err)
+	}
+	if mode := b.Tools.PermissionMode; mode != "" {
+		if err := conn.call(ctx, "session/set_mode", map[string]any{
+			"sessionId": newRes.SessionID, "modeId": mode,
+		}, nil); err != nil {
+			// Fail closed: running under the wrong permission mode is the
+			// harness-default trap this whole layer exists to prevent.
+			return Result{}, fmt.Errorf("acp: agent refused permission mode %q: %w", mode, err)
+		}
 	}
 	var promptRes struct {
 		StopReason string `json:"stopReason"`

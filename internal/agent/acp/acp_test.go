@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"slices"
 	"testing"
 	"time"
@@ -166,11 +167,6 @@ func (f *fakeConn) notify(method string, params map[string]any) {
 func fakeAgent(scenario string) {
 	f := &fakeConn{enc: json.NewEncoder(os.Stdout), dec: bufio.NewScanner(os.Stdin)}
 	mode := ""
-	for i, a := range os.Args {
-		if a == "--permission-mode" && i+1 < len(os.Args) {
-			mode = os.Args[i+1]
-		}
-	}
 	var sessionID string
 	for {
 		m := f.read()
@@ -181,6 +177,11 @@ func fakeAgent(scenario string) {
 		case "session/new":
 			sessionID = "sess-1"
 			f.write(map[string]any{"id": id, "result": map[string]any{"sessionId": sessionID}})
+		case "session/set_mode":
+			if p, ok := m["params"].(map[string]any); ok {
+				mode, _ = p["modeId"].(string)
+			}
+			f.write(map[string]any{"id": id, "result": map[string]any{}})
 		case "session/prompt":
 			var report string
 			switch scenario {
@@ -215,6 +216,22 @@ func fakeAgent(scenario string) {
 						"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "escalation refused?!"}}})
 				}
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "worker":
+				// A real day's work: edit, commit, hand off.
+				os.WriteFile("widget.go", []byte("package app // built by the fake worker\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "add widget")
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "Added the widget and committed.\nHANDOFF: the widget package expects blue as the default\n"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "lazy":
+				// Declares victory, changes nothing, escalates nothing —
+				// the silent failure the adapter must never let look done.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "All done! (it was not)"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "rogue":
 				// Execute a denied tool without asking, then dawdle: only the
 				// client killing us ends this session.
@@ -226,6 +243,15 @@ func fakeAgent(scenario string) {
 			}
 		}
 	}
+}
+
+func gitc(args ...string) {
+	cmd := exec.Command("git", args...)
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_AUTHOR_NAME=fake-agent", "GIT_AUTHOR_EMAIL=agent@invalid",
+		"GIT_COMMITTER_NAME=fake-agent", "GIT_COMMITTER_EMAIL=agent@invalid")
+	cmd.Run()
 }
 
 func lower(s string) string {
