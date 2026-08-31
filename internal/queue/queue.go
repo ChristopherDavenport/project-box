@@ -53,8 +53,13 @@ type WorkItem struct {
 	// automation made for them, and a log that never drew that line cannot
 	// have it recovered later.
 	Requester string `json:"requester,omitempty"`
-	Task      string `json:"task"`
-	State     State  `json:"state"`
+	// DependsOn names items that must settle DONE before this one is
+	// claimable — the work graph. A parked or failed dependency parks its
+	// dependents with the cause named; execution order is nobody's plan,
+	// it emerges from claims against the graph.
+	DependsOn []string `json:"depends_on,omitempty"`
+	Task      string   `json:"task"`
+	State     State    `json:"state"`
 	// Head is the commit the item produced, once it has.
 	Head string `json:"head,omitempty"`
 	// Note carries the parked/failed reason.
@@ -65,6 +70,13 @@ type WorkItem struct {
 // until an operator resumes. In-flight work finishes or parks on its own; the
 // stop is about not STARTING anything while a human decides.
 var ErrStopped = errors.New("queue: claims are stopped")
+
+// ErrBlocked reports unsettled dependencies: not a failure, just not yet.
+var ErrBlocked = errors.New("queue: dependencies not yet settled")
+
+// ErrDependencyFailed reports that a dependency parked or failed; the item
+// has been parked in cascade, naming the cause.
+var ErrDependencyFailed = errors.New("queue: dependency parked or failed")
 
 // Queue submits, claims, and settles work items.
 type Queue struct {
@@ -82,7 +94,10 @@ func (q *Queue) Submit(ctx context.Context, w WorkItem) (WorkItem, error) {
 		return WorkItem{}, errors.New("queue: work item traces to no ingress — orphan work is refused")
 	}
 	w.State = StatePending
-	return w, q.record(ctx, w, "queued", w.ID, "")
+	if err := q.record(ctx, w, "queued", w.ID, ""); err != nil {
+		return WorkItem{}, err
+	}
+	return w, q.index(ctx, w.Tenant, "pending", w.ID, w.Task)
 }
 
 // Claim takes the item's lease. The lease, not the state fold, is the
@@ -95,6 +110,30 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 		return w, forge.Lease{}, err
 	} else if stopped {
 		return w, forge.Lease{}, ErrStopped
+	}
+	for _, dep := range w.DependsOn {
+		d, err := q.Load(ctx, w.Tenant, dep)
+		if err != nil {
+			return w, forge.Lease{}, fmt.Errorf("queue: dependency %s of %s: %w", dep, w.ID, err)
+		}
+		switch d.State {
+		case StateDone:
+		case StateParked, StateFailed:
+			// Cascade: the dependent parks too, and its note names the
+			// cause — a leaf must never park mysteriously when its root is
+			// what died.
+			w.State = StateParked
+			w.Note = fmt.Sprintf("dependency %s %s: %s", dep, d.State, d.Note)
+			if rerr := q.record(ctx, w, "parked", w.ID, w.Note); rerr != nil {
+				return w, forge.Lease{}, rerr
+			}
+			if rerr := q.index(ctx, w.Tenant, "exceptions", w.ID, w.Note); rerr != nil {
+				return w, forge.Lease{}, rerr
+			}
+			return w, forge.Lease{}, fmt.Errorf("%w: %s is %s", ErrDependencyFailed, dep, d.State)
+		default:
+			return w, forge.Lease{}, fmt.Errorf("%w: %s is %s", ErrBlocked, dep, d.State)
+		}
 	}
 	lease, err := q.Store.Leaser(q.Runner).Acquire(ctx, forge.LeaseRequest{
 		Tenant: w.Tenant, Repo: "_queue", Ref: scope(w.ID), Run: w.ID, TTL: q.TTL,
