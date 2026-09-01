@@ -759,6 +759,42 @@ them: concurrent runs racing `git remote update` on one mirror directory
 over the last, so omitempty meant a transition could never CLEAR a field —
 a settled item kept the note it parked with.
 
+The dogfood harness is on disk now (hack/dogfood), which it was not for the
+rounds that produced everything above. box.yaml, the runner, the control
+room, and the issue submitter lived in the gitignored .factory/, so the most
+consequential live leg in the project was the only one that could not be
+recreated from nothing — and it carried facts held nowhere else.
+
+The box's shape is issue #7 read literally: one repo, one seat,
+MaxConcurrent 1, the gated lane, landing on refs/heads/factory and never on
+main. TestDogfoodBoxIsNarrow holds it there, because two halves of that
+posture are DEFAULTS POINTING THE OTHER WAY — boxcfg resolves an unstated
+lane to optimistic and an unstated branch to main, so deleting two lines
+would quietly turn a gated factory into one that lands unjudged on the
+branch a human is working in. Widening the dogfood is a test failure rather
+than an omission, which is the only form in which "start narrow" survives a
+config file.
+
+The budget is 6M tokens an hour, reasoned in the file from a measured
+918,520 tokens ($1.61) for one issue, with allow_unmetered deliberately
+absent. And run.sh carries the workaround for the credential-helper hole
+recorded in a96320e: GIT_CONFIG_COUNT is the one config channel that
+survives the hermetic GIT_CONFIG_GLOBAL=/dev/null, and without it the forge
+cannot reach a private HTTPS remote on any machine. The workaround is on
+the record; the seam it works around is still missing.
+
+submit.py carries the working contract every agent run in this repository
+has executed under — read the docs, change precisely, escalate rather than
+invent. It rides the task text, so it is neither part of the agentref nor
+governed as a layer: exactly the "inline material nobody reviewed" case
+ARCHITECTURE names under "Text first, git for governance", and now at least
+visible. Promoting it to a governed base layer is the fix, not this.
+
+Still unrun from #7: the second lane. Everything above is the gated lane
+against the real remote; the optimistic lane on a scratch mirror needs no
+code (Phase 9 shipped it, and boxcfg's default IS optimistic) — it needs a
+scratch remote and a deliberate session.
+
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
 the confinement profile behind the #6 seam, review sampling/sign-off
 endpoints for the control room, and OIDC as a boxgate variant.

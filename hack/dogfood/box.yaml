@@ -1,0 +1,55 @@
+# project-box, pointed at project-box.
+#
+# Issue #7's shape, taken literally: one repo, one seat, MaxConcurrent 1,
+# the gated lane. The factory lands on refs/heads/factory — never main,
+# never the branch a human is working on.
+#
+# Every path here is relative to the REPOSITORY ROOT, which is where
+# hack/dogfood/run.sh puts you. The state they name lives in .factory/,
+# which .gitignore excludes: the harness is versioned, the store, mirrors,
+# workspaces, and socket are not. That split is the only difference between
+# this file and the one that ran rounds 1 through 3 from .factory/box.yaml.
+#
+# The tenant is the outermost scope of every key and every evidence chain.
+# Changing it does not rename anything — it starts an empty scope beside the
+# existing one and orphans the chain the dogfood has been writing since
+# round 1. It is the daemon's identity, and a reload that touches it is
+# refused for the same reason.
+tenant: davenport
+runner: boxd
+db: .factory/box.db
+root: .factory/forge
+listen: unix:.factory/boxd.sock
+every: 15s
+drain: 60s
+build_timeout: 30m
+
+budget:
+  # One at a time. Issue #18 (three concurrent runs producing one) is fixed,
+  # but the point of the dogfood is the agent, not the lease.
+  max_concurrent: 1
+  # The brake, in the currency the invoice is denominated in. The upstream
+  # adapter reports usage, so this is a real bound rather than a wish.
+  #
+  # Measured: the first real run cost 918,520 tokens / $1.61 for one issue.
+  # At 2M/hour that is two runs an hour and eighteen issues is a working day;
+  # at 6M it is about six, which is roughly what one seat at MaxConcurrent 1
+  # can physically get through. Raise or lower it here and `kill -HUP` the
+  # daemon — the budget is one of the things that swaps hot.
+  max_tokens_per_window: 6000000
+  window: 1h
+  # Deliberately absent: allow_unmetered. A run that will not say what it
+  # cost should stop the factory — that is the whole finding from round 1.
+
+boxes:
+  - name: pb
+    agent: claude-agent-acp
+    seat: mason
+    repos:
+      - name: project-box
+        remote: https://github.com/ChristopherDavenport/project-box.git
+        branch: factory
+        role: service
+        lane: gated
+        route: issues
+        check: go build ./... && go test ./...
