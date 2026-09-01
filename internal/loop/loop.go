@@ -91,10 +91,20 @@ func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 // Run drives one item from claim to settled state. The returned item reports
 // where it ended: done, parked, waiting, or failed — an error return means
 // the loop itself broke, not that the change was judged and refused.
-func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, error) {
+func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem, rerr error) {
 	if err := forge.ValidateLane(l.Lane, l.Repo.Role); err != nil {
 		return item, err
 	}
+	// The workspace outlives the lease for exactly as long as the resume point
+	// does: held while the item waits with a commit to come back to, handed
+	// back to Prune the moment it settles or gives that commit up.
+	defer func() {
+		if out.State == queue.StateWaiting && out.Built != "" {
+			l.Mirror.Hold(item.ID, l.Repo.Name)
+			return
+		}
+		l.Mirror.Discard(item.ID, l.Repo.Name)
+	}()
 	q := &queue.Queue{Store: l.Store, Runner: l.Runner, TTL: l.TTL}
 	item, claim, err := q.Claim(ctx, item)
 	if err != nil {
@@ -125,13 +135,37 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	if err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	}
-	ws, err := l.Mirror.Checkout(ctx, repoLease, base)
-	if err != nil {
-		return q.Fail(ctx, item, claim, err.Error())
+	// A resume point from an earlier attempt: this item already built a commit
+	// and is back only because a gate could not answer yet. Rebuilding would
+	// buy the same change for the price of another agent run — the most
+	// expensive thing the factory does — so the builder is skipped while the
+	// branch still stands where that commit was written. A base that moved, a
+	// tree that is gone, a different runner: every one of those falls through
+	// to a normal build, because rebuilding is always sound and reusing is not.
+	var ws forge.Workspace
+	resumed := false
+	if item.Built != "" && item.BuiltBase == string(base) {
+		adopted, ok, aerr := l.Mirror.Adopt(ctx, repoLease, forge.Commit(item.Built), base)
+		if aerr != nil {
+			return q.Fail(ctx, item, claim, aerr.Error())
+		}
+		ws, resumed = adopted, ok
+	}
+	if !resumed {
+		ws, err = l.Mirror.Checkout(ctx, repoLease, base)
+		if err != nil {
+			return q.Fail(ctx, item, claim, err.Error())
+		}
 	}
 
 	var head forge.Commit
-	if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
+	if resumed {
+		head = forge.Commit(item.Built)
+		// On the record, so the chain shows one commit judged twice rather
+		// than two builds that happened to agree.
+		l.record(ctx, item, "build-resumed", string(head),
+			fmt.Sprintf(`{"base":%q,"waiting_on":%q}`, base, item.Note))
+	} else if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
 		var err error
 		head, err = l.Builder.Build(ctx, ws, item.Task)
 		if err == nil {
@@ -195,6 +229,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	case forge.DecisionFail:
 		return q.Park(ctx, item, claim, reasons(verdicts))
 	case forge.DecisionPending:
+		// Carry the commit forward so the next tick re-enters at the gate
+		// rather than at the builder. Waiting on a person is routine and can
+		// last days; it must not cost an agent run per tick to do it.
+		item.Built, item.BuiltBase = string(head), string(base)
 		return q.Wait(ctx, item, claim, reasons(verdicts))
 	}
 

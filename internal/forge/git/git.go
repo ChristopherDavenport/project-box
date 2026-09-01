@@ -40,6 +40,7 @@ type Mirror struct {
 	mu     sync.Mutex
 	repos  map[string]forge.Repo  // name -> repo, established by Fetch
 	leased map[string]forge.Lease // workspace dir -> lease, for Prune
+	held   map[string]bool        // workspace dir -> exempt from Prune, for Adopt
 }
 
 // NewMirror returns the mirror set for one tenant. The handle is tenant-bound
@@ -60,6 +61,7 @@ func NewMirror(root string, tn tenant.ID, leaser forge.Leaser) (*Mirror, error) 
 	return &Mirror{
 		root: root, tenant: tn, leaser: leaser,
 		repos: map[string]forge.Repo{}, leased: map[string]forge.Lease{},
+		held: map[string]bool{},
 	}, nil
 }
 
@@ -143,6 +145,61 @@ func (m *Mirror) Checkout(ctx context.Context, l forge.Lease, at forge.Commit) (
 	return forge.Workspace{Repo: l.Repo, Run: l.Run, Dir: dir, Base: at, Lease: l}, nil
 }
 
+// Adopt re-attaches to the workspace an earlier attempt of the same run left
+// behind, at the commit that attempt built, instead of materializing a new
+// one. It reports false when there is no such tree to take — a different
+// runner, a reclaimed disk, a head that moved — and the caller must then build
+// again rather than assume.
+//
+// Checkout destroys a leftover tree on purpose, and that is the right default;
+// this is the one case where keeping it is right, so it is a separate call.
+// Staying is then a decision at the call site rather than a silent change of
+// meaning in Checkout.
+func (m *Mirror) Adopt(ctx context.Context, l forge.Lease, at, base forge.Commit) (forge.Workspace, bool, error) {
+	if l.Tenant != m.tenant {
+		return forge.Workspace{}, false, fmt.Errorf("git: lease for tenant %q presented to tenant %q mirror", l.Tenant, m.tenant)
+	}
+	// The same fencing rule Checkout applies: the leaser is the only authority
+	// on whether the claim survived, and an adopted tree is no less a tree.
+	if _, err := m.leaser.Renew(ctx, l, time.Until(l.Expires)); err != nil {
+		return forge.Workspace{}, false, fmt.Errorf("git: adopt refused: %w", err)
+	}
+	dir := m.workDir(l.Run, l.Repo)
+	if _, err := os.Stat(dir); err != nil {
+		return forge.Workspace{}, false, nil
+	}
+	// A tree that does not resolve, or resolves elsewhere, is not the one the
+	// caller means. Rebuilding is always sound, so every doubt reads as false
+	// rather than as an error the caller has to interpret.
+	head, err := run(ctx, dir, "rev-parse", "HEAD")
+	if err != nil || forge.Commit(strings.TrimSpace(head)) != at {
+		return forge.Workspace{}, false, nil
+	}
+	m.mu.Lock()
+	m.leased[dir] = l
+	m.mu.Unlock()
+	return forge.Workspace{Repo: l.Repo, Run: l.Run, Dir: dir, Base: base, Lease: l}, true, nil
+}
+
+// Hold exempts a run's workspace from Prune while the run is between leases.
+// A run waiting on a gate releases its lease and reacquires it on the next
+// tick; in that gap the tree's lease no longer answers, and Prune would
+// reclaim exactly the tree Adopt is there to reuse.
+func (m *Mirror) Hold(run, repo string) {
+	m.mu.Lock()
+	m.held[m.workDir(run, repo)] = true
+	m.mu.Unlock()
+}
+
+// Discard lifts a hold and returns the tree to Prune's care. Every settle
+// calls it: a held workspace nobody will come back for is a disk leak with no
+// clock on it.
+func (m *Mirror) Discard(run, repo string) {
+	m.mu.Lock()
+	delete(m.held, m.workDir(run, repo))
+	m.mu.Unlock()
+}
+
 // Prune removes workspaces whose leases no longer answer. It is advisory disk
 // reclamation — the authoritative fencing stays at land — so it asks the
 // leaser rather than trusting any local clock.
@@ -150,6 +207,9 @@ func (m *Mirror) Prune(ctx context.Context) error {
 	m.mu.Lock()
 	tracked := make(map[string]forge.Lease, len(m.leased))
 	for d, l := range m.leased {
+		if m.held[d] {
+			continue // a live resume point, between leases by design
+		}
 		tracked[d] = l
 	}
 	m.mu.Unlock()

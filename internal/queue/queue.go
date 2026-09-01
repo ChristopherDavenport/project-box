@@ -65,6 +65,21 @@ type WorkItem struct {
 	State     State    `json:"state"`
 	// Head is the commit the item produced, once it has.
 	Head string `json:"head,omitempty"`
+	// Built is a commit this item has already produced but not landed: the
+	// resume point for an item waiting on a gate. Kept apart from Head, which
+	// is what a settled item landed — an item that is merely waiting must not
+	// read as finished to anything folding the chain.
+	//
+	// The point of carrying it is cost. A waiting item is re-drained every
+	// tick, and rebuilding is the single most expensive thing the factory
+	// does; the commit is already made, and the gate that said "not yet" will
+	// judge the same commit next time.
+	Built string `json:"built,omitempty"`
+	// BuiltBase is the branch commit Built was written on top of. The resume
+	// is sound only while the branch still stands there: past that the change
+	// was judged against a base that no longer exists, and a rebuild is the
+	// honest answer rather than a cheap one.
+	BuiltBase string `json:"built_base,omitempty"`
 	// Note carries the parked/failed reason.
 	Note string `json:"note,omitempty"`
 }
@@ -156,6 +171,7 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 // is a factory nobody can triage.
 func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
 	w.State, w.Note = StateParked, reason
+	w.dropResume()
 	err := q.record(ctx, w, "parked", w.ID, reason)
 	if err == nil {
 		err = q.index(ctx, w.Tenant, "exceptions", w.ID, reason)
@@ -164,8 +180,16 @@ func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, reason 
 	return w, err
 }
 
+// dropResume clears the resume point. Every settle does this: the built
+// commit either landed or was judged and refused, so a later attempt must
+// build afresh rather than re-offer a commit whose verdict is on the record.
+// Wait is the one transition that keeps it, because waiting is the one state
+// the same commit is still the answer to.
+func (w *WorkItem) dropResume() { w.Built, w.BuiltBase = "", "" }
+
 // Wait records a pending gate and frees the claim; the item resumes when the
-// gate answers.
+// gate answers. It keeps any resume point the caller set on the item — see
+// [WorkItem.Built].
 func (q *Queue) Wait(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
 	w.State, w.Note = StateWaiting, reason
 	err := q.record(ctx, w, "waiting", w.ID, reason)
@@ -177,6 +201,7 @@ func (q *Queue) Wait(ctx context.Context, w WorkItem, lease forge.Lease, reason 
 // auditor sampling that sha will pull first.
 func (q *Queue) Done(ctx context.Context, w WorkItem, lease forge.Lease, head forge.Commit) (WorkItem, error) {
 	w.State, w.Head = StateDone, string(head)
+	w.dropResume()
 	err := q.record(ctx, w, "done", string(head), "")
 	if err == nil {
 		// The landings index feeds review sampling: an auditor-shaped list of
@@ -190,6 +215,7 @@ func (q *Queue) Done(ctx context.Context, w WorkItem, lease forge.Lease, head fo
 // Fail settles the item unsuccessfully.
 func (q *Queue) Fail(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
 	w.State, w.Note = StateFailed, reason
+	w.dropResume()
 	err := q.record(ctx, w, "failed", w.ID, reason)
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err

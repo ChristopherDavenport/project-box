@@ -182,6 +182,181 @@ func TestFailingGateParksInsteadOfLanding(t *testing.T) {
 	}
 }
 
+// countingBuilder is scriptedBuilder that says how often it was asked. The
+// count is the whole point of the resume tests: a build is an agent run, and
+// an agent run is the dominant cost of running this factory at all.
+type countingBuilder struct {
+	scriptedBuilder
+	n int
+}
+
+func (c *countingBuilder) Build(ctx context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	c.n++
+	return c.scriptedBuilder.Build(ctx, ws, task)
+}
+
+// holdingGate is the human-approval shape without the approval machinery:
+// pending until someone flips the flag. approval.GateAdapter is the real one;
+// all these tests need is the three-state Decision and a gate that keeps
+// saying "not yet".
+type holdingGate struct{ approved *bool }
+
+func (holdingGate) Name() string { return "holding" }
+
+func (g holdingGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	if *g.approved {
+		return forge.Verdict{Gate: g.Name(), Decision: forge.DecisionPass, Reason: "approved"}, nil
+	}
+	return forge.Verdict{Gate: g.Name(), Decision: forge.DecisionPending, Reason: "waiting on a person"}, nil
+}
+
+// TestWaitingOnAGateDoesNotRebuild is the cost regression. A pending gate means
+// a person has not answered yet, which can last days, and the item is
+// re-drained every tick throughout. Each of those ticks used to be a full agent
+// run producing the same commit — routine review latency was the most expensive
+// thing the factory could do. The build happens once.
+func TestWaitingOnAGateDoesNotRebuild(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{holdingGate{approved: &approved}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-45"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-wait", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("pending gate should wait, got %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 1 {
+		t.Fatalf("first pass should build once, built %d times", builder.n)
+	}
+	built := item.Built
+	if built == "" {
+		t.Fatal("a waiting item carries no resume point: the next tick will rebuild")
+	}
+
+	// The person still has not answered. Drain reloads from the fold every
+	// tick, so the resume point has to survive the store, not just the call.
+	for tick := 1; tick <= 3; tick++ {
+		loaded, lerr := q.Load(ctx, tn, "wi-wait")
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		if loaded.Built != built {
+			t.Fatalf("tick %d: the fold lost the resume point: %q", tick, loaded.Built)
+		}
+		if tick == 2 {
+			// The daemon's housekeeping sweep runs on a timer of its own and
+			// knows nothing about an item mid-wait. Its rule — reclaim trees
+			// whose lease no longer answers — describes every waiting item,
+			// because waiting releases the lease. It must not take this one.
+			if perr := e.loop.Mirror.Prune(ctx); perr != nil {
+				t.Fatalf("prune: %v", perr)
+			}
+		}
+		item, err = e.loop.Run(ctx, loaded)
+		if err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		if item.State != queue.StateWaiting {
+			t.Fatalf("tick %d: state %s (%s)", tick, item.State, item.Note)
+		}
+		if builder.n != 1 {
+			t.Fatalf("tick %d rebuilt while waiting: %d builds", tick, builder.n)
+		}
+	}
+
+	// The approval arrives. The commit the reviewer was looking at is the one
+	// that lands — a rebuild here would land something nobody approved.
+	approved = true
+	loaded, err := q.Load(ctx, tn, "wi-wait")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("approved run: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("approved item should land, got %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 1 {
+		t.Fatalf("the approval should not rebuild: %d builds", builder.n)
+	}
+	if item.Head != built {
+		t.Fatalf("landed %s but the gate approved %s", item.Head, built)
+	}
+	if onMain := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main")); onMain != built {
+		t.Fatalf("remote main is %s, expected the approved %s", onMain, built)
+	}
+}
+
+// TestResumeRebuildsWhenTheBranchMoved: reuse is an optimization, never a
+// correctness shortcut. Once main has moved, the built commit was judged
+// against a base that no longer exists, and the cheap path gives way.
+func TestResumeRebuildsWhenTheBranchMoved(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{holdingGate{approved: &approved}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-46"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-moved", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting || builder.n != 1 {
+		t.Fatalf("expected waiting after one build, got %s / %d builds", item.State, builder.n)
+	}
+
+	// Someone else lands on main while the review is outstanding.
+	other := filepath.Join(t.TempDir(), "other")
+	mustSh(t, "", "git", "clone", e.remote, other)
+	if err := os.WriteFile(filepath.Join(other, "elsewhere.txt"), []byte("moved\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSh(t, other, "git", "add", ".")
+	mustSh(t, other, "git", "commit", "-m", "someone else")
+	mustSh(t, other, "git", "push", "origin", "HEAD:refs/heads/main")
+
+	loaded, err := q.Load(ctx, tn, "wi-moved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if builder.n != 2 {
+		t.Fatalf("a moved base must rebuild, built %d times", builder.n)
+	}
+	if item.Built == loaded.Built {
+		t.Fatal("the rebuild should have replaced the stale resume point")
+	}
+}
+
 // TestRedeliveryOpensOneIngress: webhooks retry, alerts flap; the same
 // occurrence names one ingress however many times it arrives.
 func TestRedeliveryOpensOneIngress(t *testing.T) {
