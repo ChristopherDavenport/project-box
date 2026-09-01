@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
@@ -165,6 +166,24 @@ var stateKinds = map[string]bool{
 // write the whole item, and a writer of anything else must not. TestFoldSkips
 // holds the writers to it.
 func StateRecord(kind string) bool { return stateKinds[kind] }
+
+// StateKinds is that vocabulary as a sorted list.
+//
+// Exported because the fold is not its only reader: the control room derives
+// a stage column from the same kinds, and the two drifted the moment three
+// were added here and nowhere else. A recovered item went on reporting
+// "building" — the stale stage of the run that abandoned it — which is the
+// one reading an operator must never be given, since it names work in
+// progress that nobody is doing. Whoever reads this vocabulary can now be
+// held to covering all of it.
+func StateKinds() []string {
+	out := make([]string, 0, len(stateKinds))
+	for k := range stateKinds {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
 
 // Queue submits, claims, and settles work items.
 type Queue struct {

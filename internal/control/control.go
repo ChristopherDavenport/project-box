@@ -232,6 +232,12 @@ func stageOf(kind string) string {
 		return "parked"
 	case "failed":
 		return "failed"
+	case "recovered":
+		return "recovered"
+	case "retried":
+		return "retried"
+	case "resolved":
+		return "resolved"
 	}
 	return ""
 }
