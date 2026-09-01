@@ -20,6 +20,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"slices"
 	"sync"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
@@ -31,6 +32,60 @@ import (
 // the time this returns; a runtime that let the call finish first would be
 // documenting violations, not preventing them.
 var ErrPolicyViolation = errors.New("acp: denied tool appeared on the stream — session killed")
+
+// ErrProtocolDialect reports that the agent answered initialize with a
+// protocol version this runtime does not speak.
+//
+// Fail closed, because the failure mode of guessing is silent. A dialect
+// drifted once already: v0.70's update shapes did not match the tool_call
+// form this runtime counts, so tool-call metrics read 0 across all eight runs
+// of the continuity experiment and the only reason anyone knew was a human
+// reading a column of zeros. The same shapes carry policy enforcement, so a
+// dialect this runtime cannot parse is not merely an undercount — it is a
+// stream whose denied tools may never be recognised at all.
+var ErrProtocolDialect = errors.New("acp: agent speaks a protocol version this runtime does not")
+
+// protocolVersion is the dialect this runtime is written against, offered at
+// initialize and required back. Bump it only together with the update shapes
+// below.
+const protocolVersion = 1
+
+// knownUpdates is every session update kind this runtime understands. The set
+// is explicit so that an unknown kind is a fact rather than a default branch:
+// see [Result.UnknownUpdates].
+var knownUpdates = []string{
+	"tool_call", "tool_call_update", "agent_message_chunk", "agent_thought_chunk",
+	"user_message_chunk", "plan", "available_commands_update", "current_mode_update",
+}
+
+// Usage is what a run cost, as the agent reported it.
+//
+// Reported is the load-bearing field. An agent that says nothing about cost
+// has not run for free, and a budget that treats silence as zero is the
+// tool-count bug again with money attached — so absence is carried
+// explicitly rather than collapsing into a zero total.
+type Usage struct {
+	InputTokens              int64
+	OutputTokens             int64
+	CacheReadInputTokens     int64
+	CacheCreationInputTokens int64
+	// Reported is false when nothing on the stream said what the run cost.
+	Reported bool
+}
+
+// Total is every token the run is billed for, cache reads included — they are
+// cheaper, never free.
+func (u Usage) Total() int64 {
+	return u.InputTokens + u.OutputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+}
+
+func (u *Usage) add(w wireUsage) {
+	u.InputTokens += w.InputTokens
+	u.OutputTokens += w.OutputTokens
+	u.CacheReadInputTokens += w.CacheReadInputTokens
+	u.CacheCreationInputTokens += w.CacheCreationInputTokens
+	u.Reported = true
+}
 
 // Runtime runs one agent process per call.
 type Runtime struct {
@@ -60,6 +115,17 @@ type Result struct {
 	// act, not a contrived failure: the caller parks the work with this
 	// reason attributed to the agent.
 	Escalated string
+	// Usage is what the run cost, when the agent said. Silence is carried as
+	// Usage.Reported false, never as a zero total.
+	Usage Usage
+	// UnknownUpdates lists session update kinds this runtime does not
+	// understand, deduped in first-seen order, plus "tool_call:untitled" for
+	// a tool call that arrived with no title for policy to match on.
+	//
+	// This is the drift alarm. A dialect that moves must be visible on the
+	// record while it is still cheap to notice, rather than inferred later
+	// from a metric that quietly read zero.
+	UnknownUpdates []string
 }
 
 // Run executes one prompt under a bundle's policy and blocks until the agent
@@ -95,6 +161,13 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		mu       sync.Mutex
 		res      Result
 		violated error
+		// streamed accumulates per-update usage. The prompt result wins when
+		// it carries a total of its own; summing both would double-count.
+		streamed Usage
+		// seenCalls dedupes a tool call announced as both tool_call and
+		// tool_call_update. Keying on the call id rather than the shape is
+		// what keeps the count right when a dialect prefers one spelling.
+		seenCalls = map[string]bool{}
 	)
 	conn := newConn(stdin, stdout, func(method string, params json.RawMessage) (any, error) {
 		switch method {
@@ -130,11 +203,36 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			if err := json.Unmarshal(params, &u); err != nil {
 				return nil, err
 			}
-			switch u.Update.SessionUpdate {
-			case "tool_call":
+			if w := u.usage(); w != nil {
 				mu.Lock()
-				res.ToolCalls = append(res.ToolCalls, u.Update.Title)
+				streamed.add(*w)
 				mu.Unlock()
+			}
+			switch u.Update.SessionUpdate {
+			case "tool_call", "tool_call_update":
+				// Both spellings announce the same call, so the id decides
+				// whether it is new. A dialect that only ever sends the update
+				// form still gets counted, and still gets judged.
+				key := u.Update.ToolCallID
+				if key == "" {
+					key = u.Update.Title
+				}
+				mu.Lock()
+				first := !seenCalls[key]
+				seenCalls[key] = true
+				if first {
+					res.ToolCalls = append(res.ToolCalls, u.Update.Title)
+					if u.Update.Title == "" {
+						// Policy matches on the title. Without one there is
+						// nothing to match, so enforcement did not happen here
+						// and must not be reported as if it had.
+						res.noteUnknown("tool_call:untitled")
+					}
+				}
+				mu.Unlock()
+				if !first || u.Update.Title == "" {
+					break
+				}
 				if ok, _ := b.Tools.Permits(u.Update.Title); !ok {
 					telemetry.ToolCall(ctx, u.Update.Title, false)
 					// The agent is executing a denied tool without asking.
@@ -147,6 +245,12 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				mu.Lock()
 				res.Text += u.Update.Content.Text
 				mu.Unlock()
+			default:
+				if !slices.Contains(knownUpdates, u.Update.SessionUpdate) {
+					mu.Lock()
+					res.noteUnknown(u.Update.SessionUpdate)
+					mu.Unlock()
+				}
 			}
 			return nil, nil // notification
 		default:
@@ -155,14 +259,23 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	})
 	go conn.serve()
 
-	var initRes json.RawMessage
+	var initRes struct {
+		ProtocolVersion int `json:"protocolVersion"`
+	}
 	if err := conn.call(ctx, "initialize", map[string]any{
-		"protocolVersion": 1,
+		"protocolVersion": protocolVersion,
 		"clientCapabilities": map[string]any{
 			"fs": map[string]any{"readTextFile": false, "writeTextFile": false},
 		},
 	}, &initRes); err != nil {
 		return Result{}, fmt.Errorf("acp: initialize: %w", err)
+	}
+	// Assert the dialect before spending anything. A version we do not speak
+	// is caught here, for free, rather than as a metric that reads zero and an
+	// enforcement layer that may not be enforcing.
+	if initRes.ProtocolVersion != protocolVersion {
+		return Result{}, fmt.Errorf("%w: offered %d, agent answered %d",
+			ErrProtocolDialect, protocolVersion, initRes.ProtocolVersion)
 	}
 	var newRes struct {
 		SessionID string `json:"sessionId"`
@@ -182,7 +295,9 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		}
 	}
 	var promptRes struct {
-		StopReason string `json:"stopReason"`
+		StopReason string     `json:"stopReason"`
+		Usage      *wireUsage `json:"usage,omitempty"`
+		Meta       *wireMeta  `json:"_meta,omitempty"`
 	}
 	err = conn.call(ctx, "session/prompt", map[string]any{
 		"sessionId": newRes.SessionID,
@@ -191,6 +306,17 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 
 	mu.Lock()
 	defer mu.Unlock()
+	// The turn's own total wins when it has one; otherwise the stream's
+	// increments are the best account there is. Summing both would bill the
+	// run twice.
+	switch {
+	case promptRes.Usage != nil:
+		res.Usage.add(*promptRes.Usage)
+	case promptRes.Meta != nil && promptRes.Meta.Usage != nil:
+		res.Usage.add(*promptRes.Meta.Usage)
+	default:
+		res.Usage = streamed
+	}
 	if violated != nil {
 		return res, violated
 	}
@@ -199,6 +325,16 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	}
 	res.StopReason = promptRes.StopReason
 	return res, nil
+}
+
+// noteUnknown records a dialect surprise once. Callers hold mu.
+func (r *Result) noteUnknown(kind string) {
+	if kind == "" {
+		kind = "(empty)"
+	}
+	if !slices.Contains(r.UnknownUpdates, kind) {
+		r.UnknownUpdates = append(r.UnknownUpdates, kind)
+	}
 }
 
 type toolCall struct {
@@ -237,11 +373,43 @@ type sessionUpdate struct {
 	SessionID string `json:"sessionId"`
 	Update    struct {
 		SessionUpdate string `json:"sessionUpdate"`
+		ToolCallID    string `json:"toolCallId"`
 		Title         string `json:"title"`
 		Content       struct {
 			Text string `json:"text"`
 		} `json:"content"`
+		Meta *wireMeta `json:"_meta,omitempty"`
 	} `json:"update"`
+	Meta *wireMeta `json:"_meta,omitempty"`
+}
+
+// usage finds a cost report on an update, at either of the two places the
+// dialect may hang it. Both spellings are part of the pinned dialect: an
+// agent that reports somewhere else reads as unmetered — loudly — rather
+// than as free.
+func (u sessionUpdate) usage() *wireUsage {
+	if u.Update.Meta != nil && u.Update.Meta.Usage != nil {
+		return u.Update.Meta.Usage
+	}
+	if u.Meta != nil && u.Meta.Usage != nil {
+		return u.Meta.Usage
+	}
+	return nil
+}
+
+type wireMeta struct {
+	Usage *wireUsage `json:"usage,omitempty"`
+}
+
+// wireUsage is the cost report as it appears on the wire. The field names are
+// the Anthropic usage names in ACP's camelCase; a dialect that spells them
+// differently produces a run with Reported false, which the capacity meter
+// treats as unmeasured rather than as zero.
+type wireUsage struct {
+	InputTokens              int64 `json:"inputTokens"`
+	OutputTokens             int64 `json:"outputTokens"`
+	CacheReadInputTokens     int64 `json:"cacheReadInputTokens"`
+	CacheCreationInputTokens int64 `json:"cacheCreationInputTokens"`
 }
 
 // conn is a minimal bidirectional JSON-RPC 2.0 endpoint over ndjson. Small on

@@ -146,8 +146,13 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			continue // no executor configured for this target; not this pump's work
 		}
 		release, err := p.Meter.Acquire(ctx, item.ID)
-		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrBusy) {
-			break // pacing, not failure: the rest waits for the next tick
+		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrBusy) ||
+			errors.Is(err, capacity.ErrUnmetered) {
+			// Pacing, not failure: the rest waits for the next tick. An
+			// unmetered window is pacing too — the meter has lost track of
+			// spend, and the factory holds until the window turns over
+			// rather than running on an account it cannot read.
+			break
 		}
 		if err != nil {
 			return settled, err

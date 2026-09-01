@@ -108,6 +108,89 @@ func TestEscalationIsARecordedAct(t *testing.T) {
 	}
 }
 
+// TestUsageIsCarriedFromTheTurn: the turn's own total is the account, and it
+// is what the capacity meter charges. Cache reads count — cheaper, never free.
+func TestUsageIsCarriedFromTheTurn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "metered").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !res.Usage.Reported {
+		t.Fatal("a reported cost read as unreported")
+	}
+	if got := res.Usage.Total(); got != 11000 {
+		t.Fatalf("total tokens %d, want 11000 (1200+300+9000+500)", got)
+	}
+}
+
+// TestUsageAccumulatesFromTheStream: a dialect that reports per update rather
+// than per turn is still metered, and the two are never summed together.
+func TestUsageAccumulatesFromTheStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "streamusage").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !res.Usage.Reported || res.Usage.Total() != 300 {
+		t.Fatalf("streamed usage lost: %+v", res.Usage)
+	}
+}
+
+// TestSilenceIsNotZeroSpend is the whole reason Usage carries Reported. An
+// agent that says nothing about cost has not run for free, and a meter that
+// reads unknown as zero is a brake that quietly disengaged.
+func TestSilenceIsNotZeroSpend(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "polite").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Usage.Reported {
+		t.Fatal("silence was recorded as a cost report")
+	}
+	if res.Usage.Total() != 0 {
+		t.Fatalf("unreported usage invented a total: %+v", res.Usage)
+	}
+}
+
+// TestDialectDriftIsLoud: the last drift zeroed a metric across eight
+// experiment runs and nobody noticed until a human read the column. An
+// unrecognised update kind is now a fact on the result, and a tool call
+// announced in the update spelling is still counted and still judged —
+// the same shapes carry policy, so parsing them is not only bookkeeping.
+func TestDialectDriftIsLoud(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "drift").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !slices.Contains(res.ToolCalls, "Bash") {
+		t.Fatalf("a tool call in the update spelling went uncounted: %+v", res.ToolCalls)
+	}
+	if len(res.ToolCalls) != 1 {
+		t.Fatalf("one call counted more than once: %+v", res.ToolCalls)
+	}
+	if !slices.Contains(res.UnknownUpdates, "reasoning_delta") {
+		t.Fatalf("an unknown update kind was swallowed: %+v", res.UnknownUpdates)
+	}
+}
+
+// TestProtocolDialectIsAsserted: a version we do not speak is refused at
+// initialize, before a session is opened or a token is spent.
+func TestProtocolDialectIsAsserted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := runtimeFor(t, "dialect").Run(ctx, bundle(), "do the work")
+	if !errors.Is(err, ErrProtocolDialect) {
+		t.Fatalf("want ErrProtocolDialect, got %v", err)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && (haystack == needle || len(haystack) > 0 && (func() bool {
 		for i := 0; i+len(needle) <= len(haystack); i++ {
@@ -173,7 +256,11 @@ func fakeAgent(scenario string) {
 		id := m["id"]
 		switch m["method"] {
 		case "initialize":
-			f.write(map[string]any{"id": id, "result": map[string]any{"protocolVersion": 1}})
+			v := 1
+			if scenario == "dialect" {
+				v = 2 // an agent from a protocol this runtime has not read
+			}
+			f.write(map[string]any{"id": id, "result": map[string]any{"protocolVersion": v}})
 		case "session/new":
 			sessionID = "sess-1"
 			f.write(map[string]any{"id": id, "result": map[string]any{"sessionId": sessionID}})
@@ -231,6 +318,35 @@ func fakeAgent(scenario string) {
 				f.notify("session/update", map[string]any{"sessionId": sessionID,
 					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
 						"content": map[string]any{"type": "text", "text": "All done! (it was not)"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "metered":
+				// Cost on the turn's own result, which is where the pinned
+				// dialect looks first.
+				f.write(map[string]any{"id": id, "result": map[string]any{
+					"stopReason": "end_turn",
+					"usage": map[string]any{
+						"inputTokens": 1200, "outputTokens": 300,
+						"cacheReadInputTokens": 9000, "cacheCreationInputTokens": 500,
+					}}})
+			case "streamusage":
+				// Cost dribbled out per update instead, under _meta.
+				for range 2 {
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+							"content": map[string]any{"type": "text", "text": "chunk"}},
+						"_meta": map[string]any{"usage": map[string]any{"inputTokens": 100, "outputTokens": 50}},
+					})
+				}
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "drift":
+				// The dialect moved: a tool call announced only in the update
+				// spelling, and a kind this runtime has never heard of.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-9", "title": "Bash", "status": "in_progress"}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "reasoning_delta",
+						"content": map[string]any{"type": "text", "text": "hmm"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "rogue":
 				// Execute a denied tool without asking, then dawdle: only the

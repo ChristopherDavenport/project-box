@@ -106,7 +106,8 @@ func New(path string) (*Daemon, error) {
 		return nil, err
 	}
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: cfg.Budget.MaxConcurrent,
-		MaxPerWindow: cfg.Budget.MaxPerWindow, Window: cfg.WindowDuration()})
+		MaxPerWindow:       cfg.Budget.MaxPerWindow,
+		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow, Window: cfg.WindowDuration()})
 	d.pump = &pump.Pump{Store: s, Tenant: t, Runner: cfg.Runner, Queue: d.queue, Meter: d.meter, Loops: loops}
 	d.API = &api.Server{
 		Store: s, Tenant: t, Routes: routes,
@@ -143,6 +144,11 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				}}},
 				Seat:   &seat.Seat{Name: bx.Seat, Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
 				Mirror: d.mirror,
+				// The stream is the only place the cost is visible, so it is
+				// the adapter that charges the meter.
+				Spend: func(ctx context.Context, run string, u acp.Usage) {
+					d.meter.Charge(ctx, run, u.Total(), u.Reported)
+				},
 			}
 		}
 		for _, r := range bx.Repos {
@@ -203,7 +209,8 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 	d.pump.SetLoops(loops)
 	d.API.SetRoutes(routes)
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
-		MaxPerWindow: ncfg.Budget.MaxPerWindow, Window: ncfg.WindowDuration()})
+		MaxPerWindow:       ncfg.Budget.MaxPerWindow,
+		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow, Window: ncfg.WindowDuration()})
 	d.mu.Lock()
 	d.cfg = ncfg
 	d.every = ncfg.EveryDuration()

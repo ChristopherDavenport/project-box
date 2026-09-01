@@ -39,9 +39,14 @@ type Config struct {
 
 // Budget mirrors capacity.Budget in config form.
 type Budget struct {
-	MaxConcurrent int    `yaml:"max_concurrent"`
-	MaxPerWindow  int    `yaml:"max_per_window"`
-	Window        string `yaml:"window"`
+	MaxConcurrent int `yaml:"max_concurrent"`
+	MaxPerWindow  int `yaml:"max_per_window"`
+	// MaxTokensPerWindow is the brake denominated the way the invoice is.
+	// Setting it also arms the unmetered rule: a run that finishes without
+	// reporting its cost stops new claims until the window turns over,
+	// because a budget that reads unknown as zero is not a budget.
+	MaxTokensPerWindow int64  `yaml:"max_tokens_per_window"`
+	Window             string `yaml:"window"`
 }
 
 // Box is one system: many repos, one optional agent identity.
