@@ -206,6 +206,22 @@ func (m *Mirror) Adopt(ctx context.Context, l forge.Lease, at, base forge.Commit
 	return forge.Workspace{Repo: l.Repo, Run: l.Run, Dir: dir, Base: base, Lease: l}, true, nil
 }
 
+// HeldWorkspace names the tree a held run left behind, without leasing it,
+// renewing anything, or touching a byte of it. Reports false when there is no
+// such tree.
+//
+// It exists for checks that must change nothing. Acquiring a lease is itself
+// a recorded act — grant and record commit together, by design — so a caller
+// that only wants to ASK a question cannot go through Checkout or Adopt
+// without leaving a trail of having done something.
+func (m *Mirror) HeldWorkspace(run, repo string, base forge.Commit) (forge.Workspace, bool) {
+	dir := m.workDir(run, repo)
+	if _, err := os.Stat(dir); err != nil {
+		return forge.Workspace{}, false
+	}
+	return forge.Workspace{Repo: repo, Run: run, Dir: dir, Base: base}, true
+}
+
 // Hold exempts a run's workspace from Prune while the run is between leases.
 // A run waiting on a gate releases its lease and reacquires it on the next
 // tick; in that gap the tree's lease no longer answers, and Prune would

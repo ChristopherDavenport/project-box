@@ -113,6 +113,55 @@ func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 		Requester: ing.Requester, Repo: ing.Repo, Task: task, Depth: ing.Depth}
 }
 
+// Poll asks whether a held item's outstanding gate has answered yet, and
+// writes nothing whatsoever: no claim, no lease, no evidence. It reports
+// whether anything has changed, so the pump can leave a still-waiting item
+// entirely alone.
+//
+// A check is not a transition. An item waiting on a person is re-drained
+// every tick for as long as the review takes, and running it through Run to
+// learn "still pending" costs a claim record, an authorization record, a
+// resume record, a gate verdict and a waiting record — five or more, every
+// fifteen seconds, for days. That is a chain that says nothing happened, at
+// length, and then has to be compacted away (issue #3). The review is held;
+// asking after it should leave no mark.
+//
+// Anything it cannot answer cleanly reports changed, so the doubt is resolved
+// by the real path rather than by a shortcut that decided to skip.
+func (l *Loop) Poll(ctx context.Context, item queue.WorkItem) bool {
+	if item.State != queue.StateWaiting || item.Built == "" {
+		return true // nothing is being held; this is not our question
+	}
+	ws, ok := l.Mirror.HeldWorkspace(item.ID, l.Repo.Name, forge.Commit(item.BuiltBase))
+	if !ok {
+		return true // the tree is gone; Run decides whether to adopt or rebuild
+	}
+	cs := forge.ChangeSet{
+		ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
+		Intent: item.Task,
+		Members: []forge.Member{{
+			Repo: l.Repo.Name, Branch: l.Branch,
+			Base: forge.Commit(item.BuiltBase), Head: forge.Commit(item.Built),
+		}},
+	}
+	outstanding := 0
+	for _, g := range l.Gates(ws) {
+		if slices.Contains(item.PassedGates, g.Name()) {
+			continue // carried; it cannot change its mind about this head
+		}
+		outstanding++
+		v, err := g.Evaluate(ctx, cs)
+		if err != nil || v.Decision != forge.DecisionPending {
+			// An answer, or a gate that could not give one. Either way the
+			// held state is over and Run must record what happens next.
+			return true
+		}
+	}
+	// Nothing outstanding means the item is waiting on the branch rather than
+	// on a person, and its turn may have come.
+	return outstanding == 0
+}
+
 // Run drives one item from claim to settled state. The returned item reports
 // where it ended: done, parked, waiting, or failed — an error return means
 // the loop itself broke, not that the change was judged and refused.

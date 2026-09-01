@@ -991,3 +991,80 @@ func TestMovedHeadRetiresTheCarriedVerdicts(t *testing.T) {
 		t.Fatalf("replayed content must be judged again: %d suite runs", suite)
 	}
 }
+
+// chainLen counts the records in an item's evidence scope.
+func chainLen(t *testing.T, e *env, id string) int {
+	t.Helper()
+	n := 0
+	for _, err := range e.store.Log().Since(context.Background(), tn, "workitem/"+id, 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		n++
+	}
+	return n
+}
+
+// TestHeldReviewIsCheckedWithoutRecording: a check is not a transition. An
+// item waiting on a person is re-drained every tick for as long as the review
+// takes, and putting it through the loop to learn "still pending" writes a
+// claim, a resume, a gate verdict and a waiting record — five or more every
+// fifteen seconds, for days, all of them saying nothing happened. The review
+// is held; asking after it leaves no mark.
+func TestHeldReviewIsCheckedWithoutRecording(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	suite := 0
+	e.loop.Builder = &countingBuilder{}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{
+			countingGate{name: "build-and-test", n: &suite},
+			holdingGate{approved: &approved},
+		}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-51"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-held", "add a thing"))
+	if item, err = e.loop.Run(ctx, item); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting, got %s", item.State)
+	}
+	settled := chainLen(t, e, "wi-held")
+
+	// A day of ticks against an unanswered review.
+	for tick := 1; tick <= 20; tick++ {
+		loaded, lerr := q.Load(ctx, tn, "wi-held")
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		if e.loop.Poll(ctx, loaded) {
+			t.Fatalf("tick %d: an unanswered review reported itself as changed", tick)
+		}
+	}
+	if got := chainLen(t, e, "wi-held"); got != settled {
+		t.Fatalf("20 checks wrote %d records; a check is not a transition", got-settled)
+	}
+
+	// The answer arrives. NOW something has changed, and the loop records it.
+	approved = true
+	loaded, _ := q.Load(ctx, tn, "wi-held")
+	if !e.loop.Poll(ctx, loaded) {
+		t.Fatal("an answered review was not noticed")
+	}
+	if item, err = e.loop.Run(ctx, loaded); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+	if chainLen(t, e, "wi-held") <= settled {
+		t.Fatal("the landing left no record")
+	}
+}

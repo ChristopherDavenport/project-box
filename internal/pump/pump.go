@@ -145,6 +145,14 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		if !ok {
 			continue // no executor configured for this target; not this pump's work
 		}
+		// A held item is asked whether its review has answered, and if it has
+		// not, it is left completely alone: no slot taken, no lease, no
+		// record. Running it through the loop to learn "still pending" is how
+		// an idle factory writes thousands of records a day saying nothing
+		// happened.
+		if !lp.Poll(ctx, item) {
+			continue
+		}
 		release, err := p.Meter.Acquire(ctx, item.ID)
 		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrBusy) ||
 			errors.Is(err, capacity.ErrUnmetered) {
