@@ -150,6 +150,20 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			unreadable = errors.Join(unreadable, err)
 			continue
 		}
+		// A claimed item whose runner is gone is work nobody is doing and
+		// nobody was going to: the drain never looked at claimed items, so a
+		// runner lost mid-run took its item with it permanently.
+		if item.State == queue.StateClaimed {
+			recovered, ok, rerr := p.Queue.Recover(ctx, item)
+			if rerr != nil {
+				unreadable = errors.Join(unreadable, rerr)
+				continue
+			}
+			if !ok {
+				continue // still held; not this pump's business
+			}
+			item = recovered
+		}
 		if item.State == queue.StatePending || item.State == queue.StateWaiting {
 			candidates = append(candidates, item)
 		}

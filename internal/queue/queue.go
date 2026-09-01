@@ -145,15 +145,16 @@ var ErrNoItem = errors.New("queue: no such item")
 // A factory stopped draining because an agent said, correctly, that it had
 // nothing to do.
 var stateKinds = map[string]bool{
-	"queued":   true,
-	"claimed":  true,
-	"built":    true,
-	"waiting":  true,
-	"parked":   true,
-	"done":     true,
-	"failed":   true,
-	"resolved": true,
-	"retried":  true,
+	"queued":    true,
+	"claimed":   true,
+	"built":     true,
+	"waiting":   true,
+	"parked":    true,
+	"done":      true,
+	"failed":    true,
+	"resolved":  true,
+	"retried":   true,
+	"recovered": true,
 }
 
 // StateRecord reports whether a record kind carries the whole work item and
@@ -288,6 +289,49 @@ func (q *Queue) Fail(ctx context.Context, w WorkItem, lease forge.Lease, reason 
 	err := q.record(ctx, w, "failed", w.ID, reason)
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
+}
+
+// Recover returns to the queue a claimed item whose runner is gone.
+//
+// StateClaimed was written in one place and read in none. Drain selects only
+// pending and waiting, so an item whose runner died mid-run — a crash, a
+// SIGKILL, a drain window that elapsed with work still in flight — stayed
+// claimed forever: its lease lapsed after the TTL, nothing noticed, and the
+// control room went on reporting it as building. The shutdown path even says
+// so out loud, "fencing makes re-runs safe", which is true and beside the
+// point. Fencing makes a re-run SAFE. It does not make one HAPPEN.
+//
+// Liveness needs no new primitive. Acquire already refuses a ref that a live
+// claim holds, so taking the lease is itself the proof the holder is gone; a
+// runner still working gets ErrHeld and is left entirely alone. A runner that
+// is alive but stalled past its TTL is recovered and re-run, which is the
+// stalled-runner case the fencing was built for in the first place.
+func (q *Queue) Recover(ctx context.Context, w WorkItem) (WorkItem, bool, error) {
+	if w.State != StateClaimed {
+		return w, false, nil
+	}
+	leaser := q.Store.Leaser(q.Runner)
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+		Tenant: w.Tenant, Repo: "_queue", Ref: scope(w.ID), Run: w.ID, TTL: q.TTL,
+	})
+	switch {
+	case errors.Is(err, forge.ErrHeld):
+		return w, false, nil // somebody is still working on it
+	case err != nil:
+		return w, false, err
+	}
+	w.State = StatePending
+	w.Note = "recovered: claimed by a runner that is no longer holding its lease"
+	w.dropResume()
+	rerr := q.record(ctx, w, "recovered", w.ID, w.Note)
+	// Hold it only long enough to prove it was free. Releasing here rather
+	// than deferring keeps the next claim — possibly this same tick's — from
+	// contending with the probe that freed it.
+	leaser.Release(ctx, lease)
+	if rerr != nil {
+		return w, false, rerr
+	}
+	return w, true, q.index(ctx, w.Tenant, "pending", w.ID, w.Note)
 }
 
 // Resolve closes a parked item without a landing: the operator read the
