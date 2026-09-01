@@ -150,3 +150,80 @@ func TestSampleIsDeterministicAndRecorded(t *testing.T) {
 		t.Fatalf("review chain: %v", kinds)
 	}
 }
+
+// TestQueueListsWhatACountCannot is issue #20 as an assertion. Fifteen units
+// went in one morning and `pending=14` was the entire view: no way to see what
+// the factory was sitting on, and no way to read the notes it had already
+// written about why. Every field here comes from records that existed the
+// whole time.
+func TestQueueListsWhatACountCannot(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	waiting := submit(t, q, "wi-waiting")
+	waiting.Task = "teach the pump to breathe\nand a second line nobody needs in a listing"
+	_, claim, err := q.Claim(ctx, waiting)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Wait(ctx, waiting, claim, "branch main is leased"); err != nil {
+		t.Fatal(err)
+	}
+	parked := submit(t, q, "wi-parked")
+	_, claim2, err := q.Claim(ctx, parked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Park(ctx, parked, claim2, "check: fail (go vet)"); err != nil {
+		t.Fatal(err)
+	}
+	submit(t, q, "wi-fresh")
+
+	all, err := r.Queue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("want 3 items, got %d: %+v", len(all), all)
+	}
+	// Oldest first: the order the factory would take them.
+	if all[0].ID != "wi-waiting" || all[2].ID != "wi-fresh" {
+		t.Fatalf("not in queue order: %s, %s, %s", all[0].ID, all[1].ID, all[2].ID)
+	}
+
+	byID := map[string]QueueEntry{}
+	for _, e := range all {
+		byID[e.ID] = e
+	}
+	// The note is the whole point: the queue always wrote why, and nothing
+	// ever showed it.
+	if got := byID["wi-waiting"].Note; got != "branch main is leased" {
+		t.Fatalf("the waiting reason is still invisible: %q", got)
+	}
+	if got := byID["wi-parked"].Note; got != "check: fail (go vet)" {
+		t.Fatalf("the park reason is still invisible: %q", got)
+	}
+	// The task is a first line, not a whole prompt pasted into a listing.
+	if got := byID["wi-waiting"].Task; got != "teach the pump to breathe" {
+		t.Fatalf("task line: %q", got)
+	}
+	if byID["wi-waiting"].Opened.IsZero() || byID["wi-waiting"].AgeSec < 0 {
+		t.Fatalf("no clock on the row: %+v", byID["wi-waiting"])
+	}
+
+	// Filtering is what makes it usable at fifteen units.
+	pending, err := r.Queue(ctx, queue.StatePending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 1 || pending[0].ID != "wi-fresh" {
+		t.Fatalf("state filter: %+v", pending)
+	}
+	two, err := r.Queue(ctx, queue.StateWaiting, queue.StateParked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(two) != 2 {
+		t.Fatalf("multi-state filter: %+v", two)
+	}
+}

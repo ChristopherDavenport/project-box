@@ -46,6 +46,13 @@ type Ingress struct {
 	Title string
 	// Repo is the target repository, copied from the route.
 	Repo string `json:"repo,omitempty"`
+	// Route is the name of the route that admitted this work, and Key the
+	// delivery key that identified the occurrence. Both are recorded because
+	// an operator looking at a queue needs to know where a unit came from,
+	// and the id hashes them past recovery. Empty on ingresses opened before
+	// they were carried.
+	Route string `json:"route,omitempty"`
+	Key   string `json:"key,omitempty"`
 	// Note carries the delivery's payload as the ingress's own words — the
 	// task text intake hands the work item.
 	Note string `json:"note,omitempty"`

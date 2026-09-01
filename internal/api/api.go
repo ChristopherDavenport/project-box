@@ -95,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.status)
 	mux.HandleFunc("GET /v1/exceptions", s.exceptions)
+	mux.HandleFunc("GET /v1/items", s.items)
 	mux.HandleFunc("GET /v1/items/{id}", s.item)
 	mux.HandleFunc("GET /v1/items/{id}/evidence", s.itemEvidence)
 	mux.HandleFunc("GET /v1/provenance/{sha}", s.provenance)
@@ -185,6 +186,33 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		UptimeSec: int64(time.Since(s.Started).Seconds()), Routes: s.routeNames(),
 		Version: version.String(),
 	})
+}
+
+// items lists the work queue. `?state=` narrows it and may repeat or be
+// comma-separated; unfiltered returns everything the tenant has submitted.
+//
+// The listing verb the surface never had: `pending=14` was the whole view
+// into the queue, and /v1/items/{id} needs an id you could only know from the
+// submit response you kept.
+func (s *Server) items(w http.ResponseWriter, r *http.Request) {
+	var states []queue.State
+	for _, v := range r.URL.Query()["state"] {
+		for part := range strings.SplitSeq(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				states = append(states, queue.State(part))
+			}
+		}
+	}
+	room := &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r)}
+	out, err := room.Queue(r.Context(), states...)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if out == nil {
+		out = []control.QueueEntry{}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) exceptions(w http.ResponseWriter, r *http.Request) {

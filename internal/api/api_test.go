@@ -290,3 +290,76 @@ func TestUIServingWithSPAFallback(t *testing.T) {
 		t.Fatalf("the API must stay the API: %d", code)
 	}
 }
+
+// TestQueueOverTheWire: the listing verb the surface never had (issue #20).
+// `GET /v1/items/{id}` needs an id you could only know from a submit response
+// you kept; this is the endpoint that answers "what is the factory sitting
+// on" without having kept anything.
+func TestQueueOverTheWire(t *testing.T) {
+	w := rig(t)
+	ctx := context.Background()
+
+	sock := filepath.Join(t.TempDir(), "boxd.sock")
+	ln, err := Listen("unix:" + sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &http.Server{Handler: w.srv.Handler()}
+	go hs.Serve(ln)
+	t.Cleanup(func() { hs.Close() })
+
+	c, err := Dial("unix:"+sock, "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"issue-20", "issue-21"} {
+		// Distinct tasks: the rig's builder writes the task into one file, so
+		// two identical tasks would leave the second tree unchanged.
+		if _, err := c.OpenIngress(ctx, "issues", key, "make pending legible for "+key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := w.pump.Intake(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	pending, err := c.Items(ctx, "pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 {
+		t.Fatalf("want 2 pending, got %d: %+v", len(pending), pending)
+	}
+	// Where a unit came from, which the id hashes past recovery.
+	for _, e := range pending {
+		if e.Route != "issues" {
+			t.Fatalf("row does not name its route: %+v", e)
+		}
+		if e.Key != "issue-20" && e.Key != "issue-21" {
+			t.Fatalf("row does not name its delivery key: %+v", e)
+		}
+		if e.Task == "" || e.Opened.IsZero() {
+			t.Fatalf("row is missing task or clock: %+v", e)
+		}
+	}
+
+	// Drain until they settle — one branch lease admits one run at a time,
+	// so two units take two passes (issue #18) — and the filter follows them.
+	for range 3 {
+		if _, err := w.pump.Drain(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if still, err := c.Items(ctx, "pending"); err != nil || len(still) != 0 {
+		t.Fatalf("settled work still listed as pending: %d %v", len(still), err)
+	}
+	done, err := c.Items(ctx, "done")
+	if err != nil || len(done) != 2 {
+		t.Fatalf("want 2 done, got %d: %v", len(done), err)
+	}
+	// Unfiltered is everything.
+	all, err := c.Items(ctx)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("unfiltered: %d %v", len(all), err)
+	}
+}
