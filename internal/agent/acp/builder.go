@@ -123,9 +123,9 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	tools, _ := json.Marshal(tally(res.ToolCalls))
 	denied, _ := json.Marshal(tally(res.Denied))
 	b.record(ctx, ws.Run, "agent-result", bundle.Ref,
-		fmt.Sprintf(`{"stop":%q,"tool_calls":%d,"denied":%d,"escalated":%v,"wall_ms":%d,"tokens":%d,"metered":%v,"unknown_updates":%s,"tools":%s,"denied_tools":%s}`,
+		fmt.Sprintf(`{"stop":%q,"tool_calls":%d,"denied":%d,"escalated":%v,"wall_ms":%d,"tokens":%d,"cost_usd":%.4f,"metered":%v,"unknown_updates":%s,"tools":%s,"denied_tools":%s}`,
 			res.StopReason, len(res.ToolCalls), len(res.Denied), res.Escalated != "", elapsed.Milliseconds(),
-			res.Usage.Total(), res.Usage.Reported, unknown, tools, denied))
+			res.Usage.Total(), res.Usage.CostUSD, res.Usage.Reported, unknown, tools, denied))
 	if reason := escalation(res); reason != "" {
 		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason}
 	}

@@ -123,6 +123,34 @@ func TestUsageIsCarriedFromTheTurn(t *testing.T) {
 	if got := res.Usage.Total(); got != 11000 {
 		t.Fatalf("total tokens %d, want 11000 (1200+300+9000+500)", got)
 	}
+	// The cache figures are the point. Reading only input+output would give
+	// 1500 here and look entirely plausible.
+	if res.Usage.CachedReadTokens != 9000 || res.Usage.CachedWriteTokens != 500 {
+		t.Fatalf("cache counters lost to a field-name mismatch: %+v", res.Usage)
+	}
+	if res.Usage.CostUSD != 0.0432 {
+		t.Fatalf("the turn's cost in money was dropped: %+v", res.Usage)
+	}
+	if slices.Contains(res.UnknownUpdates, "usage_update") {
+		t.Fatal("usage_update read as dialect drift; it is part of the dialect")
+	}
+}
+
+// TestRenamedUsageFieldsAreLoud: a usage object present and parsing to nothing
+// is what a rename looks like from here, and it is indistinguishable from a
+// free turn unless something says so. This is the case that actually bit —
+// the cache counters were spelled with the Anthropic API's names rather than
+// the adapter's, so two of four fields read zero and Reported stayed true.
+func TestRenamedUsageFieldsAreLoud(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "renamed").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !slices.Contains(res.UnknownUpdates, "usage:all-zero") {
+		t.Fatalf("a usage object that parsed to nothing went unremarked: %+v", res)
+	}
 }
 
 // TestUsageAccumulatesFromTheStream: a dialect that reports per update rather
@@ -341,13 +369,27 @@ func fakeAgent(scenario string) {
 					"usage":      map[string]any{"inputTokens": 10, "outputTokens": 5},
 				}})
 			case "metered":
-				// Cost on the turn's own result, which is where the pinned
-				// dialect looks first.
+				// The real dialect, copied from claude-agent-acp's
+				// sessionUsage() and turnOutcome(): usage on the prompt
+				// response root, plus a usage_update carrying the money.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "usage_update",
+						"used": 11000, "size": 200000,
+						"cost": map[string]any{"amount": 0.0432, "currency": "USD"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{
 					"stopReason": "end_turn",
 					"usage": map[string]any{
 						"inputTokens": 1200, "outputTokens": 300,
-						"cacheReadInputTokens": 9000, "cacheCreationInputTokens": 500,
+						"cachedReadTokens": 9000, "cachedWriteTokens": 500,
+						"totalTokens": 11000,
+					}}})
+			case "renamed":
+				// The failure this pinning exists to catch: a usage object is
+				// present, and every field in it has been renamed.
+				f.write(map[string]any{"id": id, "result": map[string]any{
+					"stopReason": "end_turn",
+					"usage": map[string]any{
+						"input_tokens": 1200, "output_tokens": 300,
 					}}})
 			case "streamusage":
 				// Cost dribbled out per update instead, under _meta.

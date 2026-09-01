@@ -57,6 +57,7 @@ const protocolVersion = 1
 var knownUpdates = []string{
 	"tool_call", "tool_call_update", "agent_message_chunk", "agent_thought_chunk",
 	"user_message_chunk", "plan", "available_commands_update", "current_mode_update",
+	"usage_update",
 }
 
 // Usage is what a run cost, as the agent reported it.
@@ -66,25 +67,36 @@ var knownUpdates = []string{
 // tool-count bug again with money attached — so absence is carried
 // explicitly rather than collapsing into a zero total.
 type Usage struct {
-	InputTokens              int64
-	OutputTokens             int64
-	CacheReadInputTokens     int64
-	CacheCreationInputTokens int64
+	InputTokens       int64
+	OutputTokens      int64
+	CachedReadTokens  int64
+	CachedWriteTokens int64
+	// Tokens is the agent's own total when it gave one.
+	Tokens int64
+	// CostUSD is what the agent says the turn cost in money, from the
+	// usage_update notification. Cumulative for the turn, not a delta, so it
+	// is taken rather than summed. Zero means the agent never said.
+	CostUSD float64
 	// Reported is false when nothing on the stream said what the run cost.
 	Reported bool
 }
 
-// Total is every token the run is billed for, cache reads included — they are
-// cheaper, never free.
+// Total is every token the run is billed for, cache reads included — cheaper,
+// never free. The agent's own tally wins when it gave one: a sum of the parts
+// this runtime happens to recognise is the weaker claim of the two.
 func (u Usage) Total() int64 {
-	return u.InputTokens + u.OutputTokens + u.CacheReadInputTokens + u.CacheCreationInputTokens
+	if u.Tokens > 0 {
+		return u.Tokens
+	}
+	return u.InputTokens + u.OutputTokens + u.CachedReadTokens + u.CachedWriteTokens
 }
 
 func (u *Usage) add(w wireUsage) {
 	u.InputTokens += w.InputTokens
 	u.OutputTokens += w.OutputTokens
-	u.CacheReadInputTokens += w.CacheReadInputTokens
-	u.CacheCreationInputTokens += w.CacheCreationInputTokens
+	u.CachedReadTokens += w.CachedReadTokens
+	u.CachedWriteTokens += w.CachedWriteTokens
+	u.Tokens += w.TotalTokens
 	u.Reported = true
 }
 
@@ -222,6 +234,13 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				streamed.add(*w)
 				mu.Unlock()
 			}
+			if c := u.Update.Cost; c != nil && c.Currency == "USD" {
+				// Cumulative for the turn, so the last word wins; summing
+				// would bill every notification over again.
+				mu.Lock()
+				res.Usage.CostUSD = c.Amount
+				mu.Unlock()
+			}
 			switch u.Update.SessionUpdate {
 			case "tool_call", "tool_call_update":
 				// Both spellings announce the same call, so the id decides
@@ -323,14 +342,22 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	// The turn's own total wins when it has one; otherwise the stream's
 	// increments are the best account there is. Summing both would bill the
 	// run twice.
+	cost := res.Usage.CostUSD // gathered from the stream; survives whichever branch wins
 	switch {
 	case promptRes.Usage != nil:
 		res.Usage.add(*promptRes.Usage)
+		if promptRes.Usage.empty() {
+			// A usage object that parses to nothing is what a rename looks
+			// like from here, and it is indistinguishable from a free turn
+			// unless somebody says so.
+			res.noteUnknown("usage:all-zero")
+		}
 	case promptRes.Meta != nil && promptRes.Meta.Usage != nil:
 		res.Usage.add(*promptRes.Meta.Usage)
 	default:
 		res.Usage = streamed
 	}
+	res.Usage.CostUSD = cost
 	if violated != nil {
 		return res, violated
 	}
@@ -392,6 +419,12 @@ type sessionUpdate struct {
 		Content       struct {
 			Text string `json:"text"`
 		} `json:"content"`
+		// Cost rides usage_update, and is the only place the agent says what
+		// a turn cost in money rather than tokens. Cumulative for the turn.
+		Cost *struct {
+			Amount   float64 `json:"amount"`
+			Currency string  `json:"currency"`
+		} `json:"cost,omitempty"`
 		Meta *wireMeta `json:"_meta,omitempty"`
 	} `json:"update"`
 	Meta *wireMeta `json:"_meta,omitempty"`
@@ -415,15 +448,35 @@ type wireMeta struct {
 	Usage *wireUsage `json:"usage,omitempty"`
 }
 
-// wireUsage is the cost report as it appears on the wire. The field names are
-// the Anthropic usage names in ACP's camelCase; a dialect that spells them
-// differently produces a run with Reported false, which the capacity meter
-// treats as unmeasured rather than as zero.
+// wireUsage is the cost report as it appears on the wire, taken from the
+// adapter's own source rather than guessed: claude-agent-acp's sessionUsage()
+// returns exactly these five fields on the prompt response.
+//
+// The names matter more than they look. An earlier version of this struct
+// spelled the cache counters cacheReadInputTokens / cacheCreationInputTokens —
+// the Anthropic API's names, not the adapter's. Input and output parsed, the
+// two cache figures silently read zero, and Reported still came back true. For
+// an agent re-reading a repository the cache read is usually the largest of
+// the four, so the meter would have shown a confident, plausible figure that
+// was wrong by a wide margin, with nothing anywhere to say so — the exact
+// failure the dialect assertions in this package exist to prevent, in the one
+// place those assertions did not reach.
 type wireUsage struct {
-	InputTokens              int64 `json:"inputTokens"`
-	OutputTokens             int64 `json:"outputTokens"`
-	CacheReadInputTokens     int64 `json:"cacheReadInputTokens"`
-	CacheCreationInputTokens int64 `json:"cacheCreationInputTokens"`
+	InputTokens       int64 `json:"inputTokens"`
+	OutputTokens      int64 `json:"outputTokens"`
+	CachedReadTokens  int64 `json:"cachedReadTokens"`
+	CachedWriteTokens int64 `json:"cachedWriteTokens"`
+	// TotalTokens is the adapter's own tally over the other four. Preferred
+	// when present: it is what the agent believes it spent, and a sum of the
+	// parts this runtime happens to recognise is a weaker claim.
+	TotalTokens int64 `json:"totalTokens"`
+}
+
+// empty reports a usage object that parsed to nothing at all — the signature
+// of the field names having moved.
+func (w wireUsage) empty() bool {
+	return w.InputTokens == 0 && w.OutputTokens == 0 &&
+		w.CachedReadTokens == 0 && w.CachedWriteTokens == 0 && w.TotalTokens == 0
 }
 
 // conn is a minimal bidirectional JSON-RPC 2.0 endpoint over ndjson. Small on

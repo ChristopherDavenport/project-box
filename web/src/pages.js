@@ -36,7 +36,10 @@ export function describe(r) {
         const bits = [`${o.stop}`, `${Math.round((o.wall_ms ?? 0) / 100) / 10}s`];
         // Unmetered is the fact worth seeing: an unreported cost is not a
         // zero cost, and it halts the window.
-        bits.push(o.metered ? `${o.tokens} tokens` : 'cost NOT reported');
+        bits.push(o.metered ? `${fmtTokens(o.tokens)} tokens` : 'cost NOT reported');
+        // The agent's own figure in money, when it gave one. Tokens are the
+        // brake; dollars are what the invoice is actually denominated in.
+        if (o.cost_usd) bits.push(`$${o.cost_usd.toFixed(4)}`);
         // Which tools, not how many — a count cannot tell an ordinary run
         // from a runaway, because both are a number.
         bits.push(o.tools ? tools(o.tools) : `${o.tool_calls} tools`);
