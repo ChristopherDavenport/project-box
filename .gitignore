@@ -3,3 +3,5 @@ bin/
 *.db-wal
 *.db-shm
 web/node_modules/
+hack/room-smoke/node_modules/
+hack/room-smoke/package*.json
