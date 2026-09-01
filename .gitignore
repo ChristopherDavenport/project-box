@@ -1,4 +1,8 @@
 bin/
+# Rooted: hack/continuity and hack/deployloop are source. Unrooted patterns
+# would ignore the sources along with the binaries built beside them.
+/continuity
+/deployloop
 *.db
 *.db-wal
 *.db-shm
