@@ -433,6 +433,7 @@ claim is decoration.
 | Evidence completeness | 25 sampled changes, complete evidence, unaided | 8 |
 | Optimistic lane safety | red main opens repair work; promotion refuses unsoaked commits; fencing identical in both lanes | 9 |
 | Graph ordering | diamond dependency runs in topo order; failed root parks leaves with cause | 10 |
+| A new stage needs no new stage | a propose/critique pair runs as two graph nodes under two roles — blocked until its dependency settles, each with its own claim, lease, evidence scope and settled record — with `Run` unchanged | 10 |
 | Budget refusal | work waits rather than overdrawing a tenant budget | 11 |
 | Seat continuity | second run receives predecessor's handoff; escalation parks with agent-attributed reason | 12 |
 
@@ -489,6 +490,7 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Landing discipline is per-lane policy | optimistic into main where a Box chooses; env/infra and promotion always gated; fencing never optimistic |
 | A lower environment between main and prod | red main is allowed, red prod is not; promotion requires soak plus green |
 | Thunderdome adopted as a lane, not a stance | swarm-repair needs the attribution and reversibility this substrate provides |
+| A new loop stage is a gate or a dependent work item; `Run`'s sequence stays Go | judgement is a `Gate`, work that makes its own change is a node in the graph, and what is left is one unit's transaction — one claim, one lease, one resume point, one meter slot — which a declared sequence would only make it possible to misconfigure |
 
 ## 7. Deferred decisions
 
@@ -846,6 +848,25 @@ the image itself. The dogfood box is deliberately still unconfined: an image
 carrying claude-agent-acp and its credential is an operational prerequisite
 this change does not build, and turning it on is the live run #6 always
 needed.
+
+Issue #8 asked whether a new loop stage is config or code, and the answer is
+recorded in ARCHITECTURE under "A new stage is a gate, a dependent item, or a
+change to the transaction" (2026-09-01). The short of it: Gas City's lesson
+binds on the axis it was learned on, and that axis — agent roles — is already
+config here as layers. `Run` does not hold roles; it holds one unit of work's
+transaction. Judgement over a candidate is a `Gate`, work that makes its own
+change is a node in the work graph, and the sequence between them is one
+claim, one lease, one resume point and one meter slot, all of them singular
+because the unit is. TestCritiqueIsADependentItemNotANewStage is the worked
+example: a propose/critique pair as two graph nodes under two roles, the
+critic refused before it can spend while its dependency is unsettled, each
+item holding its own claim, lease, evidence scope and settled record, and
+`Run` not touched. The follow-on this names rather than closes: nothing
+outside a test CREATES a dependent item, and an item cannot name the role it
+runs under — the pump routes by box and repo, and a loop's builder carries
+one role — so the extension point is real in the queue and unreachable from
+box.yaml. A producer and a routing key, and no evidence is missing meanwhile,
+which is why it is not a §2 retrofit.
 
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no

@@ -142,6 +142,66 @@ and a queue drained briskly except for the one item nobody wants looks healthy
 by every other measure. An exception queue with an unbounded oldest-item age
 is the finding written for you.
 
+### A new stage is a gate, a dependent item, or a change to the transaction
+
+`internal/loop`'s `Run` fixes a sequence — claim, authorize, lease,
+materialize, build, gate, land, settle — so the question that follows is
+whether adding a stage should be an edit to it (decided 2026-09-01). Gas Town
+answered no on its own axis: it hardcoded Mayor, Deacon, Witness, Refinery
+and Polecat as Go types, ran it, and then spent seven months extracting every
+one into a downloadable pack, concluding flatly that any orchestration pack is
+pure config.
+
+That lesson binds here, and it binds on the axis it was learned on. Gas Town's
+five were **agent roles**, and roles are already config here — the layer
+system is that extraction, done up front, which is what "the layer is the
+surface" means below. What `Run` holds is not a set of roles. It is one unit
+of work's transaction, and the two are not the same kind of thing.
+
+So a new stage is one of three things, and only the last is code:
+
+| The new work | Where it goes |
+|---|---|
+| judges a candidate change | a `Gate` in the Box's gate set |
+| produces a change of its own | a dependent `WorkItem`, under its own role layer |
+| must happen inside one unit's bracket | `Run` — and that is not orchestration |
+
+A critique pass and a security review read a change and answer about it, which
+is exactly what a gate is: `Evaluate` sees the whole ChangeSet and returns
+pass, fail, or *pending*, and the verdict is recorded. `approval.GateAdapter`
+is the precedent — a gate with a human behind it — and one with an agent
+behind it asks no more of the loop than that one did.
+
+A propose/critique **pair** is different, because the critic edits. That is a
+second unit of work, and it wants what every unit of work has: its own lease,
+its own budget slot, its own evidence scope, its own `agentref`, and its own
+line in the exception queue. Inside `Run` each of those is singular by
+construction — one claim, one workspace lease, one resume point (`Built` is
+one commit), one meter slot taken per item by the pump, one park note carrying
+one severity. Two agent turns in one `Run` would share every one of them. So
+the pair belongs one level up, in the work graph, where the nodes are
+one-to-one with the things that must be separate. Phase 10's `DependsOn` is
+that level, and it is this axis's answer to Gas City's formula graph: an
+orchestrator running a graph across agents, except that each node is a whole
+audited unit rather than a step inside one.
+
+What stays in Go is the transaction, deliberately. A declared sequence makes
+it configurable to put `land` before `gate`, to build outside a lease, or to
+settle something never claimed — and those are not misconfigurations that park
+an item, they are the ones that leave an unjudged commit on a branch. The
+stages between the seams are not a pipeline anyone wants a different shape of;
+they are the reason a change an agent made is landable and evidenced at all.
+
+**What this does not yet reach.** The graph is enforced where it must be —
+`Claim` blocks on an unsettled dependency and cascades a dead one, naming the
+cause — but nothing outside a test creates a dependent item, and an item
+cannot name the role it should run under: the pump routes by box and
+repository, and a loop's builder carries one role. The extension point is
+therefore real in the queue and not yet reachable from `box.yaml`. That is a
+producer and a routing key, not a retrofit — nothing already recorded is
+missing for want of it — which is why this is a decision with follow-on work
+rather than a gap that had to be closed first.
+
 ## The estate
 
 A Box *enrols* repositories, which is a declaration. The estate *observes* them,
