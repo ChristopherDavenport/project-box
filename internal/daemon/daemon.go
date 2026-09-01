@@ -25,6 +25,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/boxcfg"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
+	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
@@ -65,13 +66,14 @@ func (b ShellBuilder) Build(ctx context.Context, ws forge.Workspace, task string
 type Daemon struct {
 	ConfigPath string
 
-	store  *sqlite.Store
-	tenant tenant.ID
-	mirror *gitforge.Mirror
-	queue  *queue.Queue
-	pump   *pump.Pump
-	meter  *capacity.Meter
-	API    *api.Server
+	store     *sqlite.Store
+	tenant    tenant.ID
+	mirror    *gitforge.Mirror
+	queue     *queue.Queue
+	pump      *pump.Pump
+	meter     *capacity.Meter
+	escalator *control.Escalator
+	API       *api.Server
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -110,6 +112,14 @@ func New(path string) (*Daemon, error) {
 		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
 		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration()})
 	d.pump = &pump.Pump{Store: s, Tenant: t, Runner: cfg.Runner, Queue: d.queue, Meter: d.meter, Loops: loops}
+	// The exception queue ages whether or not anybody is looking, so the
+	// sweep is what makes "nobody is looking" audible. The log is the weakest
+	// sink there is and the only one that needs no configuration; a real
+	// deployment replaces it at this seam without the daemon changing.
+	d.escalator = &control.Escalator{
+		Room:   &control.Room{Store: s, Tenant: t, Actor: cfg.Runner},
+		Notify: control.NotifierFunc(control.LogNotice),
+	}
 	d.API = &api.Server{
 		Store: s, Tenant: t, Routes: routes,
 		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner},
@@ -296,14 +306,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 				if err := d.mirror.Prune(workCtx); err != nil {
 					slog.Warn("prune", "err", err)
 				}
+				if _, err := d.escalator.Sweep(workCtx); err != nil {
+					slog.Warn("escalation sweep", "err", err)
+				}
 			}
 		}
 	}
 }
 
-// housekeepingEvery spaces the prune sweep: every Nth tick, the mirror
+// housekeepingEvery spaces the standing chores: every Nth tick, the mirror
 // reaps workspaces whose leases no longer answer — the `docker system
-// prune` job as a standing task rather than a remembered chore.
+// prune` job as a standing task rather than a remembered chore — and the
+// room tells somebody about exceptions that have gone stale.
 const housekeepingEvery = 20
 
 func (d *Daemon) drain() time.Duration {

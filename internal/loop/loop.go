@@ -202,7 +202,9 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	if deny, err := l.authorize(ctx, item, authz.ActionPropose); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	} else if deny != "" {
-		return q.Park(ctx, item, claim, deny)
+		// A grant the factory does not hold. The control worked, and it will
+		// keep working on every retry until a person changes something.
+		return q.Park(ctx, item, claim, queue.SeverityHigh, deny)
 	}
 
 	leaser := l.Store.Leaser(l.Runner)
@@ -305,10 +307,12 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 					OnBehalfOf: item.Requester, Body: []byte(esc.Reason),
 					Trace: telemetry.TraceID(ctx),
 				})
-				item, _ = q.Park(ctx, item, claim, esc.Error())
+				// An agent declining is a considered act, not an emergency:
+				// somebody has to read it, and it can wait for the morning.
+				item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, esc.Error())
 				return l.settle(ctx, item), nil
 			}
-			item, _ = q.Park(ctx, item, claim, "build: "+serr.Error())
+			item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, "build: "+serr.Error())
 			return l.settle(ctx, item), nil
 		}
 	}
@@ -379,7 +383,9 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	_ = gerr
 	switch forge.Resolve(verdicts) {
 	case forge.DecisionFail:
-		return q.Park(ctx, item, claim, reasons(verdicts))
+		// A change judged and refused: nothing landed, nothing is broken, and
+		// the queue is the right place for it to wait.
+		return q.Park(ctx, item, claim, queue.SeverityMedium, reasons(verdicts))
 	case forge.DecisionPending:
 		// Carry the commit forward so the next tick re-enters at the gate
 		// rather than at the builder, and the satisfied gates with it so it
@@ -393,7 +399,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	} else if deny != "" {
-		return q.Park(ctx, item, claim, deny)
+		return q.Park(ctx, item, claim, queue.SeverityHigh, deny)
 	}
 	landLease, notOurTurn, err := l.openLandWindow(ctx, item, base)
 	if err != nil {
@@ -415,7 +421,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		}
 		return err
 	}); lerr != nil {
-		return q.Park(ctx, item, claim, "land: "+lerr.Error())
+		return q.Park(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
 	}
 	// Green by construction: the gates passed before the land. Recorded all
 	// the same, because the promotion predicate reads only the check chain.
@@ -499,7 +505,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	} else if deny != "" {
-		return q.Park(ctx, item, claim, deny)
+		return q.Park(ctx, item, claim, queue.SeverityHigh, deny)
 	}
 	landLease, notOurTurn, err := l.openLandWindow(ctx, item, base)
 	if err != nil {
@@ -517,7 +523,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 	}); lerr != nil {
 		// The landing itself was refused — a superseded token or a moved
 		// branch. Nothing reached main, so there is nothing to repair.
-		return q.Park(ctx, item, claim, "land: "+lerr.Error())
+		return q.Park(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
 	}
 
 	var verdicts []forge.Verdict
@@ -544,7 +550,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		// the item for a person.
 		checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
 			checks.Status{Green: false, Lane: string(forge.LaneOptimistic), Note: infra.Error()}, l.Runner)
-		return q.Park(ctx, item, claim, infra.Error())
+		return q.Park(ctx, item, claim, queue.SeverityHigh, infra.Error())
 	}
 
 	switch forge.Resolve(verdicts) {
@@ -565,7 +571,8 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 			// One red observed and no second judgement. The red record
 			// stands — promotion never takes the commit — and the rest is a
 			// person's call.
-			return q.Park(ctx, item, claim, "landed red, unconfirmed: "+reason+"; "+cerr.Error())
+			return q.Park(ctx, item, claim, queue.SeverityHigh,
+				"landed red, unconfirmed: "+reason+"; "+cerr.Error())
 		}
 		if !confirmed {
 			// The red did not reproduce: the flaky record is the fact, the
@@ -578,7 +585,12 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		if l.Red != nil {
 			repair, rerr := l.Red(ctx, item, head, reason)
 			if rerr != nil {
-				return q.Park(ctx, item, claim, note+" — AND opening repair failed: "+rerr.Error())
+				// The lane's whole safety argument is that a red main
+				// summons a repair swarm. Main is red and the summons
+				// failed, so the mechanism this lane rests on is the
+				// thing that broke.
+				return q.Park(ctx, item, claim, queue.SeverityCritical,
+					note+" — AND opening repair failed: "+rerr.Error())
 			}
 			l.record(ctx, item, "repair-opened", string(head), fmt.Sprintf(`{"ingress":%q}`, repair))
 			note += "; repair opened: " + repair

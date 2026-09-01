@@ -105,13 +105,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		if len(items) == 0 {
-			fmt.Println("no exceptions — the factory has nothing waiting on a person")
-			return nil
-		}
-		for _, it := range items {
-			fmt.Printf("%-24s %-8s ingress=%s\n    %s\n", it.ID, it.State, it.Ingress, it.Note)
-		}
+		printExceptions(items)
 	case "stop":
 		if len(rest) == 0 {
 			return fmt.Errorf("stop needs a reason — it becomes the record")
@@ -214,6 +208,30 @@ func printQueue(entries []control.QueueEntry) {
 
 // age renders a duration at the precision an operator cares about: seconds
 // while a run is live, days once something has been forgotten.
+// printExceptions renders the exception queue in the order a person should
+// work it: loudest first, then oldest. The age and the "!" are the point —
+// a list of exceptions with no clock on it cannot show the one that has been
+// sitting since Friday.
+func printExceptions(items []control.Exception) {
+	if len(items) == 0 {
+		fmt.Println("no exceptions — the factory has nothing waiting on a person")
+		return
+	}
+	for _, it := range items {
+		flag := " "
+		if it.Overdue {
+			flag = "!"
+		}
+		told := ""
+		if it.Escalations > 0 {
+			told = fmt.Sprintf(" told=%d", it.Escalations)
+		}
+		fmt.Printf("%s %-22s %-8s %6s  ingress=%s%s\n    %s\n",
+			flag, it.ID, it.Severity.OrDefault(), age(it.AgeSec), it.Ingress, told, it.Note)
+	}
+	fmt.Printf("\n%d exception(s); ! is past the response-time objective\n", len(items))
+}
+
 func age(sec int64) string {
 	switch {
 	case sec < 90:
@@ -244,6 +262,14 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		}
 		fmt.Printf("tenant=%s box=%s runner=%s stopped=%v pending=%d exceptions=%d up=%ds routes=%v\n",
 			st.Tenant, st.Box, st.Runner, st.Stopped, st.Pending, st.Exceptions, st.UptimeSec, st.Routes)
+		if q := st.ExceptionQueue; q.Parked > 0 {
+			met := "met"
+			if !q.Met {
+				met = fmt.Sprintf("MISSED by %d item(s)", q.Overdue)
+			}
+			fmt.Printf("exception queue: oldest=%s (%s) objective=%s %s\n",
+				age(q.OldestAgeSec), q.Oldest, age(q.ObjectiveSec), met)
+		}
 	case "queue":
 		sub := flag.NewFlagSet("queue", flag.ContinueOnError)
 		state := sub.String("state", "", "comma-separated states (pending, claimed, waiting, parked, done, failed); empty shows all")
@@ -264,13 +290,7 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		if err != nil {
 			return err
 		}
-		if len(items) == 0 {
-			fmt.Println("no exceptions — the factory has nothing waiting on a person")
-			return nil
-		}
-		for _, it := range items {
-			fmt.Printf("%-24s %-8s ingress=%s\n    %s\n", it.ID, it.State, it.Ingress, it.Note)
-		}
+		printExceptions(items)
 	case "submit":
 		sub := flag.NewFlagSet("submit", flag.ContinueOnError)
 		route := sub.String("route", "issues", "configured route name")

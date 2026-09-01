@@ -148,6 +148,15 @@ export class BoxDashboard extends LitElement {
             <div class="grid">
               <div class="stat"><div class="n">${s.pending}</div><div class="l">pending</div></div>
               <div class="stat"><div class="n">${s.exceptions}</div><div class="l">exceptions</div></div>
+              ${/* The count's missing half. A queue drained briskly except for
+                   the one item nobody wants looks healthy by every other
+                   measure, so the oldest is the number on the wall. */ ''}
+              ${s.exception_queue?.parked
+                ? html`<div class="stat">
+                    <div class="n">${age(s.exception_queue.oldest_age_sec)}</div>
+                    <div class="l">oldest parked of ${age(s.exception_queue.objective_sec)}</div>
+                  </div>`
+                : nothing}
               <div class="stat"><div class="n">${s.stopped ? 'stopped' : 'running'}</div><div class="l">claims</div></div>
               ${s.spend ? html`
                 <div class="stat">
@@ -172,6 +181,13 @@ export class BoxDashboard extends LitElement {
               ? html`<jh-notification appearance="neutral" type="banner" hide-dismiss-button>
                   The meter is pacing work: the factory is idle because it is over budget, not because
                   there is nothing to do.
+                </jh-notification>`
+              : nothing}
+            ${s.exception_queue && !s.exception_queue.met
+              ? html`<jh-notification appearance="negative" type="banner" hide-dismiss-button>
+                  ${s.exception_queue.overdue} exception(s) have been parked longer than the
+                  ${age(s.exception_queue.objective_sec)} response-time objective — the oldest for
+                  ${age(s.exception_queue.oldest_age_sec)}.
                 </jh-notification>`
               : nothing}`,
         })}
@@ -304,9 +320,21 @@ export class BoxWork extends LitElement {
 }
 customElements.define('box-work', BoxWork);
 
-/** Exceptions: what still needs a person. */
+/**
+ * Exceptions: what still needs a person.
+ *
+ * Loudest first, then oldest — the order a person should work the queue,
+ * which is not the order it arrived in. The age is the part the room could
+ * never show: a queue whose items do not age cannot be late, which sounds
+ * like a good property and is the absence of one.
+ */
 export class BoxExceptions extends LitElement {
-  static styles = css`:host { display: block; } .empty { color: var(--jh-color-content-secondary-enabled); }`;
+  static styles = css`
+    :host { display: block; }
+    .empty { color: var(--jh-color-content-secondary-enabled); }
+    .overdue { color: var(--jh-color-content-negative-enabled, #b3261e); font-weight: 600; }
+    .told { font-size: .8rem; color: var(--jh-color-content-secondary-enabled); }
+  `;
   _task = new Task(this, { task: async (_, { signal }) => getExceptions(signal), args: () => [] });
 
   render() {
@@ -319,8 +347,17 @@ export class BoxExceptions extends LitElement {
             ? html`<p class="empty">Nothing here — the factory has nothing waiting on a person.</p>`
             : html`<jh-list-group accessible-label="Parked items">
                 ${items.map((it) => html`
-                  <jh-list-item primary-text=${it.id} secondary-text=${it.note} show-divider>
-                    <jh-tag slot="jh-list-item-left" size="small" label=${it.state}></jh-tag>
+                  <jh-list-item primary-text=${it.id} secondary-text=${it.note}
+                    secondary-metadata=${age(it.age_sec) + ' parked'} show-divider>
+                    <jh-tag slot="jh-list-item-left" size="small" label=${it.severity ?? 'medium'}></jh-tag>
+                    <div slot="jh-list-item-content">
+                      ${it.overdue
+                        ? html`<div class="overdue">past the response-time objective</div>`
+                        : nothing}
+                      ${it.escalations
+                        ? html`<div class="told">escalated out of band ${it.escalations}×</div>`
+                        : nothing}
+                    </div>
                     <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
                       label="Open" href=${'/items/' + it.id}></jh-button>
                   </jh-list-item>`)}

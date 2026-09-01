@@ -423,3 +423,73 @@ func TestRunInternalsReachTheStream(t *testing.T) {
 	}
 	t.Fatalf("the subscriber never saw the run's internals: %v", want)
 }
+
+// TestExceptionQueueOverTheWire: the room's Availability control, on the
+// surface a UX reads. `exceptions=2` was the whole story, and a count cannot
+// distinguish a queue being worked from one nobody has opened in a week — so
+// the age, the severity, and the objective the age is judged against all
+// ride the same JSON.
+func TestExceptionQueueOverTheWire(t *testing.T) {
+	w := rig(t)
+	ctx := context.Background()
+	w.srv.Objective = time.Hour
+	ts := httptest.NewServer(w.srv.Handler())
+	t.Cleanup(ts.Close)
+
+	q := &queue.Queue{Store: w.srv.Store, Runner: "d", TTL: time.Hour}
+	for _, p := range []struct {
+		id  string
+		sev queue.Severity
+	}{{"wi-routine", queue.SeverityMedium}, {"wi-bad", queue.SeverityCritical}} {
+		item, err := q.Submit(ctx, queue.WorkItem{
+			ID: p.id, Tenant: tn, Box: "shop", Ingress: "ing-1", Task: p.id,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		item, lease, err := q.Claim(ctx, item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.Park(ctx, item, lease, p.sev, "parked for "+p.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c, err := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Exceptions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 exceptions, got %d: %+v", len(got), got)
+	}
+	// Loudest first, and each row carries its own clock.
+	if got[0].ID != "wi-bad" || got[0].Severity != queue.SeverityCritical {
+		t.Fatalf("the wire does not order or label exceptions: %+v", got)
+	}
+	if got[0].Parked.IsZero() || got[0].Overdue {
+		t.Fatalf("a fresh exception arrived with no clock or already late: %+v", got[0])
+	}
+	// The item is still there whole — the age is additional, not a swap.
+	if got[0].Note != "parked for wi-bad" || got[0].Ingress != "ing-1" {
+		t.Fatalf("the work item did not survive the richer row: %+v", got[0])
+	}
+
+	st, err := c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Exceptions != 2 || st.ExceptionQueue.Parked != 2 {
+		t.Fatalf("the count and the metric disagree: %d vs %+v", st.Exceptions, st.ExceptionQueue)
+	}
+	if st.ExceptionQueue.ObjectiveSec != 3600 {
+		t.Fatalf("status reports the metric without the objective it is judged against: %+v", st.ExceptionQueue)
+	}
+	if !st.ExceptionQueue.Met || st.ExceptionQueue.Oldest == "" {
+		t.Fatalf("exception health: %+v", st.ExceptionQueue)
+	}
+}

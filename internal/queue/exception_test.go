@@ -14,7 +14,7 @@ func park(t *testing.T, qu *Queue, id, reason string) WorkItem {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err = qu.Park(context.Background(), w, lease, reason)
+	w, err = qu.Park(context.Background(), w, lease, SeverityMedium, reason)
 	if err != nil {
 		t.Fatal(err)
 	}

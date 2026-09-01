@@ -1,8 +1,15 @@
-// Package control is the room: the exception queue, the review sample, and
-// the sign-off — the human surface of a factory whose execution loop has
-// none. Under an Availability-scoped report the exception queue's timeliness
-// is a control, and under CC4.1 the periodic review of automated changes is
-// what makes "fully automated" an easy sell rather than a fight.
+// Package control is the room: the exception queue, the escalation that
+// carries a stale one out of band, the review sample, and the sign-off — the
+// human surface of a factory whose execution loop has none. Under an
+// Availability-scoped report the exception queue's timeliness is a control,
+// and under CC4.1 the periodic review of automated changes is what makes
+// "fully automated" an easy sell rather than a fight.
+//
+// Parking is only half of that control. A parked item nobody looks at is
+// indistinguishable from work that was never flagged, and announcing it only
+// in the room announces it only to people already in the room — so exceptions
+// age here, against a stated objective, and past it somebody is told through
+// a seam this package knows nothing about.
 package control
 
 import (
@@ -22,6 +29,16 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
+// DefaultObjective is how long a parked item may go unattended before the
+// exception queue has missed its own stated response time.
+//
+// Four hours: Gas Town's stale threshold, learned the hard way, and a
+// defensible CC7 objective for a factory that runs overnight with nobody
+// watching. It is a default and not a law — a Box states its own — but there
+// is always one, because an exception queue with no objective has an
+// unbounded oldest item and that is a finding waiting to be written.
+const DefaultObjective = 4 * time.Hour
+
 // Room is one tenant's control surface.
 type Room struct {
 	Store  store.Store
@@ -29,16 +46,72 @@ type Room struct {
 	// Actor is the operator's authenticated subject — sign-offs and samples
 	// are theirs, not the room's.
 	Actor string
+	// Objective is the response-time objective the exception queue is
+	// measured against, and the interval at which a stale exception is told
+	// out of band. Zero means [DefaultObjective].
+	//
+	// One number rather than two: the age at which a queue is out of
+	// compliance is the age at which it should be shouting, and a factory
+	// whose alarm threshold and whose objective disagree is measuring one
+	// thing and acting on another.
+	Objective time.Duration
+	// Now is injectable for tests; nil means time.Now.
+	Now func() time.Time
+}
+
+func (r *Room) now() time.Time {
+	if r.Now != nil {
+		return r.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (r *Room) objective() time.Duration {
+	if r.Objective <= 0 {
+		return DefaultObjective
+	}
+	return r.Objective
+}
+
+// Exception is a parked item as the room needs it: the item, when it parked,
+// how long it has been sitting, and how many times somebody has already been
+// told out of band.
+//
+// The item alone was the whole view, and it could say what was parked and
+// never for how long. A queue whose items do not age cannot be late, which
+// sounds like a good property and is the absence of one.
+type Exception struct {
+	queue.WorkItem
+	// Parked is when the item LAST entered the exception queue. A retry that
+	// parks again restarts the clock, because the wait a person owes this
+	// item began then and not at the first attempt.
+	Parked time.Time `json:"parked"`
+	AgeSec int64     `json:"age_sec"`
+	// Escalations counts the out-of-band notices this parking has produced.
+	// Bounded — see [Escalator.Max].
+	Escalations int `json:"escalations"`
+	// Overdue reports the age having passed the room's objective.
+	Overdue bool `json:"overdue"`
 }
 
 // Exceptions lists items currently parked: everything the factory decided a
 // person has to look at. Items whose state moved on since parking drop out —
 // the index remembers every parking, the fold shows only what still needs
 // eyes.
-func (r *Room) Exceptions(ctx context.Context) ([]queue.WorkItem, error) {
-	q := &queue.Queue{Store: r.Store, Runner: r.Actor}
+//
+// Loudest first, then oldest. Arrival order is the order the factory would
+// take work in and exactly the wrong order for a person clearing a queue,
+// who needs the critical thing from an hour ago before the routine one from
+// yesterday.
+func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
+	now := r.now()
+	objective := r.objective()
+	told, err := r.escalations(ctx)
+	if err != nil {
+		return nil, err
+	}
 	seen := map[string]bool{}
-	var out []queue.WorkItem
+	var out []Exception
 	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/exceptions", 1) {
 		if err != nil {
 			return nil, err
@@ -47,15 +120,105 @@ func (r *Room) Exceptions(ctx context.Context) ([]queue.WorkItem, error) {
 			continue
 		}
 		seen[rec.Subject] = true
-		item, err := q.Load(ctx, r.Tenant, rec.Subject)
+		item, parked, err := r.parked(ctx, rec.Subject)
 		if err != nil {
 			return nil, err
 		}
-		if item.State == queue.StateParked {
-			out = append(out, item)
+		if item.State != queue.StateParked {
+			continue
+		}
+		age := now.Sub(parked)
+		out = append(out, Exception{
+			WorkItem: item, Parked: parked, AgeSec: int64(age.Seconds()),
+			Escalations: countAfter(told[rec.Subject], parked),
+			Overdue:     age >= objective,
+		})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i].Severity.Rank(), out[j].Severity.Rank()
+		if a != b {
+			return a > b
+		}
+		return out[i].Parked.Before(out[j].Parked)
+	})
+	return out, nil
+}
+
+// parked folds one item's chain into the item and the moment it last entered
+// the exception queue. One walk for both, for the reason [Room.entry] gives:
+// Load would produce the first and throw the second away.
+func (r *Room) parked(ctx context.Context, id string) (queue.WorkItem, time.Time, error) {
+	var w queue.WorkItem
+	var at time.Time
+	found := false
+	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "workitem/"+id, 1) {
+		if err != nil {
+			return queue.WorkItem{}, time.Time{}, err
+		}
+		if !queue.StateRecord(rec.Kind) {
+			continue // narrative, not state — see queue.StateRecord
+		}
+		// Zero first: each body is the whole item, and omitempty means a
+		// cleared field is absent rather than empty. See queue.Load.
+		w = queue.WorkItem{}
+		if err := json.Unmarshal(rec.Body, &w); err != nil {
+			return queue.WorkItem{}, time.Time{}, fmt.Errorf("control: item %s record %d (%s): %w", id, rec.Seq, rec.Kind, err)
+		}
+		found = true
+		if w.State == queue.StateParked {
+			at = rec.At
 		}
 	}
-	return out, nil
+	if !found {
+		return queue.WorkItem{}, time.Time{}, fmt.Errorf("%w: %s", queue.ErrNoItem, id)
+	}
+	return w, at, nil
+}
+
+// ExceptionHealth is the exception queue measured against its objective —
+// the control room's Availability metric, and under an Availability-scoped
+// report a control with a number rather than a chart on a wall.
+//
+// OldestAgeSec is the one that matters. A length says how much there is to
+// do; only the oldest item says whether anything is being done, and a queue
+// that is drained briskly except for the one item nobody wants looks healthy
+// by every other measure.
+type ExceptionHealth struct {
+	Parked     int                    `json:"parked"`
+	BySeverity map[queue.Severity]int `json:"by_severity,omitempty"`
+	// Oldest names the item behind OldestAgeSec, so the metric is actionable
+	// rather than merely alarming.
+	Oldest       string `json:"oldest,omitempty"`
+	OldestAgeSec int64  `json:"oldest_age_sec"`
+	ObjectiveSec int64  `json:"objective_sec"`
+	Overdue      int    `json:"overdue"`
+	// Met reports the objective holding: nothing parked longer than it.
+	Met bool `json:"met"`
+}
+
+// ExceptionHealth measures the queue against the objective in force now.
+func (r *Room) ExceptionHealth(ctx context.Context) (ExceptionHealth, error) {
+	items, err := r.Exceptions(ctx)
+	if err != nil {
+		return ExceptionHealth{}, err
+	}
+	h := ExceptionHealth{
+		Parked: len(items), ObjectiveSec: int64(r.objective().Seconds()), Met: true,
+	}
+	for _, x := range items {
+		if h.BySeverity == nil {
+			h.BySeverity = map[queue.Severity]int{}
+		}
+		h.BySeverity[x.Severity.OrDefault()]++
+		if x.AgeSec > h.OldestAgeSec || h.Oldest == "" {
+			h.Oldest, h.OldestAgeSec = x.ID, x.AgeSec
+		}
+		if x.Overdue {
+			h.Overdue++
+			h.Met = false
+		}
+	}
+	return h, nil
 }
 
 // QueueEntry is one unit of work as an operator needs to see it: what it is,
@@ -79,6 +242,9 @@ type QueueEntry struct {
 	// gate's reasons, a park cause. The queue has always written it and
 	// nothing has ever shown it.
 	Note string `json:"note,omitempty"`
+	// Severity is how loudly a parked row is asking; empty on everything
+	// else, because only a parking has one.
+	Severity queue.Severity `json:"severity,omitempty"`
 	// Head is the landed commit; Built one produced and not yet landed.
 	Head  string `json:"head,omitempty"`
 	Built string `json:"built,omitempty"`
@@ -108,7 +274,7 @@ type QueueEntry struct {
 // to read the notes it had already written about why. Everything here is a
 // fold over records that existed the whole time.
 func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, error) {
-	now := time.Now().UTC()
+	now := r.now()
 	seen := map[string]bool{}
 	var out []QueueEntry
 	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/pending", 1) {
@@ -176,7 +342,8 @@ func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry,
 	}
 	e := QueueEntry{
 		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,
-		Task: firstLine(w.Task), Note: w.Note, Head: w.Head, Built: w.Built,
+		Task: firstLine(w.Task), Note: w.Note, Severity: w.Severity,
+		Head: w.Head, Built: w.Built,
 		Stage: stage, DependsOn: w.DependsOn,
 		Opened: opened, Changed: changed,
 		AgeSec: int64(now.Sub(opened).Seconds()), InStateSec: int64(now.Sub(changed).Seconds()),

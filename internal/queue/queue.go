@@ -49,6 +49,58 @@ const (
 	StateResolved State = "resolved"
 )
 
+// Severity is how loudly a parking asks for a person, set by the stage that
+// parked it — the only place that knows whether a failing unit test and a
+// revoked credential are the same emergency.
+//
+// It is not a priority: nothing claims work in severity order. It exists so
+// the control room can decide who has to be told and how soon, which is the
+// difference between an exception queue and a list nobody opens.
+type Severity string
+
+const (
+	// SeverityLow is an exception the queue itself is enough for: somebody
+	// will see it when they next look, and nobody needs telling before then.
+	SeverityLow Severity = "low"
+	// SeverityMedium is the default, and it is deliberately not the quietest
+	// one. A stage that did not say has not thereby said "routine" — silence
+	// must never read as "nothing to see", here as everywhere else.
+	SeverityMedium Severity = "medium"
+	// SeverityHigh is work that has stopped and will stay stopped until a
+	// person acts: an authority the factory does not hold, a judgement it
+	// could not obtain, a landing it cannot explain.
+	SeverityHigh Severity = "high"
+	// SeverityCritical is a mechanism the factory depends on having failed,
+	// so the ordinary recovery path is gone too.
+	SeverityCritical Severity = "critical"
+)
+
+// Rank orders severities. Anything unrecognised ranks with [SeverityMedium];
+// see that constant for why an unknown value is not the quiet one.
+func (s Severity) Rank() int {
+	switch s {
+	case SeverityLow:
+		return 1
+	case SeverityHigh:
+		return 3
+	case SeverityCritical:
+		return 4
+	}
+	return 2
+}
+
+// OrDefault resolves an unset or unrecognised severity to [SeverityMedium].
+func (s Severity) OrDefault() Severity {
+	switch s {
+	case SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical:
+		return s
+	}
+	return SeverityMedium
+}
+
+// AtLeast reports whether s is at least as loud as other.
+func (s Severity) AtLeast(other Severity) bool { return s.Rank() >= other.Rank() }
+
 // WorkItem is one claimable unit of work.
 type WorkItem struct {
 	ID     string    `json:"id"`
@@ -106,6 +158,10 @@ type WorkItem struct {
 	PassedGates []string `json:"passed_gates,omitempty"`
 	// Note carries the parked/failed reason.
 	Note string `json:"note,omitempty"`
+	// Severity is how loudly this parking asks for a person. Set by the stage
+	// that parked it, meaningful only while the item is parked, and dropped
+	// on the way back off the exception queue.
+	Severity Severity `json:"severity,omitempty"`
 }
 
 // ErrStopped reports that the stop button is down: no new claims, tenant-wide,
@@ -231,6 +287,10 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 			// what died.
 			w.State = StateParked
 			w.Note = fmt.Sprintf("dependency %s %s: %s", dep, d.State, d.Note)
+			// The cause's severity, not a fresh one. A leaf must no more
+			// read as routine than it may park mysteriously when its root
+			// is what died.
+			w.Severity = d.Severity.OrDefault()
 			if rerr := q.record(ctx, w, "parked", w.ID, w.Note); rerr != nil {
 				return w, forge.Lease{}, rerr
 			}
@@ -258,8 +318,13 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 // Park moves the item to the exception queue and frees its claim. The
 // exception index is what the control room lists; an unparked exception queue
 // is a factory nobody can triage.
-func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
-	w.State, w.Note = StateParked, reason
+//
+// The severity is the parking stage's to state, and it is a parameter rather
+// than a field so that stating it is not optional. A stage that would have
+// forgotten a field cannot forget an argument, and the room's routing is only
+// as good as the loudest thing it is told.
+func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, sev Severity, reason string) (WorkItem, error) {
+	w.State, w.Note, w.Severity = StateParked, reason, sev.OrDefault()
 	w.dropResume()
 	err := q.record(ctx, w, "parked", w.ID, reason)
 	if err == nil {
@@ -395,6 +460,10 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 	}
 	w.State, w.Note = to, note
 	w.dropResume()
+	// Off the exception queue is off it. Leaving the severity behind would
+	// have a retried item come back already shouting, and would restart a
+	// later parking's clock with the previous parking's volume.
+	w.Severity = ""
 	// The actor is the operator, not the runner: this is the one transition a
 	// person makes by hand, and an audit that could not tell it from the
 	// daemon's own work would be missing the only human act in the loop.

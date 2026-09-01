@@ -92,9 +92,10 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return s, c.do(ctx, "GET", "/v1/status", nil, &s)
 }
 
-// Exceptions lists parked items.
-func (c *Client) Exceptions(ctx context.Context) ([]queue.WorkItem, error) {
-	var out []queue.WorkItem
+// Exceptions lists parked items, loudest and oldest first, with the age and
+// escalation count the raw work item cannot carry.
+func (c *Client) Exceptions(ctx context.Context) ([]control.Exception, error) {
+	var out []control.Exception
 	return out, c.do(ctx, "GET", "/v1/exceptions", nil, &out)
 }
 

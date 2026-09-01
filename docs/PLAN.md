@@ -423,6 +423,7 @@ claim is decoration.
 | App is not a bypass actor | a repository listing the app as bypass is refused | 7 |
 | Admission is re-checked at land | protection disabled mid-run blocks the landing | 7 |
 | Redaction | a planted credential does not reach the exporter | 5 |
+| Exception timeliness | the oldest parked item is measured against a recorded objective; a stale exception is told out of band, once per objective, bounded | 5 |
 | Preemption | incident revokes a campaign lease; preempted land is rejected | 5 |
 | Break-glass gating | refused with no open incident | 5 |
 | Stale approval | approval of a superseded revision does not count | 5 |
@@ -789,6 +790,24 @@ invent. It rides the task text, so it is neither part of the agentref nor
 governed as a layer: exactly the "inline material nobody reviewed" case
 ARCHITECTURE names under "Text first, git for governance", and now at least
 visible. Promoting it to a governed base layer is the fix, not this.
+
+Issue #4 closed the other half of parking (2026-09-01). The fold that showed
+only what still needs eyes was good and was where the design stopped:
+exceptions did not age, had no severity, and never left the room, and an
+exception nobody reads is identical to no exception. Now a park states a
+severity (a Park parameter, not a field — a stage cannot forget an argument;
+unstated resolves to medium, never to the quiet end, and a cascade inherits
+its cause's), exceptions carry an age and sort loudest-then-oldest,
+`control.Escalator` tells somebody out of band once the age passes the
+objective and once per objective after that up to a bound, and the notifier
+is a seam — `LogNotice` is the daemon's default because the alternative
+default is nothing. The objective is one number doing two jobs: the age a
+queue is measured against IS the age at which it should be shouting.
+`ExceptionHealth` puts the oldest parked item on /v1/status and in the room,
+because a length says how much there is to do and only the oldest says
+whether anything is being done. Every telling is recorded before it is sent —
+the count is the bound, so an unrecordable escalation is an unsent one. The
+sweep is a standing daemon chore beside the prune.
 
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no

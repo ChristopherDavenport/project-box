@@ -60,7 +60,12 @@ type Server struct {
 	Meter *capacity.Meter
 	// Box and Runner identify this daemon in /v1/status.
 	Box, Runner string
-	Started     time.Time
+	// Objective is the exception queue's response-time objective, reported
+	// on /v1/status beside the measurement so a reader never has to look up
+	// what the number is being judged against. Zero means
+	// [control.DefaultObjective].
+	Objective time.Duration
+	Started   time.Time
 	// Reload, when set, re-reads the daemon's configuration; wired by the
 	// daemon, exposed as POST /v1/reload.
 	Reload func(ctx context.Context, actor string) (string, error)
@@ -146,6 +151,12 @@ func (s *Server) actor(r *http.Request) string {
 	return "local-operator"
 }
 
+// room is this request's control surface, carrying the server's objective so
+// every reader measures the queue against the same number.
+func (s *Server) room(r *http.Request) *control.Room {
+	return &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r), Objective: s.Objective}
+}
+
 // Status is /v1/status.
 type Status struct {
 	Tenant     tenant.ID `json:"tenant"`
@@ -157,6 +168,10 @@ type Status struct {
 	UptimeSec  int64     `json:"uptime_sec"`
 	Routes     []string  `json:"routes"`
 	Version    string    `json:"version"`
+	// ExceptionQueue is the count's missing half: how old the oldest parked
+	// item is, and whether that clears the objective. A count alone cannot
+	// distinguish a queue being worked from one nobody has opened in a week.
+	ExceptionQueue control.ExceptionHealth `json:"exception_queue"`
 	// Spend is the capacity window's account. Nil when the server was wired
 	// without a meter; absent rather than zero, because a zero here would
 	// read as "nothing spent" when it means "nobody asked".
@@ -170,7 +185,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 500, err.Error())
 		return
 	}
-	pending, exceptions := 0, 0
+	pending := 0
 	seen := map[string]bool{}
 	for rec, err := range s.Store.Log().Since(ctx, s.Tenant, "index/pending", 1) {
 		if err != nil {
@@ -188,13 +203,19 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		switch item.State {
 		case queue.StatePending, queue.StateWaiting:
 			pending++
-		case queue.StateParked:
-			exceptions++
 		}
+	}
+	// The exception count comes from the room rather than a second fold here:
+	// two places counting the same thing is two places that can disagree, and
+	// the room is the one that also knows how old the oldest is.
+	health, err := s.room(r).ExceptionHealth(ctx)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
 	}
 	st := Status{
 		Tenant: s.Tenant, Box: s.Box, Runner: s.Runner, Stopped: stopped,
-		Pending: pending, Exceptions: exceptions,
+		Pending: pending, Exceptions: health.Parked, ExceptionQueue: health,
 		UptimeSec: int64(time.Since(s.Started).Seconds()), Routes: s.routeNames(),
 		Version: version.String(),
 	}
@@ -220,8 +241,7 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	room := &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r)}
-	out, err := room.Queue(r.Context(), states...)
+	out, err := s.room(r).Queue(r.Context(), states...)
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
@@ -232,12 +252,16 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// exceptions lists what still needs a person, loudest and oldest first, each
+// row carrying its age and how many times somebody has already been told.
 func (s *Server) exceptions(w http.ResponseWriter, r *http.Request) {
-	room := &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r)}
-	items, err := room.Exceptions(r.Context())
+	items, err := s.room(r).Exceptions(r.Context())
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
+	}
+	if items == nil {
+		items = []control.Exception{}
 	}
 	writeJSON(w, items)
 }

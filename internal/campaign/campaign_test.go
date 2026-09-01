@@ -154,7 +154,7 @@ func TestRolloutThrottleAndHalt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.Park(ctx, w, lease, "gate failed"); err != nil {
+	if _, err := q.Park(ctx, w, lease, queue.SeverityMedium, "gate failed"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := e.Advance(ctx, ing(), camp("go.version >= 1.25", 1, 0), "bump go"); !errors.Is(err, ErrHalted) {

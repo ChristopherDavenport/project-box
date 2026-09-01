@@ -45,7 +45,7 @@ func TestFoldSkipsNarrativeRecords(t *testing.T) {
 	narrate(t, qu, w, "agent-result", `{"stop":"end_turn","tool_calls":20,"tokens":918520,"metered":true}`)
 	narrate(t, qu, w, "escalated", "Issue #3 is already satisfied by the code as it stands — commit ab8ccfb names it.")
 
-	if _, err := qu.Park(ctx, w, lease, "escalated by mason"); err != nil {
+	if _, err := qu.Park(ctx, w, lease, SeverityMedium, "escalated by mason"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -102,7 +102,7 @@ func TestStateWritersUseStateKinds(t *testing.T) {
 			return err
 		}},
 		{"wi-parked", func(w WorkItem, l forge.Lease) error {
-			_, err := qu.Park(ctx, w, l, "parked")
+			_, err := qu.Park(ctx, w, l, SeverityMedium, "parked")
 			return err
 		}},
 		{"wi-waiting", func(w WorkItem, l forge.Lease) error {

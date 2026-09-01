@@ -110,6 +110,38 @@ Work enters through an **ingress** and never otherwise. Every stage may **park**
 its WorkItem into the exception queue rather than proceed; a factory that cannot
 stop is not automated, it is unsupervised.
 
+### An unread exception is not an exception
+
+Parking is only half the control. A parked item nobody looks at is
+indistinguishable from work that was never flagged, and in-band notification
+guarantees nobody looks: a queue that announces itself only inside the control
+room announces itself only to people already in the room. A dark factory whose
+exception queue goes unattended is unsupervised by the same sentence.
+
+So a park carries a **severity**, stated by the parking stage — the only place
+that knows whether a failing unit test and a revoked credential are the same
+emergency. It is a parameter rather than a field, because a stage that would
+forget a field cannot forget an argument, and an unstated severity resolves to
+*medium* rather than to the quiet end: silence must never read as "nothing to
+see", here as everywhere else.
+
+Exceptions **age**, and the age is measured against a stated **objective** —
+four hours by default, which is a CC7 response-time objective and not a
+dashboard threshold. Past it the room tells somebody **out of band** through a
+notifier seam it knows nothing about, and repeats once per objective up to a
+bound: an exception nobody answers must not become an alarm nobody can
+silence, because a muted page looks like coverage. Every telling is recorded
+*before* it is sent, carrying the objective in force at the time — the count
+is what bounds the repetition, so a notice the chain never saw is one that
+would be sent forever, and an unrecordable escalation is an unsent one for the
+same reason break-glass takes that posture.
+
+The metric is the **oldest parked item**, not the queue's length. Length says
+how much there is to do; only the oldest says whether anything is being done,
+and a queue drained briskly except for the one item nobody wants looks healthy
+by every other measure. An exception queue with an unbounded oldest-item age
+is the finding written for you.
+
 ## The estate
 
 A Box *enrols* repositories, which is a declaration. The estate *observes* them,
@@ -709,7 +741,7 @@ the design is built around.
 | Segregation of duties | builder, gate, and deploy authority are distinct grants — a builder holds no land grant; agents cannot approve their own work | per-principal attribution (actor and on-behalf-of) on every evidence record |
 | Logical access (CC6) | GitOps — the control plane holds no cluster credentials; only the reconciler writes to clusters, from gated env-repo commits | env-repo history, installation scope |
 | Monitoring (CC4.1) | documented periodic human review of a sample of automated changes | sign-off records from the control room |
-| Incident handling (CC7) | exception queue is a first-class workflow with escalation and resolution | parked/resolved transitions |
+| Incident handling (CC7) | exception queue is a first-class workflow with severity, aging against a stated response-time objective, bounded out-of-band escalation, and resolution | parked/resolved transitions, escalation records carrying the objective in force |
 | Break-glass | defined, logged, reviewed procedure | every invocation, with reviewer sign-off |
 | Vendor management (CC9.2) | GCP, GitHub, Anthropic — subservice organizations with reports available | vendor review records |
 
