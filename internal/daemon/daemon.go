@@ -111,7 +111,7 @@ func New(path string) (*Daemon, error) {
 	d.API = &api.Server{
 		Store: s, Tenant: t, Routes: routes,
 		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner},
-		Queue:  d.queue, Token: cfg.Token, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
+		Queue:  d.queue, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
 		Started: time.Now(),
 		Reload:  d.reloadForAPI,
 	}
@@ -202,7 +202,6 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 
 	d.pump.SetLoops(loops)
 	d.API.SetRoutes(routes)
-	d.API.SetToken(ncfg.Token)
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
 		MaxPerWindow: ncfg.Budget.MaxPerWindow, Window: ncfg.WindowDuration()})
 	d.mu.Lock()
@@ -240,9 +239,9 @@ func (d *Daemon) cfgRunner() string {
 // Run serves the API and ticks until ctx ends.
 func (d *Daemon) Run(ctx context.Context) error {
 	d.mu.RLock()
-	listen, token := d.cfg.Listen, d.cfg.Token
+	listen := d.cfg.Listen
 	d.mu.RUnlock()
-	ln, err := api.Listen(listen, token)
+	ln, err := api.Listen(listen)
 	if err != nil {
 		return err
 	}

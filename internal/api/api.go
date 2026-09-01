@@ -18,9 +18,7 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -38,7 +36,12 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
-// Server serves one tenant's daemon API.
+// Server serves one tenant's daemon API — over a unix domain socket, and
+// nothing else. The daemon's whole trust model is the socket's file mode:
+// no tokens, no cookies, no TLS, no network. Everything network-shaped is a
+// LAYER in front of the socket (cmd/boxgate carries the bearer token today
+// and is the seam OIDC replaces; `box room` fronts it for a local browser),
+// so seams multiply without the daemon changing — the dockerd posture.
 type Server struct {
 	Store  store.Store
 	Tenant tenant.ID
@@ -48,8 +51,6 @@ type Server struct {
 	Routes map[string]ingress.Route
 	Router *ingress.StoreRouter
 	Queue  *queue.Queue
-	// Token gates TCP access; empty means unix-socket-only trust.
-	Token string
 	// Box and Runner identify this daemon in /v1/status.
 	Box, Runner string
 	Started     time.Time
@@ -67,13 +68,6 @@ type Server struct {
 func (s *Server) SetRoutes(r map[string]ingress.Route) {
 	s.mu.Lock()
 	s.Routes = r
-	s.mu.Unlock()
-}
-
-// SetToken swaps the bearer token on reload.
-func (s *Server) SetToken(t string) {
-	s.mu.Lock()
-	s.Token = t
 	s.mu.Unlock()
 }
 
@@ -95,12 +89,6 @@ func (s *Server) routeNames() []string {
 	return names
 }
 
-func (s *Server) token() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.Token
-}
-
 // Handler returns the API as an http.Handler.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -115,31 +103,15 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/stop", s.stop)
 	mux.HandleFunc("POST /v1/resume", s.resume)
 	mux.HandleFunc("POST /v1/reload", s.reload)
-	authed := s.auth(mux)
-
-	// The UI shell serves UNAUTHENTICATED — it is embedded public code, and
-	// every datum it shows comes through /v1, which stays authed. Gating the
-	// shell would just be a chicken-and-egg: the script that carries the
-	// token cannot load without the token.
-	outer := http.NewServeMux()
-	outer.Handle("/v1/", authed)
 	if s.UI != nil {
 		files := http.FileServerFS(s.UI)
-		outer.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodGet && r.Method != http.MethodHead {
 				httpErr(w, http.StatusMethodNotAllowed, "the UI is read-only; the API lives under /v1")
 				return
 			}
-			// A valid ?token= mints the cookie server-side, so EventSource
-			// and every later /v1 call are authed without a JS bootstrap
-			// race. An invalid one mints nothing and the shell still loads.
-			if tok := s.token(); tok != "" {
-				if q := r.URL.Query().Get("token"); q != "" && subtle.ConstantTimeCompare([]byte(q), []byte(tok)) == 1 {
-					http.SetCookie(w, &http.Cookie{Name: "box_token", Value: q, Path: "/", SameSite: http.SameSiteStrictMode})
-				}
-			}
 			p := strings.TrimPrefix(r.URL.Path, "/")
-			if p != "" {
+			if p != "" && p != "v1" {
 				if f, err := s.UI.Open(p); err == nil {
 					f.Close()
 					files.ServeHTTP(w, r)
@@ -151,36 +123,8 @@ func (s *Server) Handler() http.Handler {
 			r2.URL.Path = "/"
 			files.ServeHTTP(w, r2)
 		})
-		return outer
 	}
-	return authed
-}
-
-// auth is the seam: bearer token when configured, pass-through otherwise
-// (the unix socket's file mode is the auth there). OIDC replaces exactly
-// this function.
-func (s *Server) auth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if tok := s.token(); tok != "" {
-			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if got == "" {
-				// The browser paths: EventSource cannot set headers, so the
-				// token may ride a query parameter once, and the UI keeps it
-				// in a cookie thereafter. Both disappear with OIDC.
-				got = r.URL.Query().Get("token")
-			}
-			if got == "" {
-				if c, err := r.Cookie("box_token"); err == nil {
-					got = c.Value
-				}
-			}
-			if subtle.ConstantTimeCompare([]byte(got), []byte(tok)) != 1 {
-				httpErr(w, http.StatusUnauthorized, "missing or wrong bearer token")
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
+	return mux
 }
 
 // actor is who a mutating request acts as. With bearer auth this is still
@@ -371,23 +315,17 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// Listen parses "unix:/path" or "tcp:host:port" and returns the listener.
-// TCP without a token is refused: an open network control plane is a
-// misconfiguration, never a default.
-func Listen(spec, token string) (net.Listener, error) {
-	switch {
-	case strings.HasPrefix(spec, "unix:"):
-		path := strings.TrimPrefix(spec, "unix:")
-		// A previous daemon's socket file blocks bind; a live one refuses
-		// connections distinctly, so removal here only clears the stale case.
-		_ = removeIfSocket(path)
-		return net.Listen("unix", path)
-	case strings.HasPrefix(spec, "tcp:"):
-		if token == "" {
-			return nil, errors.New("api: tcp listener requires -token (or front it with real auth) — refusing an open control plane")
-		}
-		return net.Listen("tcp", strings.TrimPrefix(spec, "tcp:"))
-	default:
-		return nil, fmt.Errorf("api: listener spec %q — want unix:/path or tcp:host:port", spec)
+// Listen binds the daemon's ONLY listener kind: a unix domain socket. The
+// daemon is never network-reachable itself; anything network-shaped is a
+// layer in front (see cmd/boxgate). This is a design decision, not a
+// missing feature.
+func Listen(spec string) (net.Listener, error) {
+	if !strings.HasPrefix(spec, "unix:") {
+		return nil, fmt.Errorf("api: the daemon listens on a unix socket only (%q given) — put a gate in front for the network (boxgate, or any proxy)", spec)
 	}
+	path := strings.TrimPrefix(spec, "unix:")
+	// A previous daemon's socket file blocks bind; a live one refuses
+	// connections distinctly, so removal here only clears the stale case.
+	_ = removeIfSocket(path)
+	return net.Listen("unix", path)
 }

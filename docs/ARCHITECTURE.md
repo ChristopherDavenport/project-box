@@ -989,6 +989,26 @@ superseded token can push to its own branch but cannot land. It is a real
 weakening of fencing, and the one argument that would pull a self-hosted forge
 back into scope.
 
+## The daemon is a socket
+
+boxd listens on a unix domain socket and nothing else — it cannot be given
+a network listener (decided 2026-08-31, the dockerd posture). The daemon's
+entire trust model is the socket's file mode; "what can reach the factory's
+control surface" answers *nothing on any network*.
+
+Everything network-shaped is a layer over the socket, composed in front
+without the daemon changing: today a token gate (internal/gateway, served
+by cmd/boxgate, refusing tokenless exposure off-loopback) and `box room`
+for the tokenless loopback browser case; tomorrow OIDC, mTLS, or a cloud
+IAP in exactly the same position. The browser-auth machinery — cookie
+minting for EventSource, the query-token bootstrap — lives in the gate,
+because it is a property of a transport the daemon does not have.
+
+The consequence worth naming: seams MULTIPLY without duplication. Every
+future interface — a fleet orchestrator, an ssh-forwarded operator, a mesh
+sidecar — is a socket client or a gate variant, and the daemon's API
+surface stays exactly one thing with exactly one trust story.
+
 ## Prior art and divergences
 
 Assessed 2026-08-31 against Yegge's "The Shape of Things to Come" (the

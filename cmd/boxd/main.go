@@ -63,8 +63,7 @@ func run() error {
 	seatName := flag.String("seat", "mason", "seat identity for the agent's continuity")
 	checkCmd := flag.String("check", "go test ./...", "gate/check command")
 	otlp := flag.String("otlp", "", "collector endpoint (host:port); empty = telemetry off")
-	listen := flag.String("listen", "unix:boxd.sock", "API listener: unix:/path or tcp:host:port")
-	token := flag.String("token", "", "bearer token for the API (required for tcp)")
+	listen := flag.String("listen", "unix:boxd.sock", "the daemon's unix socket (network exposure is boxgate's job)")
 	cfgPath := flag.String("config", "", "box.yaml — multi-box, multi-repo configuration; overrides the single-repo flags")
 	flag.Parse()
 
@@ -146,9 +145,9 @@ func run() error {
 	apiSrv := &api.Server{
 		Store: s, Tenant: t, Routes: routes,
 		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: *runner},
-		Queue:  q, Token: *token, Box: *box, Runner: *runner, Started: time.Now(),
+		Queue:  q, Box: *box, Runner: *runner, Started: time.Now(),
 	}
-	ln, err := api.Listen(*listen, *token)
+	ln, err := api.Listen(*listen)
 	if err != nil {
 		return err
 	}

@@ -9,8 +9,13 @@ import (
 	"fmt"
 	"os"
 
+	"net"
+	"net/http"
+	"strings"
+
 	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/control"
+	"github.com/ChristopherDavenport/project-box/internal/gateway"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -39,6 +44,9 @@ func run(args []string) error {
 	t := tenant.ID(*tn)
 	if err := t.Validate(); err != nil {
 		return err
+	}
+	if fs.Arg(0) == "room" {
+		return room(*daemon, fs.Args()[1:])
 	}
 	if *daemon != "" {
 		return viaDaemon(*daemon, *token, *actor, fs.Arg(0), fs.Args()[1:])
@@ -210,4 +218,29 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		return fmt.Errorf("daemon mode supports status|exceptions|submit|item|provenance|stop|resume, got %q", cmd)
 	}
 	return nil
+}
+
+// room fronts the daemon's socket on a loopback port and prints the URL —
+// the local browser case, as one command. Loopback with the caller's own
+// uid already holding socket access needs no token; anything beyond
+// loopback is boxgate's job.
+func room(daemonAddr string, rest []string) error {
+	sub := flag.NewFlagSet("room", flag.ContinueOnError)
+	socket := sub.String("socket", "boxd.sock", "the daemon's unix socket")
+	port := sub.Int("port", 0, "loopback port (0 picks one)")
+	if err := sub.Parse(rest); err != nil {
+		return err
+	}
+	if daemonAddr != "" {
+		if !strings.HasPrefix(daemonAddr, "unix:") {
+			return fmt.Errorf("room fronts a local socket; %q is already a network address", daemonAddr)
+		}
+		*socket = strings.TrimPrefix(daemonAddr, "unix:")
+	}
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", *port))
+	if err != nil {
+		return err
+	}
+	fmt.Printf("control room: http://%s/  (ctrl-c to close)\n", ln.Addr())
+	return http.Serve(ln, gateway.Gate(*socket, ""))
 }

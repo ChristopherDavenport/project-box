@@ -473,6 +473,7 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Repository creation defaults to requiring human approval | it is the one permission that cannot be repository-scoped |
 | Repository restrictions verified before acting, twice | the gate is enforced by config we do not own; a stale check is a memory of a control |
 | The app is never a forge bypass actor | otherwise the only actor that matters is the one the rules exempt |
+| The daemon is socket-only; the network is a layer | one trust model in the core (file mode); seams compose in front without duplication |
 | Expand/contract plus revert-forward | there is no atomic commit across git remotes |
 | Argo CD as the reconciler | ApplicationSet fits rendered-per-service; its API reads reconcile status back as evidence |
 | TSC scope: Security + Confidentiality + Availability | redaction and retention become audited controls; incident handling gets defined objectives |
@@ -639,13 +640,19 @@ described the factory's own materialization model. cmd/boxd -agent runs
 real agents on the daemon; the gated live test (BOX_ACP_LIVE) never runs in
 CI — it spends a real session.
 
-The daemon has its interface (2026-08-31): internal/api serves one
-HTTP+JSON surface — status, exceptions, items, provenance, activity, an SSE
-event stream, POST /v1/ingress as the delegation verb, stop/resume — over a
-unix socket locally (filesystem permissions as auth) and the SAME API over
-TCP for cloud, where a bearer token is required (an open TCP control plane
-refuses to start; the token check is the one seam OIDC replaces at Phase
-7). The API writes intent and never executes: the pump remains the only
+The daemon has its interface (2026-08-31, refined same day): internal/api
+serves one HTTP+JSON surface — status, exceptions, items, provenance,
+activity, an SSE event stream, POST /v1/ingress as the delegation verb,
+stop/resume — and the daemon is SOCKET-ONLY by design (the dockerd
+posture): its whole trust model is the unix socket's file mode, and it
+cannot be given a network listener at all. Everything network-shaped is a
+LAYER over the socket: internal/gateway + cmd/boxgate carry the network
+listener and the bearer-token/cookie check (refusing a tokenless gate
+off-loopback), `box room` fronts it tokenless on 127.0.0.1 for the local
+browser, and OIDC/mTLS/IAP replace the gate without the daemon changing.
+Seams multiply; the daemon never duplicates them. Proven by rerunning the
+IDENTICAL browser smoke through the layered shape — same script, same UX,
+daemon never network-reachable. The API writes intent and never executes: the pump remains the only
 path to work, so network callers get identical stop/budget/fencing
 semantics. Routes are server configuration — a caller names a route, never
 defines one. internal/api.Client is the typed Go client; cmd/box -daemon

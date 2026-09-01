@@ -8,6 +8,7 @@ package boxcfg
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -22,8 +23,10 @@ type Config struct {
 	Runner string `yaml:"runner"`
 	DB     string `yaml:"db"`
 	Root   string `yaml:"root"`
+	// Listen is the daemon's unix socket. The daemon is socket-only by
+	// design: network exposure, tokens, TLS, and OIDC are layers in front
+	// (boxgate), never the daemon's own concern.
 	Listen string `yaml:"listen"`
-	Token  string `yaml:"token"`
 	Every  string `yaml:"every"`
 	OTLP   string `yaml:"otlp"`
 	Budget Budget `yaml:"budget"`
@@ -90,6 +93,9 @@ func (c *Config) validate() error {
 	}
 	if c.Listen == "" {
 		c.Listen = "unix:boxd.sock"
+	}
+	if !strings.HasPrefix(c.Listen, "unix:") {
+		return fmt.Errorf("boxcfg: listen %q — the daemon is socket-only; front it with boxgate for the network", c.Listen)
 	}
 	if c.Every == "" {
 		c.Every = "15s"

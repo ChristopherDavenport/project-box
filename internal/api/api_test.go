@@ -112,7 +112,7 @@ func TestDelegateOverTheWire(t *testing.T) {
 	ctx := context.Background()
 
 	sock := filepath.Join(t.TempDir(), "boxd.sock")
-	ln, err := Listen("unix:"+sock, "")
+	ln, err := Listen("unix:" + sock)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,31 +209,12 @@ func mustActivity(t *testing.T, c *Client, ctx context.Context) []Activity {
 	return a
 }
 
-// TestTCPRequiresToken: the cloud posture — no token, no TCP listener; wrong
-// token, 401; right token, service.
-func TestTCPRequiresToken(t *testing.T) {
-	if _, err := Listen("tcp:127.0.0.1:0", ""); err == nil {
-		t.Fatal("an open TCP control plane was allowed")
-	}
-	w := rig(t)
-	w.srv.Token = "s3cret"
-	ts := httptest.NewServer(w.srv.Handler())
-	defer ts.Close()
-
-	resp, err := http.Get(ts.URL + "/v1/status")
-	if err != nil || resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("tokenless request: %v %v", resp.StatusCode, err)
-	}
-	req, _ := http.NewRequest("GET", ts.URL+"/v1/status", nil)
-	req.Header.Set("Authorization", "Bearer wrong")
-	resp, _ = http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("wrong token: %d", resp.StatusCode)
-	}
-	req.Header.Set("Authorization", "Bearer s3cret")
-	resp, _ = http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("right token: %d", resp.StatusCode)
+// TestDaemonIsSocketOnly: the cloud posture inverted and strengthened — the
+// daemon cannot be given a network listener at all; that is the gateway's
+// job.
+func TestDaemonIsSocketOnly(t *testing.T) {
+	if _, err := Listen("tcp:127.0.0.1:0"); err == nil {
+		t.Fatal("the daemon accepted a network listener")
 	}
 }
 
