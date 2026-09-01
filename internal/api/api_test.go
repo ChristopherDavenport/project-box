@@ -3,12 +3,14 @@ package api
 import (
 	"bufio"
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
@@ -276,4 +278,34 @@ func gitOut(t *testing.T, dir string, args ...string) (string, error) {
 	cmd := execCommand(dir, args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// TestUIServingWithSPAFallback: real files serve as themselves; router deep
+// links fall back to index.html; /v1 stays the API.
+func TestUIServingWithSPAFallback(t *testing.T) {
+	w := rig(t)
+	w.srv.UI = fstest.MapFS{
+		"index.html": {Data: []byte("<box-app></box-app>")},
+		"app.js":     {Data: []byte("// bundle")},
+	}
+	ts := httptest.NewServer(w.srv.Handler())
+	defer ts.Close()
+	get := func(p string) (int, string) {
+		res, err := http.Get(ts.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer res.Body.Close()
+		b, _ := io.ReadAll(res.Body)
+		return res.StatusCode, string(b)
+	}
+	if code, body := get("/app.js"); code != 200 || body != "// bundle" {
+		t.Fatalf("asset: %d %q", code, body)
+	}
+	if code, body := get("/items/wi-42"); code != 200 || !strings.Contains(body, "box-app") {
+		t.Fatalf("deep link should fall back to the shell: %d %q", code, body)
+	}
+	if code, _ := get("/v1/status"); code != 200 {
+		t.Fatalf("the API must stay the API: %d", code)
+	}
 }

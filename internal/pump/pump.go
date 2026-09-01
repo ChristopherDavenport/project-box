@@ -38,6 +38,26 @@ type Pump struct {
 	Loops map[string]*loop.Loop
 	Meter *capacity.Meter
 	Queue *queue.Queue
+
+	mu sync.RWMutex // guards Loops swaps against in-flight drains
+}
+
+// SetLoops swaps the executor table — the heart of config reload. In-flight
+// runs keep the loop they started with; the next drain sees the new table.
+func (p *Pump) SetLoops(loops map[string]*loop.Loop) {
+	p.mu.Lock()
+	p.Loops = loops
+	p.mu.Unlock()
+}
+
+func (p *Pump) loopFor(box, repo string) (*loop.Loop, bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if lp, ok := p.Loops[box+"/"+repo]; ok {
+		return lp, true
+	}
+	lp, ok := p.Loops[box]
+	return lp, ok
 }
 
 // Intake creates a work item for every ingress that lacks one. Item ids are
@@ -103,10 +123,7 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 	settled := 0
 	var firstErr error
 	for _, item := range candidates {
-		lp, ok := p.Loops[item.Box+"/"+item.Repo]
-		if !ok {
-			lp, ok = p.Loops[item.Box]
-		}
+		lp, ok := p.loopFor(item.Box, item.Repo)
 		if !ok {
 			continue // no executor configured for this target; not this pump's work
 		}

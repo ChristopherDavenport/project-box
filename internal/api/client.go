@@ -123,6 +123,15 @@ func (c *Client) Resume(ctx context.Context, reason string) error {
 	return c.do(ctx, "POST", "/v1/resume", ControlRequest{Reason: reason}, nil)
 }
 
+// Reload asks the daemon to re-read its configuration.
+func (c *Client) Reload(ctx context.Context) (string, error) {
+	var out map[string]string
+	if err := c.do(ctx, "POST", "/v1/reload", nil, &out); err != nil {
+		return "", err
+	}
+	return out["reloaded"], nil
+}
+
 // Activity fetches the recent composite feed.
 func (c *Client) Activity(ctx context.Context) ([]Activity, error) {
 	var out []Activity

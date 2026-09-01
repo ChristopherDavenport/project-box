@@ -50,6 +50,16 @@ type Meter struct {
 	refused     bool // one refusal record per window, not one per poll
 }
 
+// SetBudget swaps the budget (config reload). The current window restarts
+// under the new numbers — simpler to reason about than prorating, and a
+// reload is rare enough that a fresh window is the least surprising rule.
+func (m *Meter) SetBudget(b Budget) {
+	m.mu.Lock()
+	m.Budget = b
+	m.windowStart, m.started, m.refused = m.now(), 0, false
+	m.mu.Unlock()
+}
+
 func (m *Meter) now() time.Time {
 	if m.Now != nil {
 		return m.Now()

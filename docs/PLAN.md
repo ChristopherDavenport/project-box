@@ -667,6 +667,27 @@ by the daemon's own ticks. Config validation is opinionated: unknown lanes,
 env-optimistic combinations, duplicate route names, and a repo with neither
 agent nor build command are all refused at load.
 
+The web control room is in (web/: Lit + @lit-labs/router [Labs] + the Jack
+Henry Design System, esbuild-bundled, dist committed and go:embed-served by
+boxd itself — one binary, UI and API on one origin). Dashboard with live
+SSE activity, exceptions, item + provenance views, and Submit as the
+delegation verb in form shape. Component APIs taken from jh-ui's shipped
+custom-elements.json, never invented. The UI shell serves UNAUTHENTICATED
+(embedded public code; every datum rides /v1, which stays authed) and a
+valid ?token= mints the cookie server-side — no JS bootstrap race, and the
+whole scheme is the one seam OIDC replaces.
+
+Config hot-reload is CONFIRMED on a running server: internal/daemon
+assembles from box.yaml and reassembles on SIGHUP or POST /v1/reload —
+executors, routes, budget, and tick interval swap under locks; in-flight
+runs finish on the config they started with; tenant/db/root/listen are the
+daemon's IDENTITY and a reload touching them is refused with the old config
+left running; every reload is evidence. Proven in Go tests (add-a-repo
+hot; identity and broken configs refused) and END TO END IN A BROWSER:
+Playwright drove the real UI — submit through the JH form, the landing
+arriving on the live feed, then a reload on the running process and the
+new route appearing in the form with no restart.
+
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
-review sampling/sign-off endpoints when a remote control room needs them,
-and OIDC at the auth seam.
+review sampling/sign-off endpoints for the control room, and OIDC at the
+auth seam.

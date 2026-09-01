@@ -22,10 +22,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/control"
@@ -51,6 +53,52 @@ type Server struct {
 	// Box and Runner identify this daemon in /v1/status.
 	Box, Runner string
 	Started     time.Time
+	// Reload, when set, re-reads the daemon's configuration; wired by the
+	// daemon, exposed as POST /v1/reload.
+	Reload func(ctx context.Context, actor string) (string, error)
+	// UI, when set, is served at / with SPA fallback: a path that is not a
+	// file gets index.html, so the router's deep links work on refresh.
+	UI fs.FS
+
+	mu sync.RWMutex // guards Routes and Token swaps
+}
+
+// SetRoutes swaps the route table on reload.
+func (s *Server) SetRoutes(r map[string]ingress.Route) {
+	s.mu.Lock()
+	s.Routes = r
+	s.mu.Unlock()
+}
+
+// SetToken swaps the bearer token on reload.
+func (s *Server) SetToken(t string) {
+	s.mu.Lock()
+	s.Token = t
+	s.mu.Unlock()
+}
+
+func (s *Server) route(name string) (ingress.Route, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	r, ok := s.Routes[name]
+	return r, ok
+}
+
+func (s *Server) routeNames() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	names := make([]string, 0, len(s.Routes))
+	for n := range s.Routes {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func (s *Server) token() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Token
 }
 
 // Handler returns the API as an http.Handler.
@@ -66,7 +114,46 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/ingress", s.openIngress)
 	mux.HandleFunc("POST /v1/stop", s.stop)
 	mux.HandleFunc("POST /v1/resume", s.resume)
-	return s.auth(mux)
+	mux.HandleFunc("POST /v1/reload", s.reload)
+	authed := s.auth(mux)
+
+	// The UI shell serves UNAUTHENTICATED — it is embedded public code, and
+	// every datum it shows comes through /v1, which stays authed. Gating the
+	// shell would just be a chicken-and-egg: the script that carries the
+	// token cannot load without the token.
+	outer := http.NewServeMux()
+	outer.Handle("/v1/", authed)
+	if s.UI != nil {
+		files := http.FileServerFS(s.UI)
+		outer.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				httpErr(w, http.StatusMethodNotAllowed, "the UI is read-only; the API lives under /v1")
+				return
+			}
+			// A valid ?token= mints the cookie server-side, so EventSource
+			// and every later /v1 call are authed without a JS bootstrap
+			// race. An invalid one mints nothing and the shell still loads.
+			if tok := s.token(); tok != "" {
+				if q := r.URL.Query().Get("token"); q != "" && subtle.ConstantTimeCompare([]byte(q), []byte(tok)) == 1 {
+					http.SetCookie(w, &http.Cookie{Name: "box_token", Value: q, Path: "/", SameSite: http.SameSiteStrictMode})
+				}
+			}
+			p := strings.TrimPrefix(r.URL.Path, "/")
+			if p != "" {
+				if f, err := s.UI.Open(p); err == nil {
+					f.Close()
+					files.ServeHTTP(w, r)
+					return
+				}
+			}
+			// SPA fallback: the control room's router owns unknown paths.
+			r2 := r.Clone(r.Context())
+			r2.URL.Path = "/"
+			files.ServeHTTP(w, r2)
+		})
+		return outer
+	}
+	return authed
 }
 
 // auth is the seam: bearer token when configured, pass-through otherwise
@@ -74,9 +161,20 @@ func (s *Server) Handler() http.Handler {
 // this function.
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.Token != "" {
+		if tok := s.token(); tok != "" {
 			got := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-			if subtle.ConstantTimeCompare([]byte(got), []byte(s.Token)) != 1 {
+			if got == "" {
+				// The browser paths: EventSource cannot set headers, so the
+				// token may ride a query parameter once, and the UI keeps it
+				// in a cookie thereafter. Both disappear with OIDC.
+				got = r.URL.Query().Get("token")
+			}
+			if got == "" {
+				if c, err := r.Cookie("box_token"); err == nil {
+					got = c.Value
+				}
+			}
+			if subtle.ConstantTimeCompare([]byte(got), []byte(tok)) != 1 {
 				httpErr(w, http.StatusUnauthorized, "missing or wrong bearer token")
 				return
 			}
@@ -135,15 +233,10 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 			exceptions++
 		}
 	}
-	routes := make([]string, 0, len(s.Routes))
-	for name := range s.Routes {
-		routes = append(routes, name)
-	}
-	sort.Strings(routes)
 	writeJSON(w, Status{
 		Tenant: s.Tenant, Box: s.Box, Runner: s.Runner, Stopped: stopped,
 		Pending: pending, Exceptions: exceptions,
-		UptimeSec: int64(time.Since(s.Started).Seconds()), Routes: routes,
+		UptimeSec: int64(time.Since(s.Started).Seconds()), Routes: s.routeNames(),
 	})
 }
 
@@ -205,7 +298,7 @@ func (s *Server) openIngress(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, "bad body: "+err.Error())
 		return
 	}
-	route, ok := s.Routes[req.Route]
+	route, ok := s.route(req.Route)
 	if !ok {
 		httpErr(w, 404, fmt.Sprintf("no route %q — routes are operator configuration, not caller request", req.Route))
 		return
@@ -240,6 +333,19 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request, f func(context.
 		return
 	}
 	writeJSON(w, map[string]bool{"ok": true})
+}
+
+func (s *Server) reload(w http.ResponseWriter, r *http.Request) {
+	if s.Reload == nil {
+		httpErr(w, http.StatusNotImplemented, "this daemon was started without a config file; reload needs one")
+		return
+	}
+	summary, err := s.Reload(r.Context(), s.actor(r))
+	if err != nil {
+		httpErr(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+	writeJSON(w, map[string]string{"reloaded": summary})
 }
 
 func (s *Server) writeChain(w http.ResponseWriter, r *http.Request, scope string) {
