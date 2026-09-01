@@ -59,9 +59,11 @@ type Loop struct {
 	// the run landed or parked. Errors are recorded, never fatal — losing a
 	// note must not unsettle settled work.
 	Handoff func(ctx context.Context, item queue.WorkItem) error
-	// Red opens repair work when an optimistic landing goes red, returning
-	// the repair ingress id. Nil means the red is recorded but nobody is
-	// summoned — configure it; see OpenRepair.
+	// Red opens repair work when an optimistic landing goes red and the red
+	// survives one re-run — a red that does not reproduce is recorded as a
+	// flaky check, and nobody is summoned for it. Returns the repair ingress
+	// id. Nil means even a confirmed red is recorded but nobody is summoned
+	// — configure it; see OpenRepair.
 	Red func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error)
 	TTL time.Duration
 }
@@ -221,7 +223,8 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 // runOptimistic is land-then-check: the lease and the expected-old-value
 // check guard the landing exactly as in the gated lane — fencing is never
 // optimistic — and the gates run afterwards as checks on the branch. A red
-// check opens repair work; nothing rolls back by itself.
+// check is re-run once before repair work opens — confirm the red before
+// summoning anyone; nothing rolls back by itself.
 func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, ws forge.Workspace, cs forge.ChangeSet, head forge.Commit) (queue.WorkItem, error) {
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
@@ -271,8 +274,26 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		return item, fmt.Errorf("loop: optimistic lane cannot wait on a human gate — human approval binds at the production boundary; move gate to the promotion")
 	case forge.DecisionFail:
 		reason := reasons(verdicts)
-		checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
-			checks.Status{Green: false, Lane: string(forge.LaneOptimistic), Note: reason}, l.Runner)
+		// Confirm the red before summoning anyone: a flaky check reds a
+		// different sha every time, and sha-keyed idempotency in OpenRepair
+		// cannot collapse those. The re-run keeps repair work for reds that
+		// reproduce.
+		confirmed, cerr := checks.Confirm(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
+			string(forge.LaneOptimistic), reason, l.Runner,
+			func(ctx context.Context) (bool, string, error) { return l.recheck(ctx, item, ws, cs, head) })
+		if cerr != nil {
+			// One red observed and no second judgement. The red record
+			// stands — promotion never takes the commit — and the rest is a
+			// person's call.
+			return q.Park(ctx, item, claim, "landed red, unconfirmed: "+reason+"; "+cerr.Error())
+		}
+		if !confirmed {
+			// The red did not reproduce: the flaky record is the fact, the
+			// commit is green on the chain, and nobody is summoned.
+			item.Note = "landed green on re-run; flaky check recorded: " + reason
+			item, derr := q.Done(ctx, item, claim, head)
+			return l.settle(ctx, item), derr
+		}
 		note := "landed red: " + reason
 		if l.Red != nil {
 			repair, rerr := l.Red(ctx, item, head, reason)
@@ -293,6 +314,38 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		checks.Status{Green: true, Lane: string(forge.LaneOptimistic)}, l.Runner)
 	item, derr := q.Done(ctx, item, claim, head)
 	return l.settle(ctx, item), derr
+}
+
+// recheck is the second look at a red landing: the same gates over the same
+// workspace, each verdict recorded like the first pass, under its own stage
+// so the trace shows the confirmation ran. It reports whether the gates now
+// pass and, if not, why; an error means the look could not conclude.
+func (l *Loop) recheck(ctx context.Context, item queue.WorkItem, ws forge.Workspace, cs forge.ChangeSet, head forge.Commit) (bool, string, error) {
+	var verdicts []forge.Verdict
+	var infra error
+	telemetry.Stage(ctx, "confirm-red", item, func(ctx context.Context) error {
+		for _, g := range l.Gates(ws) {
+			v, err := g.Evaluate(ctx, cs)
+			if err != nil {
+				infra = fmt.Errorf("check %s could not conclude: %v", g.Name(), err)
+				return infra
+			}
+			body, _ := json.Marshal(v)
+			l.record(ctx, item, "gate", string(head), string(body))
+			verdicts = append(verdicts, v)
+		}
+		if forge.Resolve(verdicts) != forge.DecisionPass {
+			return fmt.Errorf("red confirmed")
+		}
+		return nil
+	})
+	if infra != nil {
+		return false, "", infra
+	}
+	if forge.Resolve(verdicts) == forge.DecisionPass {
+		return true, "", nil
+	}
+	return false, reasons(verdicts), nil
 }
 
 // authorize checks one action when enforcement is on, records the decision

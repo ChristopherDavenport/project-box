@@ -3,6 +3,8 @@ package loop
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/authz"
+	"github.com/ChristopherDavenport/project-box/internal/checks"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
@@ -349,4 +352,173 @@ type escalatingBuilder struct{}
 
 func (escalatingBuilder) Build(context.Context, forge.Workspace, string) (forge.Commit, error) {
 	return "", &Escalation{Seat: "mason", Reason: "task needs credentials I do not hold"}
+}
+
+// scripted is a gate that answers from a script, one entry per evaluation.
+// The counter lives behind a pointer because the loop rebuilds its gates for
+// the confirming re-run.
+type scripted struct {
+	label string
+	calls *int
+	step  func(n int) (forge.Verdict, error)
+}
+
+func (s scripted) Name() string { return s.label }
+func (s scripted) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	n := *s.calls
+	*s.calls++
+	return s.step(n)
+}
+
+// optimistic reconfigures the test loop for the land-then-check lane and
+// counts how often repair is summoned.
+func optimistic(e *env) *int {
+	reds := new(int)
+	e.loop.Lane = forge.LaneOptimistic
+	e.loop.Red = func(context.Context, queue.WorkItem, forge.Commit, string) (string, error) {
+		*reds++
+		return "ing-repair", nil
+	}
+	return reds
+}
+
+func chainStatuses(t *testing.T, e *env, sha string) []checks.Status {
+	t.Helper()
+	var out []checks.Status
+	for rec, err := range e.store.Log().Since(context.Background(), tn, "checks/app", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Subject != sha {
+			continue
+		}
+		var st checks.Status
+		if err := json.Unmarshal(rec.Body, &st); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// TestFlakyRedIsRecordedNotRepaired is issue #2: a post-land red is re-run
+// once before anyone is summoned. Red-then-green is a flaky check — both
+// looks go on the chain, the commit ends green, and no repair work opens.
+func TestFlakyRedIsRecordedNotRepaired(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	reds := optimistic(e)
+	calls := new(int)
+	e.loop.Gates = func(ws forge.Workspace) []forge.Gate {
+		return []forge.Gate{scripted{label: "post-land", calls: calls, step: func(n int) (forge.Verdict, error) {
+			if n == 0 {
+				return forge.Verdict{Gate: "post-land", Decision: forge.DecisionFail, Reason: "spurious timeout"}, nil
+			}
+			return forge.Verdict{Gate: "post-land", Decision: forge.DecisionPass, Reason: "clean"}, nil
+		}}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-flaky"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flaky", "land through a flaky check"))
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateDone || !strings.Contains(item.Note, "flaky") {
+		t.Fatalf("flaky red should finish with the flake on record: %+v", item)
+	}
+	if *reds != 0 {
+		t.Fatalf("a flaky red summoned repair %d times", *reds)
+	}
+	if *calls != 2 {
+		t.Fatalf("the check ran %d times, want observe + confirm", *calls)
+	}
+	// The commit ends green — promotable — with both observations recorded.
+	green, err := checks.IsGreen(ctx, e.store, tn, "app", item.Head)
+	if err != nil || !green {
+		t.Fatalf("flaky-then-green commit should be green: %v %v", green, err)
+	}
+	sts := chainStatuses(t, e, item.Head)
+	if len(sts) != 2 || sts[0].Green || !sts[1].Green || !sts[1].Flaky {
+		t.Fatalf("want observed red then flaky green on the chain: %+v", sts)
+	}
+}
+
+// TestConfirmedRedOpensRepair: red twice is a real red — the check runs
+// again, both observations go on the chain, and repair opens exactly once.
+func TestConfirmedRedOpensRepair(t *testing.T) {
+	e := setup(t, []string{"false"})
+	ctx := context.Background()
+	reds := optimistic(e)
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-red"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-red", "break the build"))
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateDone || !strings.Contains(item.Note, "repair opened") {
+		t.Fatalf("confirmed red should finish with repair on record: %+v", item)
+	}
+	if *reds != 1 {
+		t.Fatalf("repair summoned %d times, want once", *reds)
+	}
+	if green, _ := checks.IsGreen(ctx, e.store, tn, "app", item.Head); green {
+		t.Fatal("a confirmed red reads green")
+	}
+	sts := chainStatuses(t, e, item.Head)
+	if len(sts) != 2 || sts[0].Green || sts[1].Green {
+		t.Fatalf("want two red observations on the chain: %+v", sts)
+	}
+}
+
+// TestUnconfirmedRedParksWithoutRepair: the confirming re-run could not
+// conclude. One red observed is a third state — the red stands on the chain,
+// nobody is summoned, and the item parks for a person.
+func TestUnconfirmedRedParksWithoutRepair(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	reds := optimistic(e)
+	calls := new(int)
+	e.loop.Gates = func(ws forge.Workspace) []forge.Gate {
+		return []forge.Gate{scripted{label: "post-land", calls: calls, step: func(n int) (forge.Verdict, error) {
+			if n == 0 {
+				return forge.Verdict{Gate: "post-land", Decision: forge.DecisionFail, Reason: "assert blew up"}, nil
+			}
+			return forge.Verdict{}, errors.New("runner lost the workspace")
+		}}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-unconfirmed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-unconfirmed", "break the runner"))
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateParked || !strings.Contains(item.Note, "unconfirmed") {
+		t.Fatalf("an unconfirmable red should park as such: %+v", item)
+	}
+	if *reds != 0 {
+		t.Fatalf("an unconfirmed red summoned repair %d times", *reds)
+	}
+	// The change did land — a parked item does not set Head, so ask the remote.
+	head := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main"))
+	if green, _ := checks.IsGreen(ctx, e.store, tn, "app", head); green {
+		t.Fatal("an unconfirmed red reads green")
+	}
+	if sts := chainStatuses(t, e, head); len(sts) != 1 || sts[0].Green {
+		t.Fatalf("the observed red should stand alone on the chain: %+v", sts)
+	}
 }

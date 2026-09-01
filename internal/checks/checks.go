@@ -22,6 +22,11 @@ type Status struct {
 	Green bool   `json:"green"`
 	Lane  string `json:"lane"`
 	Note  string `json:"note,omitempty"`
+	// Flaky marks a green whose preceding observation of the same commit was
+	// red: the re-run passed, so the commit is green, but the check itself
+	// misfired — a fact on the chain in its own right, not something an
+	// operator has to notice twice.
+	Flaky bool `json:"flaky,omitempty"`
 }
 
 func scope(repo string) string { return "checks/" + repo }
@@ -37,6 +42,33 @@ func Write(ctx context.Context, s store.Store, t tenant.ID, repo, sha string, st
 		Actor: actor, Body: body,
 	})
 	return err
+}
+
+// Rerun is Confirm's second look at a red judgement: re-evaluate the checks
+// and report whether they now pass and, if not, why. An error means the look
+// could not conclude — infrastructure trouble, never a judgement.
+type Rerun func(ctx context.Context) (green bool, reason string, err error)
+
+// Confirm settles whether an observed red is real before anyone is summoned
+// over it. Both observations go on the chain: red twice is a confirmed red;
+// red then green is a flaky check, recorded as such. When the second look
+// cannot conclude, the first red stands and its error returns — an
+// unconfirmed red is a third state, and it is not a pass.
+func Confirm(ctx context.Context, s store.Store, t tenant.ID, repo, sha, lane, reason, actor string, rerun Rerun) (bool, error) {
+	if err := Write(ctx, s, t, repo, sha,
+		Status{Green: false, Lane: lane, Note: "observed red: " + reason}, actor); err != nil {
+		return false, err
+	}
+	green, second, err := rerun(ctx)
+	if err != nil {
+		return false, fmt.Errorf("checks: confirming red %s@%s: %w", repo, sha, err)
+	}
+	if green {
+		return false, Write(ctx, s, t, repo, sha,
+			Status{Green: true, Lane: lane, Flaky: true, Note: "flaky: red did not reproduce (" + reason + ")"}, actor)
+	}
+	return true, Write(ctx, s, t, repo, sha,
+		Status{Green: false, Lane: lane, Note: "confirmed red: " + second}, actor)
 }
 
 // LatestGreen returns the most recently landed commit whose latest check is
