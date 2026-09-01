@@ -716,6 +716,49 @@ Rejected: API version negotiation, labels/filters (estate facts are our
 labels), the plugin wire protocol (Go interfaces + exec seams), and the
 registry model (git is our distribution).
 
+The first dogfood run (2026-09-01) pointed a box at project-box and cost a
+morning's budget almost immediately. What it found, and what was done:
+
+  cost   The loop rebuilt on every tick a gate answered "pending" — routine
+         review latency was the most expensive thing the factory could do,
+         bounded only by a meter that counted run STARTS. Work items now
+         carry a resume point (Built/BuiltBase) and the builder is skipped
+         while the branch still stands where the commit was written; every
+         settle drops it, Wait alone keeps it.
+  cost   Nothing measured tokens at all — agent-result carried wall_ms and
+         two counts, and the runtime dropped everything on the stream it
+         did not already parse. Usage now rides the Result and is charged
+         to the meter by the adapter, which is the only place that can see
+         it. Budget gains max_tokens_per_window; a run that reports no cost
+         is recorded unmetered and, under a token budget, stops claims
+         until the window turns. Silence is never zero.
+  #18    The branch lease was held across the whole run, so three
+         concurrent runs produced one: the meter allowed three and the
+         lease admitted one. The build runs under the WORKSPACE's lease
+         now; the branch is taken for the length of a landing. A loser
+         rebases and re-gates rather than rebuilding, or narrowing the
+         lease would have bought wall-clock with tokens.
+  #20    `pending=14` was the whole view into the queue. Room.Queue folds
+         state, age, origin and — the part a counter cannot carry — the
+         note the queue always wrote and nothing ever showed. GET
+         /v1/items?state= and `box queue`.
+  #9     The ACP dialect is asserted at initialize and the known update
+         kinds are an explicit set, so drift is a recorded fact rather than
+         a metric that quietly reads zero. Tool calls dedupe by call id, so
+         the tool_call_update spelling counts too.
+  repair One repair per red sha bounds the fan, not the chain: each repair
+         makes a new sha that can be red. Work carries a depth, three deep
+         by default.
+  #6     Partial. `agent:` takes an argv and substitutes {{workspace}}, so
+         a confining wrapper can be configured at all — the seam, not the
+         confinement. The profile itself is unwritten and needs a live run.
+
+Two bugs surfaced underneath, both older than the changes that exposed
+them: concurrent runs racing `git remote update` on one mirror directory
+(updates now serialize per repo), and queue.Load unmarshalling each record
+over the last, so omitempty meant a transition could never CLEAR a field —
+a settled item kept the note it parked with.
+
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
-container-sandboxed builders (runner confinement), review sampling/sign-off
+the confinement profile behind the #6 seam, review sampling/sign-off
 endpoints for the control room, and OIDC as a boxgate variant.

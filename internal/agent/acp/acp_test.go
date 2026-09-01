@@ -379,3 +379,27 @@ func lower(s string) string {
 	}
 	return string(b)
 }
+
+// TestConfiningWrapperGetsTheWorkspace: runner confinement is a wrapper
+// around the agent (issue #6), and every wrapper worth having must be told
+// which directory to let through. The workspace path is chosen per run, so
+// the argv cannot name it — it names a placeholder and the runtime fills it
+// in. A live experiment already caught an agent reading the factory's mirror
+// and a sibling workspace; this is what makes putting something in front of
+// it configurable at all.
+func TestConfiningWrapperGetsTheWorkspace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rt := runtimeFor(t, "polite")
+	// A stand-in for the confinement: handed the workspace the way
+	// `docker run -v` or sandbox-exec would be, and unable to start if the
+	// placeholder never became a path.
+	rt.Command = []string{"/bin/sh", "-c", `cd "` + WorkspacePlaceholder + `" && exec "$0"`, os.Args[0]}
+	res, err := rt.Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run through a wrapper: %v", err)
+	}
+	if res.StopReason != "end_turn" {
+		t.Fatalf("the wrapped agent did not complete: %q", res.StopReason)
+	}
+}

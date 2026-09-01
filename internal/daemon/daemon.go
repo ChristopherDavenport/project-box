@@ -132,10 +132,10 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 	routes := map[string]ingress.Route{}
 	for _, bx := range cfg.Boxes {
 		var agentBuilder *acp.Builder
-		if bx.Agent != "" {
+		if len(bx.Agent) > 0 {
 			agentBuilder = &acp.Builder{
 				Store: d.store, Tenant: d.tenant, Box: bx.Name,
-				Command: []string{bx.Agent},
+				Command: bx.Agent,
 				Composer: &agent.Composer{Source: agent.StaticLayers{{
 					Name: "builder", Scope: agent.ScopeRole,
 					Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},
