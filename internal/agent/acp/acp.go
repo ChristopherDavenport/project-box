@@ -21,10 +21,10 @@ import (
 	"os"
 	"os/exec"
 	"slices"
-	"strings"
 	"sync"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
+	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
 	"github.com/ChristopherDavenport/project-box/internal/telemetry"
 )
 
@@ -116,25 +116,23 @@ func (u *Usage) add(w wireUsage) {
 	u.Reported = true
 }
 
-// WorkspacePlaceholder is replaced with the workspace path everywhere it
-// appears in a [Runtime.Command].
-//
-// Runner confinement is a wrapper around the agent, and every wrapper worth
-// having needs to be told which directory to let through — `docker run -v`,
-// `sandbox-exec` with a path parameter. The workspace path is chosen per run,
-// so the argv cannot name it and has to be given a place to put it.
-const WorkspacePlaceholder = "{{workspace}}"
-
 // Runtime runs one agent process per call.
 type Runtime struct {
 	// Command is the agent argv, e.g. {"claude-agent-acp"}, optionally with a
-	// confining wrapper in front of it; [WorkspacePlaceholder] is substituted
-	// throughout. The permission mode the resolver chose is applied through
-	// the protocol's session/set_mode after session/new — no flags, and
-	// fail-closed: an agent that refuses the mode does not get a prompt.
+	// confining wrapper in front of it; [confine.WorkspacePlaceholder] and
+	// [confine.ContextPlaceholder] are substituted throughout. The permission
+	// mode the resolver chose is applied through the protocol's
+	// session/set_mode after session/new — no flags, and fail-closed: an agent
+	// that refuses the mode does not get a prompt.
 	Command []string
 	// Dir is the working directory for the agent process: the workspace.
 	Dir string
+	// ContextDir is the run's materialized context set, which a confining
+	// wrapper must be told about or it confines the agent out of its own
+	// granted reading material. Empty is only valid for an argv that never
+	// names the placeholder; [confine.Substitute] refuses the other case
+	// rather than mounting nothing under a name that promised something.
+	ContextDir string
 	// Env is appended to the inherited environment.
 	Env []string
 	// MaxTokens bounds what ONE run may spend before the session is killed;
@@ -196,9 +194,9 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	argv := make([]string, len(rt.Command))
-	for i, a := range rt.Command {
-		argv[i] = strings.ReplaceAll(a, WorkspacePlaceholder, rt.Dir)
+	argv, err := confine.Substitute(rt.Command, rt.Dir, rt.ContextDir)
+	if err != nil {
+		return Result{}, err
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = rt.Dir

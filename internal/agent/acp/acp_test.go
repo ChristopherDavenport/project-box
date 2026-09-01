@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
+	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
 )
 
 // TestMain doubles this test binary as the fake agent: re-executed with
@@ -491,26 +492,45 @@ func lower(s string) string {
 	return string(b)
 }
 
-// TestConfiningWrapperGetsTheWorkspace: runner confinement is a wrapper
+// TestConfiningWrapperGetsBothGrantedPaths: runner confinement is a wrapper
 // around the agent (issue #6), and every wrapper worth having must be told
-// which directory to let through. The workspace path is chosen per run, so
-// the argv cannot name it — it names a placeholder and the runtime fills it
-// in. A live experiment already caught an agent reading the factory's mirror
-// and a sibling workspace; this is what makes putting something in front of
-// it configurable at all.
-func TestConfiningWrapperGetsTheWorkspace(t *testing.T) {
+// which directories to let through. Both are chosen per run, so the argv
+// cannot name them — it names placeholders and the runtime fills them in.
+//
+// The context directory is half of it. A wrapper handed only the workspace
+// confines the agent out of its own granted reading material, which would
+// make context sets and confinement mutually exclusive.
+func TestConfiningWrapperGetsBothGrantedPaths(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	rt := runtimeFor(t, "polite")
-	// A stand-in for the confinement: handed the workspace the way
-	// `docker run -v` or sandbox-exec would be, and unable to start if the
-	// placeholder never became a path.
-	rt.Command = []string{"/bin/sh", "-c", `cd "` + WorkspacePlaceholder + `" && exec "$0"`, os.Args[0]}
+	rt.ContextDir = t.TempDir()
+	// A stand-in for the confinement: handed both paths the way `docker run
+	// --mount` would be, and unable to start if either placeholder never
+	// became a path.
+	rt.Command = []string{"/bin/sh", "-c",
+		`test -d "` + confine.ContextPlaceholder + `" && cd "` + confine.WorkspacePlaceholder + `" && exec "$0"`,
+		os.Args[0]}
 	res, err := rt.Run(ctx, bundle(), "do the work")
 	if err != nil {
 		t.Fatalf("run through a wrapper: %v", err)
 	}
 	if res.StopReason != "end_turn" {
 		t.Fatalf("the wrapped agent did not complete: %q", res.StopReason)
+	}
+}
+
+// TestConfiningWrapperIsRefusedRatherThanEmptied: an argv that names the
+// context placeholder for a run that has no context directory must fail, not
+// quietly substitute nothing. A mount source of "" is not a narrower
+// confinement than the one that was configured.
+func TestConfiningWrapperIsRefusedRatherThanEmptied(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rt := runtimeFor(t, "polite")
+	rt.ContextDir = ""
+	rt.Command = []string{"/bin/sh", "-c", `cd "` + confine.ContextPlaceholder + `" && exec "$0"`, os.Args[0]}
+	if _, err := rt.Run(ctx, bundle(), "do the work"); err == nil {
+		t.Fatal("an unresolvable context placeholder ran anyway")
 	}
 }

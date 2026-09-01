@@ -429,6 +429,7 @@ claim is decoration.
 | Stale approval | approval of a superseded revision does not count | 5 |
 | Self-approval | requester cannot approve, directly or via an agent acting for them | 5 |
 | Knowledge staleness | a record bound to a changed file is flagged without marking | 6 |
+| Runner confinement | the same probe run twice against one real layout: unconfined it reads the mirror, the store, and a sibling workspace; confined it reads only its workspace and its materialized context set | 2 |
 | Evidence completeness | 25 sampled changes, complete evidence, unaided | 8 |
 | Optimistic lane safety | red main opens repair work; promotion refuses unsoaked commits; fencing identical in both lanes | 9 |
 | Graph ordering | diamond dependency runs in topo order; failed root parks leaves with cause | 10 |
@@ -484,6 +485,7 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Argo CD as the reconciler | ApplicationSet fits rendered-per-service; its API reads reconcile status back as evidence |
 | TSC scope: Security + Confidentiality + Availability | redaction and retention become audited controls; incident handling gets defined objectives |
 | Campaign predicates are fact key comparisons | declarative and diffable; a campaign definition cannot run code |
+| Runner confinement is a container, not an OS sandbox | the host's filesystem is absent rather than allow-listed; an allow-list has to enumerate a runtime's needs per OS and rots |
 | Landing discipline is per-lane policy | optimistic into main where a Box chooses; env/infra and promotion always gated; fencing never optimistic |
 | A lower environment between main and prod | red main is allowed, red prod is not; promotion requires soak plus green |
 | Thunderdome adopted as a lane, not a stance | swarm-repair needs the attribution and reversibility this substrate provides |
@@ -753,6 +755,7 @@ morning's budget almost immediately. What it found, and what was done:
   #6     Partial. `agent:` takes an argv and substitutes {{workspace}}, so
          a confining wrapper can be configured at all — the seam, not the
          confinement. The profile itself is unwritten and needs a live run.
+         (Closed below.)
 
 Two bugs surfaced underneath, both older than the changes that exposed
 them: concurrent runs racing `git remote update` on one mirror directory
@@ -809,11 +812,47 @@ whether anything is being done. Every telling is recorded before it is sent —
 the count is the bound, so an unrecordable escalation is an unsent one. The
 sweep is a standing daemon chore beside the prune.
 
+Issue #6 closed the runner-confinement half (2026-09-01). The seam had an
+argv and no profile, which is the state where a security posture is
+configurable and therefore assumed. internal/agent/confine renders the
+wrapper — the workspace mounted writable, the materialized context set
+mounted read-only, no third path — and `confine:` on a Box folds it into the
+agent argv at load, so the daemon still knows exactly one way to start an
+agent. Three details are load-bearing and each is a test: `--mount` rather
+than `-v`, because -v CREATES a missing source and turns a mistyped path
+into an empty workspace nobody can land; `--user` defaulting to the daemon's
+own, because docker's default is root and a tree of root-owned files is a
+landing that fails after the tokens are spent; and a second placeholder,
+{{context}}, because a wrapper told only about the workspace confines an
+agent out of its own granted reading material — the context directory now
+exists for every run, empty when nothing was granted, so the argv is never
+conditional on the bundle.
+
+The property is asserted the way the finding was found: the SAME probe run
+twice against one real layout. Unconfined it reads the mirror, the store,
+and a sibling run's workspace — finding 5b reproduced, not argued —
+and confined it reads its workspace and its context set and nothing else,
+cannot chmod its way past the read-only mount, and leaves work the daemon
+can still commit. Docker-gated like the collector and emulator legs: skipped
+locally, FAILING in CI, because a confinement test that skips reads as a
+confinement that holds.
+
+What is NOT closed, and is recorded rather than implied: the network (an
+agent that cannot reach a model does nothing, so egress is a separate seam),
+time (`docker run` killed by its parent leaves the container running, so
+build_timeout fires on the wrapper while the agent inside keeps spending —
+closing that wants a named container and a reaper on the prune sweep), and
+the image itself. The dogfood box is deliberately still unconfined: an image
+carrying claude-agent-acp and its credential is an operational prerequisite
+this change does not build, and turning it on is the live run #6 always
+needed.
+
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no
 code (Phase 9 shipped it, and boxcfg's default IS optimistic) — it needs a
 scratch remote and a deliberate session.
 
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
-the confinement profile behind the #6 seam, review sampling/sign-off
-endpoints for the control room, and OIDC as a boxgate variant.
+an agent image and the live run that turns confinement on for the dogfood,
+review sampling/sign-off endpoints for the control room, and OIDC as a
+boxgate variant.

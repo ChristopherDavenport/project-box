@@ -153,8 +153,13 @@ func (m *Mirror) Checkout(ctx context.Context, l forge.Lease, at forge.Commit) (
 	// A re-claimed run re-materializes: a leftover tree from an earlier
 	// attempt of the SAME run (a promotion retried after its approval
 	// arrived, say) is stale, and the renewed lease above is the authority
-	// that says so.
+	// that says so. Its context set goes with it — under a confining wrapper
+	// that directory is mounted, so material the new attempt was not granted
+	// would still be material it can read.
 	if err := os.RemoveAll(dir); err != nil {
+		return forge.Workspace{}, err
+	}
+	if err := RemoveContext(forge.ContextDir(dir)); err != nil {
 		return forge.Workspace{}, err
 	}
 	if _, err := run(ctx, "", "clone", "--no-checkout", m.mirrorDir(l.Repo), dir); err != nil {
@@ -259,6 +264,12 @@ func (m *Mirror) Prune(ctx context.Context) error {
 		_, err := m.leaser.Renew(ctx, l, time.Until(l.Expires))
 		if errors.Is(err, forge.ErrStaleToken) || errors.Is(err, forge.ErrExpired) {
 			if err := os.RemoveAll(dir); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			// The context set is a sibling, so RemoveAll above never saw it —
+			// and it is the half that holds whole repositories.
+			if err := RemoveContext(forge.ContextDir(dir)); err != nil {
 				errs = append(errs, err)
 				continue
 			}

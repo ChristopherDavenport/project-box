@@ -13,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -112,9 +113,37 @@ type Box struct {
 	// already found an agent reading the factory's mirror and a sibling
 	// workspace, so the ability to put something in front of it is the
 	// difference between confinement being configurable and being a plan.
-	Agent Argv   `yaml:"agent"`
-	Seat  string `yaml:"seat"`
-	Repos []Repo `yaml:"repos"`
+	Agent Argv `yaml:"agent"`
+	// Confine, when set, renders that wrapper instead of making the operator
+	// write it. Load folds it into Agent, so the daemon runs one argv and
+	// knows nothing about confinement — the seam stays exactly one thing.
+	//
+	// Written out by hand the argv is a dozen tokens whose security depends on
+	// every one of them, and the two that matter most are the ones a reader
+	// skims: a `-v` where `--mount` belongs silently invents an empty
+	// workspace, and an unset `--user` puts root-owned files in a tree the
+	// lander then cannot commit. Declaring the image and letting the profile
+	// render the rest is the same "derived, not authored" trade the deploy
+	// artifacts make.
+	Confine *Confine `yaml:"confine"`
+	Seat    string   `yaml:"seat"`
+	Repos   []Repo   `yaml:"repos"`
+}
+
+// Confine is box.yaml's spelling of [confine.Profile].
+type Confine struct {
+	// Image carries the agent. Required when the block is present.
+	Image string `yaml:"image"`
+	// User is the uid:gid inside the container; empty means the daemon's own,
+	// which is what keeps the workspace landable.
+	User string `yaml:"user"`
+	// Env forwards environment variables into the container BY NAME — the
+	// model credential above all. Never name=value: a config file is not a
+	// secret store.
+	Env []string `yaml:"env"`
+	// Network is docker's --network when set. Empty keeps the default,
+	// because an agent that cannot reach a model API does nothing.
+	Network string `yaml:"network"`
 }
 
 // Repo is one repository in a Box.
@@ -199,6 +228,19 @@ func (c *Config) validate() error {
 		}
 		if len(bx.Agent) > 0 && bx.Seat == "" {
 			bx.Seat = "mason"
+		}
+		if bx.Confine != nil {
+			if len(bx.Agent) == 0 {
+				return fmt.Errorf("boxcfg: box %s: confine with no agent — a repo's build command runs on the daemon itself, and there is nothing here to put a container around", bx.Name)
+			}
+			wrapped, err := confine.Profile{
+				Image: bx.Confine.Image, User: bx.Confine.User,
+				Env: bx.Confine.Env, Network: bx.Confine.Network,
+			}.Wrap(bx.Agent)
+			if err != nil {
+				return fmt.Errorf("boxcfg: box %s: %w", bx.Name, err)
+			}
+			bx.Agent = wrapped
 		}
 		for j := range bx.Repos {
 			r := &bx.Repos[j]

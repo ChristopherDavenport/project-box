@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -88,17 +89,27 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		fmt.Sprintf(`{"agentref":%q,"role":%q,"mode":%q,"seat":%q}`,
 			bundle.Ref, role, bundle.Tools.PermissionMode, b.seatName()))
 
-	contextDir := ""
+	// A sibling of the workspace, never inside it: granted reading material
+	// must not become part of the change.
+	//
+	// It exists for every run, empty when the bundle granted nothing, because
+	// it is half of what a confining wrapper is told to let through — and a
+	// wrapper whose argv is conditional on what a particular bundle happens to
+	// carry is one an operator cannot read and be sure of. An empty grant is
+	// an empty directory, not an absent one.
+	contextDir := forge.ContextDir(ws.Dir)
+	if err := os.MkdirAll(contextDir, 0o755); err != nil {
+		return "", err
+	}
+	granted := "" // named in the prompt only when something is actually there
 	if len(bundle.Context.Repos) > 0 {
 		if b.Mirror == nil {
 			return "", fmt.Errorf("acp: bundle grants context repos but the builder has no mirror to materialize them")
 		}
-		// A sibling of the workspace, never inside it: granted reading
-		// material must not become part of the change.
-		contextDir = ws.Dir + ".context"
 		if err := b.Mirror.MaterializeContext(ctx, contextDir, bundle.Context); err != nil {
 			return "", err
 		}
+		granted = contextDir
 	}
 
 	// The prompt itself, verbatim, immediately before it is sent.
@@ -114,13 +125,13 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	// tool policy and the context set, which is what makes the agentref
 	// checkable against content rather than merely comparable to itself. It
 	// has existed since Phase 2 and had no caller until now.
-	sent := prompt(bundle, task, contextDir)
+	sent := prompt(bundle, task, granted)
 	explained, _ := b.Composer.Explain(ctx, bundle)
 	b.recordJSON(ctx, ws.Run, "agent-prompt", bundle.Ref, promptRecord{
 		AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained),
 	})
 
-	rt := &Runtime{Command: b.Command, Dir: ws.Dir, Env: b.Env, MaxTokens: b.MaxTokens}
+	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: contextDir, Env: b.Env, MaxTokens: b.MaxTokens}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, sent)
 	elapsed := time.Since(started)

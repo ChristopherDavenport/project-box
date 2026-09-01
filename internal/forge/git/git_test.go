@@ -332,6 +332,16 @@ func TestPruneReapsDeadWorkspaces(t *testing.T) {
 	if err != nil {
 		t.Fatalf("checkout: %v", err)
 	}
+	// A materialized context set rides along, because it is the half that
+	// holds whole repositories AND the half plain removal cannot touch: the
+	// materializer leaves its directories at 0555, and an entry cannot be
+	// unlinked from a directory with no write permission.
+	ctxDir := forge.ContextDir(ws.Dir)
+	restoreForCleanup(t, ctxDir)
+	if err := m.MaterializeContext(ctx, ctxDir, agentContext(f.base, "README.md")); err != nil {
+		t.Fatalf("materialize context: %v", err)
+	}
+
 	// Live lease: prune must not touch it.
 	if err := m.Prune(ctx); err != nil {
 		t.Fatalf("prune: %v", err)
@@ -346,6 +356,59 @@ func TestPruneReapsDeadWorkspaces(t *testing.T) {
 	}
 	if _, err := os.Stat(ws.Dir); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("prune left the workspace of an expired lease")
+	}
+	if _, err := os.Stat(ctxDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("prune left the context set: a sibling of the workspace is not reclaimed by removing the workspace")
+	}
+}
+
+// TestMaterializeContextReplacesRatherThanOverlays: a run that is claimed
+// twice materializes twice, and the second pass must produce exactly the
+// granted set.
+//
+// Two failures otherwise, and the first is fatal rather than untidy: tar
+// cannot unlink through the 0555 directories the previous pass left, so the
+// build errors instead of running. What survived would also be material the
+// agent can read and was NOT granted this time — under a confining wrapper
+// that directory is mounted, so a stale tree is a hole in the context set.
+func TestMaterializeContextReplacesRatherThanOverlays(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+
+	// A second commit carrying a second file, so the two grants differ.
+	clone := filepath.Join(t.TempDir(), "growth")
+	mustGit(t, "", "clone", f.remote, clone)
+	os.WriteFile(filepath.Join(clone, "later.txt"), []byte("granted once\n"), 0o644)
+	mustGit(t, clone, "add", ".")
+	mustGit(t, clone, "commit", "-m", "growth")
+	mustGit(t, clone, "push", "origin", "HEAD:refs/heads/main")
+	grown := forge.Commit(strings.TrimSpace(mustGit(t, clone, "rev-parse", "HEAD")))
+	if err := m.Fetch(ctx, f.repo); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	restoreForCleanup(t, dir)
+	wide := agentpkg.ContextSet{Repos: []agentpkg.ContextRepo{
+		{Repo: "app", Commit: string(grown), Paths: []string{"README.md", "later.txt"}},
+	}}
+	if err := m.MaterializeContext(ctx, dir, wide); err != nil {
+		t.Fatalf("first materialize: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "app", "later.txt")); err != nil {
+		t.Fatal("the first grant did not land")
+	}
+
+	// The same directory, a narrower grant.
+	if err := m.MaterializeContext(ctx, dir, agentContext(f.base, "README.md")); err != nil {
+		t.Fatalf("second materialize over a read-only tree: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "app", "README.md")); err != nil {
+		t.Fatal("the second grant did not land")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "app", "later.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("the previous grant survived: the materialized set must be the granted set, not the union with what was there")
 	}
 }
 
@@ -385,16 +448,7 @@ func TestMaterializeContextIsPinnedNarrowAndReadOnly(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	// The materializer makes the tree read-only; hand it back writable so
-	// TempDir cleanup can remove it. Cleanups run LIFO, so this precedes it.
-	t.Cleanup(func() {
-		filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
-			if err == nil {
-				os.Chmod(path, 0o755)
-			}
-			return nil
-		})
-	})
+	restoreForCleanup(t, dir)
 	err := m.MaterializeContext(ctx, dir, agentContext(f.base, "README.md"))
 	if err != nil {
 		t.Fatalf("materialize: %v", err)

@@ -71,13 +71,30 @@ boxes:
         check: go test ./...
 ```
 
-`agent:` also takes an argv, which is how a confining wrapper goes in front
-of the agent — `{{workspace}}` becomes the run's workspace path:
+`confine:` puts the agent in a container whose filesystem is the two
+directories the run was granted — the workspace, writable, and the
+materialized context set, read-only. Nothing else is mounted, so the mirrors,
+the store, and every other run's workspace are unreachable by absence rather
+than by a rule:
 
 ```yaml
-    agent: [docker, run, --rm, -i,
-            -v, "{{workspace}}:{{workspace}}", -w, "{{workspace}}",
-            box/agent:1, claude-agent-acp]
+    agent: claude-agent-acp
+    confine:
+      image: box/agent:1          # must carry the agent and git
+      env: [ANTHROPIC_API_KEY]    # forwarded BY NAME; never name=value
+```
+
+This bounds the filesystem, not the network — an agent that cannot reach a
+model API does nothing — and `docker run` killed by its parent leaves the
+container behind, so a confined box still wants `max_tokens_per_run`.
+
+`agent:` is an argv, so a wrapper can also be written by hand;
+`{{workspace}}` and `{{context}}` become the run's two paths. A wrapper given
+only the workspace confines the agent out of its own reading material.
+
+```yaml
+    agent: [sandbox-exec, -D, "WS={{workspace}}", -D, "CTX={{context}}",
+            -f, /etc/box/agent.sb, claude-agent-acp]
 ```
 
 A run that finishes without reporting what it cost stops new claims until the

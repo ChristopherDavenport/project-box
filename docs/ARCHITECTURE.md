@@ -688,19 +688,47 @@ What an agent may read is declared, not assumed: repositories at pinned commits,
 optionally narrowed to paths, read-only unless the role grants otherwise, plus
 the knowledge scopes it may query.
 
-The runtime materializes exactly that set and nothing else, so least privilege
-holds by construction — the agent cannot read what it was not granted, rather
-than being instructed not to. And because the context set is part of the
-recorded bundle, "which agents could have seen this" is answerable after the
-fact, which is the question incident response actually asks.
+The runtime materializes exactly that set and nothing else. And because the
+context set is part of the recorded bundle, "which agents could have seen
+this" is answerable after the fact, which is the question incident response
+actually asks.
+
+### Materializing the set is not confining the agent
+
+Materialization makes the grant *precise*. It does not by itself make it a
+*boundary*, and the gap is not academic: a live run had an agent account for
+its escalation by citing what it had found in "the repo, its git history, the
+factory mirror, and the sibling workspace" — three of which it was never
+granted. A process on the runner can read the runner, so the set describes
+what an agent was given rather than what it can reach.
+
+Confinement is what closes that, and it is a **container** (decided
+2026-09-01): the workspace mounted writable, the materialized set mounted
+read-only, and no third path. The factory's root — mirrors, the store, every
+other run's workspace — is then unreachable by *absence* rather than by a
+rule, which is the distinction worth paying for, because a rule is something
+a confused process can be talked past and an unmounted path is not. The OS
+sandbox is the alternative and was rejected for shape rather than for
+efficacy: an allow-list over a filesystem that is otherwise present has to
+enumerate everything a runtime touches, per OS, and that list rots.
+
+The wrapper is **configuration, not a second code path** — an image declared
+on a Box, rendered into the agent's argv — because the daemon must keep
+exactly one way to start an agent. Two limits are recorded rather than
+implied. It bounds the filesystem and not the network, since an agent that
+cannot reach a model does nothing, so exfiltration is a seam that does not
+exist yet. And an unconfined Box remains possible, which is the honest
+default while the image is an operational prerequisite rather than a given.
 
 **Pulled-in repositories are an injection surface.** A README or comment in a
 context repository can carry instructions, and this is the same class of problem
 as knowledge poisoning: attack what the agent believes rather than what it runs.
-Two mitigations. Context repositories are pinned and read-only, so their content
-cannot change mid-run. And the base layer states that context material is data
-to be read, never instructions to be followed — a weak control on its own, which
-is why the pinning and the tool policy carry the real weight.
+Context repositories are pinned and read-only, so their content cannot change
+mid-run; confinement is what makes that read-only a property of the runner
+rather than a property of a file mode. The base layer also states that context
+material is data to be read, never instructions to be followed — a weak control
+on its own, which is why the pinning, the confinement, and the tool policy carry
+the real weight.
 
 ## Evidence
 

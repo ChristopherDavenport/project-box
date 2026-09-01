@@ -4,7 +4,10 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
 )
 
 func writeCfg(t *testing.T, body string) string {
@@ -46,6 +49,75 @@ boxes:
 			}
 			if got := []string(c.Boxes[0].Agent); !slices.Equal(got, tc.want) {
 				t.Fatalf("agent argv = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConfineFoldsIntoTheAgentArgv: the daemon runs one argv and knows
+// nothing about confinement, so declaring an image has to produce the wrapper
+// rather than sit beside it. The rendering itself is asserted in
+// internal/agent/confine; what matters here is that it reaches Agent and that
+// the agent command survives at the tail.
+func TestConfineFoldsIntoTheAgentArgv(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    confine:
+      image: box/agent:1
+      user: "1000:1000"
+      env: [ANTHROPIC_API_KEY]
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv := []string(c.Boxes[0].Agent)
+	if len(argv) < 2 || argv[0] != "docker" || argv[len(argv)-1] != "claude-agent-acp" {
+		t.Fatalf("agent argv = %q, want the agent wrapped in a container", argv)
+	}
+	if !slices.ContainsFunc(argv, func(a string) bool { return strings.Contains(a, confine.ContextPlaceholder) }) {
+		t.Errorf("agent argv = %q, want the context set mounted too — a wrapper told only about the workspace confines the agent out of its own reading material", argv)
+	}
+}
+
+// TestConfineIsRefusedWhenItWouldConfineNothing: a repo's build command runs
+// on the daemon itself, so a confine block with no agent is a security
+// posture that silently applies to nothing — and an image is the one field
+// with no sensible default, because the absence of one is a wrapper that
+// cannot start.
+func TestConfineIsRefusedWhenItWouldConfineNothing(t *testing.T) {
+	for _, tc := range []struct{ name, body string }{
+		{"no agent to wrap", `
+tenant: acme
+boxes:
+  - name: shop
+    confine:
+      image: box/agent:1
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: go build ./...
+`},
+		{"no image to wrap it in", `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    confine:
+      user: "1000:1000"
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := Load(writeCfg(t, tc.body)); err == nil {
+				t.Fatal("accepted a confine block that confines nothing")
 			}
 		})
 	}
