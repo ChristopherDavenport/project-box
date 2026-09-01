@@ -83,13 +83,25 @@ func (p *Pump) loopFor(box, repo string) (*loop.Loop, bool) {
 // ticks — the same rule as delivery keys, one level up.
 func (p *Pump) Intake(ctx context.Context) (int, error) {
 	created := 0
+	var unreadable error
 	for rec, err := range p.Store.Log().Since(ctx, p.Tenant, "index/ingress", 1) {
 		if err != nil {
 			return created, err
 		}
 		id := "wi-" + rec.Subject
-		if _, err := p.Queue.Load(ctx, p.Tenant, id); err == nil {
+		switch _, err := p.Queue.Load(ctx, p.Tenant, id); {
+		case err == nil:
 			continue // already has its item
+		case !errors.Is(err, queue.ErrNoItem):
+			// Absence is the only answer that may create work. Treating an
+			// unreadable chain as "no item yet" re-queued a parked item on
+			// every tick, which is a spend loop wearing an idempotency key.
+			//
+			// Carry on to the next ingress rather than returning: one broken
+			// chain must not also be a gate across the door, or no new work
+			// could enter the factory until someone repaired the old.
+			unreadable = errors.Join(unreadable, fmt.Errorf("pump: intake %s: %w", id, err))
+			continue
 		}
 		ing, ok, err := p.findIngress(ctx, rec.Subject)
 		if err != nil {
@@ -110,7 +122,7 @@ func (p *Pump) Intake(ctx context.Context) (int, error) {
 		}
 		created++
 	}
-	return created, nil
+	return created, unreadable
 }
 
 // Drain runs every claimable pending or waiting item, within budget. It
@@ -118,6 +130,12 @@ func (p *Pump) Intake(ctx context.Context) (int, error) {
 // over-budget items simply remain for the next tick.
 func (p *Pump) Drain(ctx context.Context) (int, error) {
 	var candidates []queue.WorkItem
+	// One unreadable item must not cost every other item its tick. Aborting
+	// the pass here meant a single corrupt chain stopped the whole factory
+	// draining — 31 consecutive ticks did nothing at all — while the cause
+	// scrolled past in the log as one line among many. Collect and carry on:
+	// the healthy work runs, and the error still surfaces.
+	var unreadable error
 	seen := map[string]bool{}
 	for rec, err := range p.Store.Log().Since(ctx, p.Tenant, "index/pending", 1) {
 		if err != nil {
@@ -129,7 +147,8 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		seen[rec.Subject] = true
 		item, err := p.Queue.Load(ctx, p.Tenant, rec.Subject)
 		if err != nil {
-			return 0, err
+			unreadable = errors.Join(unreadable, err)
+			continue
 		}
 		if item.State == queue.StatePending || item.State == queue.StateWaiting {
 			candidates = append(candidates, item)
@@ -193,15 +212,20 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		}(item)
 	}
 	wg.Wait()
-	return settled, firstErr
+	return settled, errors.Join(unreadable, firstErr)
 }
 
 // Tick is one heartbeat: feed, then drain.
+//
+// Intake's error no longer short-circuits the drain. An intake that could not
+// read one chain has still fed every other ingress, and the work already in
+// the queue is owed its tick regardless — the alternative is what happened in
+// practice, a factory that stopped doing anything because one item's chain
+// had a record in it nobody could parse.
 func (p *Pump) Tick(ctx context.Context) (int, error) {
-	if _, err := p.Intake(ctx); err != nil {
-		return 0, err
-	}
-	return p.Drain(ctx)
+	_, intakeErr := p.Intake(ctx)
+	settled, drainErr := p.Drain(ctx)
+	return settled, errors.Join(intakeErr, drainErr)
 }
 
 func (p *Pump) findIngress(ctx context.Context, id string) (ingress.Ingress, bool, error) {

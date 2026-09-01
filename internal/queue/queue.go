@@ -109,6 +109,50 @@ var ErrBlocked = errors.New("queue: dependencies not yet settled")
 // has been parked in cascade, naming the cause.
 var ErrDependencyFailed = errors.New("queue: dependency parked or failed")
 
+// ErrNoItem reports that an id names no work item.
+//
+// Distinct from a store or decoding failure on purpose, because intake keys
+// on the difference: "there is no item yet" means create one, while "I could
+// not tell" must never mean create a second. Reading any error as absence is
+// how one unreadable chain became a new queued record on every tick.
+var ErrNoItem = errors.New("queue: no such item")
+
+// stateKinds are the record kinds whose body is the WHOLE work item.
+//
+// An item's chain carries two sorts of record and always has. The state
+// transitions ARE the item: their body is the marshalled WorkItem, and
+// folding them in order is what [Queue.Load] means. Everything else is the
+// narrative — which agent ran under which ref, what a gate decided, why a
+// seat escalated, what a handoff failed on — and its body is whatever that
+// event needed to say, which is frequently prose.
+//
+// So the fold must SELECT, not merely unmarshal. It used to unmarshal every
+// record in the scope, and both halves of that mistake were load-bearing:
+// valid JSON that was not an item (an agent-run's agentref) zeroed the item
+// for the length of the run, and prose (an escalation's reason) failed
+// outright and took down every reader at once — Load, the pending drain, the
+// queue listing, and the exception queue that existed to show the escalation.
+// A factory stopped draining because an agent said, correctly, that it had
+// nothing to do.
+var stateKinds = map[string]bool{
+	"queued":  true,
+	"claimed": true,
+	"built":   true,
+	"waiting": true,
+	"parked":  true,
+	"done":    true,
+	"failed":  true,
+}
+
+// StateRecord reports whether a record kind carries the whole work item and
+// therefore takes part in the fold.
+//
+// This is the contract between the writers and the readers of an item's
+// chain, and it binds both directions: a writer using one of these kinds MUST
+// write the whole item, and a writer of anything else must not. TestFoldSkips
+// holds the writers to it.
+func StateRecord(kind string) bool { return stateKinds[kind] }
+
 // Queue submits, claims, and settles work items.
 type Queue struct {
 	Store  store.Store
@@ -242,19 +286,25 @@ func (q *Queue) Load(ctx context.Context, t tenant.ID, id string) (WorkItem, err
 		if err != nil {
 			return WorkItem{}, err
 		}
-		// Start from zero for every record. Each body is the WHOLE item, and
-		// omitempty leaves a cleared field out of the JSON entirely — so
-		// unmarshalling over the previous record would carry forward exactly
-		// the values a transition meant to drop. A settled item kept the note
-		// it parked with, and would have kept its resume point too.
+		if !StateRecord(r.Kind) {
+			continue // narrative, not state — see stateKinds
+		}
+		// Start from zero for every state record. Each body is the WHOLE
+		// item, and omitempty leaves a cleared field out of the JSON entirely
+		// — so unmarshalling over the previous record would carry forward
+		// exactly the values a transition meant to drop. A settled item kept
+		// the note it parked with, and would have kept its resume point too.
 		w = WorkItem{}
 		if err := json.Unmarshal(r.Body, &w); err != nil {
-			return WorkItem{}, fmt.Errorf("queue: item %s record %d: %w", id, r.Seq, err)
+			// A state record that will not parse is real corruption, not a
+			// record of another shape: say which one, because the reader that
+			// hits it next has no other way to find it.
+			return WorkItem{}, fmt.Errorf("queue: item %s record %d (%s): %w", id, r.Seq, r.Kind, err)
 		}
 		found = true
 	}
 	if !found {
-		return WorkItem{}, fmt.Errorf("queue: no such item %s", id)
+		return WorkItem{}, fmt.Errorf("%w: %s", ErrNoItem, id)
 	}
 	return w, nil
 }

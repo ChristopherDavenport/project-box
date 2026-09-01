@@ -139,16 +139,23 @@ func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry,
 	var w queue.WorkItem
 	var opened, changed time.Time
 	stage := ""
-	found := false
+	found, folded := false, false
 	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "workitem/"+id, 1) {
 		if err != nil {
 			return QueueEntry{}, err
 		}
-		// Zero first: each body is the whole item, and omitempty means a
-		// cleared field is absent rather than empty. See queue.Load.
-		w = queue.WorkItem{}
-		if err := json.Unmarshal(rec.Body, &w); err != nil {
-			return QueueEntry{}, fmt.Errorf("control: item %s record %d: %w", id, rec.Seq, err)
+		// Only the state transitions carry the item. The narrative records
+		// still count for the clock and the stage below — an agent-run is
+		// precisely how this row learns it is BUILDING — but their bodies are
+		// not items and folding them in was what blanked the running row.
+		if queue.StateRecord(rec.Kind) {
+			// Zero first: each body is the whole item, and omitempty means a
+			// cleared field is absent rather than empty. See queue.Load.
+			w = queue.WorkItem{}
+			if err := json.Unmarshal(rec.Body, &w); err != nil {
+				return QueueEntry{}, fmt.Errorf("control: item %s record %d (%s): %w", id, rec.Seq, rec.Kind, err)
+			}
+			folded = true
 		}
 		if !found {
 			opened = rec.At
@@ -161,6 +168,11 @@ func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry,
 	}
 	if !found {
 		return QueueEntry{}, fmt.Errorf("control: no such item %s", id)
+	}
+	if !folded {
+		// Records exist but none of them is a state transition: the chain is
+		// narrative-only, which no writer produces and no reader can render.
+		return QueueEntry{}, fmt.Errorf("control: item %s has no state record to fold", id)
 	}
 	e := QueueEntry{
 		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,

@@ -9,3 +9,6 @@ bin/
 web/node_modules/
 hack/room-smoke/node_modules/
 hack/room-smoke/package*.json
+
+# Dogfood: the factory's own state (store, mirrors, workspaces, logs)
+.factory/
