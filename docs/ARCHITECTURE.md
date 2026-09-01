@@ -1075,6 +1075,17 @@ by machinery the ceremony-free version lacks: every landing, failure, and
 repair is on the evidence chain, keyed by sha, and revert-forward is the
 repair primitive of last resort rather than a bisection queue.
 
+**Repair carries the attempt it follows.** Opening through a route makes the
+repair item new work — a task string and nothing else — so its agent would
+start cold and re-derive from the diff what the last run already knew. Instead
+the item carries the red sha, the branch that still holds the change, which
+check reported it, and the predecessor's handoff, and those resolve into a
+**layer at wake time** exactly as seat continuity does. Merge semantics stay
+explicit rather than being flattened into the instruction, and the carried
+context is in the `agentref`: "this run was woken knowing X" becomes
+answerable after the fact, the same way "which instructions was it operating
+under" already is.
+
 **The gated lane** — environment repositories, infrastructure, campaign waves,
 and anything a Box's policy names. Gates pass, then land. Unchanged.
 

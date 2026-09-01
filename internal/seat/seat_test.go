@@ -25,6 +25,47 @@ func open(t *testing.T) *sqlite.Store {
 	return s
 }
 
+// TestHandoffOfOneNamedRun: repair work is not the seat's next run, it is a
+// successor to one PARTICULAR run — so the notes it needs are keyed by that
+// run rather than by the seat's recency window, which the wake layer already
+// answers and which would hand it whatever the seat did last instead.
+func TestHandoffOfOneNamedRun(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	st := &Seat{Name: "mason", Base: &knowledge.Base{Store: s, Tenant: tn}}
+
+	red := queue.WorkItem{ID: "wi-red", Tenant: tn, Box: "shop", Ingress: "ing-1",
+		State: queue.StateDone, Head: "abc123"}
+	if err := st.RecordHandoff(ctx, red, "", []string{"the migration has to run before the deploy"}); err != nil {
+		t.Fatal(err)
+	}
+	later := queue.WorkItem{ID: "wi-other", Tenant: tn, Box: "shop", Ingress: "ing-2",
+		State: queue.StateDone, Head: "def456"}
+	if err := st.RecordHandoff(ctx, later, "", []string{"unrelated: the linter wants gofmt -s"}); err != nil {
+		t.Fatal(err)
+	}
+
+	notes, err := st.HandoffFrom(ctx, "wi-red")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(notes) != 1 || !strings.Contains(notes[0], "migration") {
+		t.Fatalf("the predecessor's own notes, and only those: %v", notes)
+	}
+	// A run that left nothing is silence, not an error: not every predecessor
+	// had anything to say.
+	if notes, err := st.HandoffFrom(ctx, "wi-nobody"); err != nil || len(notes) != 0 {
+		t.Fatalf("unknown run: %v %v", notes, err)
+	}
+	// A seat's memory stays its own. A successor sitting elsewhere carries
+	// the facts of the attempt and not the notes, because reading another
+	// seat's scope is the cross-scope read the knowledge plane refuses.
+	elsewhere := &Seat{Name: "hammer", Base: st.Base}
+	if notes, err := elsewhere.HandoffFrom(ctx, "wi-red"); err != nil || len(notes) != 0 {
+		t.Fatalf("one seat read another's handoff: %v %v", notes, err)
+	}
+}
+
 // TestSecondRunReceivesTheHandoff is the Phase 12 exit criterion: run one
 // hands off; run two wakes with the note in its resolved bundle — and the
 // continuity is part of the agentref, so different memories are different

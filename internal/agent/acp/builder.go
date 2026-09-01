@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -81,6 +82,13 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		if ok {
 			req.Extra = append(req.Extra, wake)
 		}
+	}
+	prior, ok, err := b.carried(ctx, ws.Run)
+	if err != nil {
+		return "", fmt.Errorf("acp: prior attempt: %w", err)
+	}
+	if ok {
+		req.Extra = append(req.Extra, prior)
 	}
 	bundle, err := b.Composer.Resolve(ctx, req)
 	if err != nil {
@@ -216,6 +224,47 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		return "", fmt.Errorf("acp: agent finished without changing anything — no commit, no escalation (stop=%q, %d tool calls)", res.StopReason, len(res.ToolCalls))
 	}
 	return forge.Commit(head), nil
+}
+
+// carried resolves the attempt this run follows into a layer, at wake time
+// and in two halves, because the halves become knowable at different moments.
+//
+// The facts — the red sha, the branch that still carries it, which check
+// reported it — were known when the repair was opened and ride the work item
+// from there. The predecessor's handoff was NOT: notes are written as a run
+// settles, which on the optimistic lane happens after the repair it summoned
+// already exists, so copying them at open time would carry an empty list
+// forever. They are fetched here instead, from the seat that wrote them,
+// exactly as continuity is.
+//
+// An item that carries no prior is the ordinary case and adds no layer: a
+// layer changes the agentref, and a run woken knowing nothing is not a
+// different agent. An item that cannot be read at all is an error rather than
+// a silent absence — the whole point is that the record says what a run was
+// woken with — but a Build outside the queue entirely (a probe, an
+// experiment) is simply a run with no item, not a failure.
+func (b *Builder) carried(ctx context.Context, run string) (agent.Layer, bool, error) {
+	q := &queue.Queue{Store: b.Store}
+	item, err := q.Load(ctx, b.Tenant, run)
+	if errors.Is(err, queue.ErrNoItem) {
+		return agent.Layer{}, false, nil
+	}
+	if err != nil {
+		return agent.Layer{}, false, err
+	}
+	if item.Prior == nil {
+		return agent.Layer{}, false, nil
+	}
+	prior := *item.Prior
+	if b.Seat != nil && len(prior.Notes) == 0 {
+		notes, err := b.Seat.HandoffFrom(ctx, prior.Run)
+		if err != nil {
+			return agent.Layer{}, false, err
+		}
+		prior.Notes = notes
+	}
+	layer, ok := prior.Layer()
+	return layer, ok, nil
 }
 
 // Handoff matches loop.Handoff: on settle, the run's extracted notes go to

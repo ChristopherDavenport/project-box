@@ -15,6 +15,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/authz"
 	"github.com/ChristopherDavenport/project-box/internal/checks"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
@@ -62,10 +63,12 @@ type Loop struct {
 	Handoff func(ctx context.Context, item queue.WorkItem) error
 	// Red opens repair work when an optimistic landing goes red and the red
 	// survives one re-run — a red that does not reproduce is recorded as a
-	// flaky check, and nobody is summoned for it. Returns the repair ingress
-	// id. Nil means even a confirmed red is recorded but nobody is summoned
-	// — configure it; see OpenRepair.
-	Red func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error)
+	// flaky check, and nobody is summoned for it. It is handed the attempt
+	// the repair follows, so the summons is worth answering: the sha, the
+	// branch that still carries it, and which check said what. Returns the
+	// repair ingress id. Nil means even a confirmed red is recorded but
+	// nobody is summoned — configure it; see OpenRepair.
+	Red func(ctx context.Context, item queue.WorkItem, prior agent.Prior) (string, error)
 	TTL time.Duration
 	// BuildTimeout bounds one build. Zero means [DefaultBuildTimeout]; a
 	// negative value means no bound, which an operator may choose.
@@ -91,6 +94,13 @@ const MaxRepairDepth = 3
 // delivery key, so however many post-land checks report the same red, one
 // repair item exists.
 //
+// The attempt travels with the delivery rather than being flattened into the
+// payload the repair reads as its task. A repair opened as new work is a task
+// string and nothing else, and its agent then re-derives from the diff what
+// the previous run already knew; carried as [agent.Prior] it resolves into a
+// layer at wake time, which keeps the merge semantics explicit and puts the
+// carried context in the agentref.
+//
 // maxDepth bounds the CHAIN, which sha-keyed idempotency cannot. One repair
 // per red sha is not a bound when each repair produces a new sha that can
 // itself be red: an optimistic lane over a genuinely broken tree will open
@@ -98,20 +108,21 @@ const MaxRepairDepth = 3
 // standing in front of that is the budget. Zero uses [MaxRepairDepth];
 // negative means no bound, which is a decision an operator can make and the
 // factory will not make for them.
-func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) func(context.Context, queue.WorkItem, forge.Commit, string) (string, error) {
+func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) func(context.Context, queue.WorkItem, agent.Prior) (string, error) {
 	if maxDepth == 0 {
 		maxDepth = MaxRepairDepth
 	}
-	return func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error) {
+	return func(ctx context.Context, item queue.WorkItem, prior agent.Prior) (string, error) {
 		if maxDepth > 0 && item.Depth >= maxDepth {
 			// Deep enough. The red is on the check chain either way, so
 			// promotion will not take the commit; what stops here is the
 			// factory summoning itself again.
 			return "", fmt.Errorf("repair chain reached depth %d without going green — stopping rather than opening another: %s",
-				item.Depth, reason)
+				item.Depth, prior.Reason)
 		}
 		ing, _, err := router.Open(ctx, route, ingress.Delivery{
-			Key: "red-" + string(head), Payload: []byte(reason), Depth: item.Depth + 1,
+			Key: "red-" + prior.Sha, Payload: []byte(prior.Reason), Depth: item.Depth + 1,
+			Prior: &prior,
 		})
 		if err != nil {
 			return "", err
@@ -124,7 +135,10 @@ func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) 
 // what keeps "why does this change exist" answerable from the other end.
 func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 	return queue.WorkItem{ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID,
-		Requester: ing.Requester, Repo: ing.Repo, Task: task, Depth: ing.Depth}
+		Requester: ing.Requester, Repo: ing.Repo, Task: task, Depth: ing.Depth,
+		// Repair work wakes with the attempt it follows rather than cold; the
+		// ingress is where that travels, the same way the depth does.
+		Prior: ing.Prior}
 }
 
 // Poll asks whether a held item's outstanding gate has answered yet, and
@@ -583,7 +597,17 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		}
 		note := "landed red: " + reason
 		if l.Red != nil {
-			repair, rerr := l.Red(ctx, item, head, reason)
+			// What the repair wakes knowing. The branch is named because
+			// nothing rolled back — the change is still there, and a repair
+			// that starts by making it again is the waste this carries
+			// against. The notes are deliberately absent: this run has not
+			// settled yet, so its handoff is not written, and the successor
+			// resolves it at wake time from the seat that wrote it.
+			prior := agent.Prior{
+				Run: item.ID, Repo: l.Repo.Name, Branch: l.Branch, Sha: string(head),
+				Checks: failing(verdicts), Reason: reason,
+			}
+			repair, rerr := l.Red(ctx, item, prior)
 			if rerr != nil {
 				// The lane's whole safety argument is that a red main
 				// summons a repair swarm. Main is red and the summons
@@ -705,6 +729,19 @@ func (l *Loop) record(ctx context.Context, item queue.WorkItem, kind, subject, b
 		Kind: kind, Subject: subject, Actor: l.Runner, OnBehalfOf: item.Requester,
 		Body: []byte(body), Trace: telemetry.TraceID(ctx),
 	})
+}
+
+// failing names the gates that did not pass, in the order they answered.
+// "main is red" is a fact nobody can act on; "the test gate is red" is a
+// place to start, and it is the half of the reason a successor can search on.
+func failing(vs []forge.Verdict) []string {
+	var out []string
+	for _, v := range vs {
+		if v.Decision != forge.DecisionPass {
+			out = append(out, v.Gate)
+		}
+	}
+	return out
 }
 
 func reasons(vs []forge.Verdict) string {

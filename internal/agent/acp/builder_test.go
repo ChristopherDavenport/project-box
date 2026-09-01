@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -173,6 +174,107 @@ func TestAgentEscalationParksAttributed(t *testing.T) {
 	}
 	if !saw {
 		t.Fatal("escalation evidence missing")
+	}
+}
+
+// TestRepairWakesWithTheAttemptBeforeIt is issue #11's property: a repair
+// run's bundle carries its predecessor's handoff, and its agentref differs
+// from the same repair with no predecessor.
+//
+// The second half is what makes the first auditable. Repair opens through a
+// route as new work, so without this the repair agent wakes cold and the
+// record cannot say otherwise; carried as a layer, "this run was woken
+// knowing X" is answerable from the digest afterwards, exactly the way seat
+// continuity is.
+func TestRepairWakesWithTheAttemptBeforeIt(t *testing.T) {
+	s, lp, router, st, _ := rig(t, "worker")
+	ctx := context.Background()
+
+	// The run that went red. It lands, and it hands off what it learned.
+	first := runItem(t, s, lp, router, "issue-prior", "add the widget package")
+	if first.State != queue.StateDone {
+		t.Fatalf("the predecessor did not land: %+v", first)
+	}
+
+	// What the repair would wake with if all it had were the seat: the same
+	// continuity, and no account of the attempt it follows. This is the
+	// control, captured before the repair adds its own notes to the seat.
+	wake, ok, err := st.WakeLayer(ctx, 8)
+	if err != nil || !ok {
+		t.Fatalf("wake: ok=%v err=%v", ok, err)
+	}
+	task := "fix the red on main"
+	cold, err := (&agent.Composer{Source: layers()}).Resolve(ctx, agent.Request{
+		Tenant: btn, Role: agent.RoleBuilder, Box: "shop", Repo: "app",
+		Task: task, Extra: []agent.Layer{wake},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The repair the factory opens for that red, carrying the attempt.
+	lp.Builder.(*Builder).Env = []string{"ACP_FAKE=repair"}
+	prior := &agent.Prior{
+		Run: first.ID, Repo: "app", Branch: "main", Sha: first.Head,
+		Checks: []string{"check"}, Reason: "check: fail (widget defaults to green)",
+	}
+	ing, _, err := router.Open(ctx, ingress.Route{
+		Name: "red-main", Kind: ingress.RouteRedMain, Opens: ingress.KindIssue,
+		Box: "shop", Repo: "app", Requester: "gargoyle",
+	}, ingress.Delivery{Key: "red-" + first.Head, Payload: []byte(task), Prior: prior})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: s, Runner: "runner-1", TTL: time.Hour}
+	repair, err := q.Submit(ctx, loop.ItemFor(ing, "wi-repair", task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair, err = lp.Run(ctx, repair); err != nil {
+		t.Fatal(err)
+	}
+	if repair.State != queue.StateDone {
+		t.Fatalf("the repair did not land: %+v", repair)
+	}
+
+	// What the repair was actually sent, from the record rather than from
+	// this test's idea of it.
+	var sent promptRecord
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-repair", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "agent-prompt" {
+			if err := json.Unmarshal(r.Body, &sent); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if sent.AgentRef == "" {
+		t.Fatal("no prompt on the repair's record")
+	}
+	if !strings.Contains(sent.Bundle, "prior-attempt") {
+		t.Fatalf("the bundle does not carry a prior-attempt layer:\n%s", sent.Bundle)
+	}
+	_, carried, found := strings.Cut(sent.Prompt, "## The attempt before this one")
+	if !found {
+		t.Fatalf("the repair woke with no account of what preceded it:\n%s", sent.Prompt)
+	}
+	for _, want := range []string{
+		first.ID,                   // whose attempt it was
+		first.Head,                 // the sha that went red
+		"main",                     // the branch that still carries it
+		"widget defaults to green", // what the check said
+		"expects blue",             // and the predecessor's own handoff
+	} {
+		if !strings.Contains(carried, want) {
+			t.Fatalf("the carried attempt lost %q:\n%s", want, carried)
+		}
+	}
+	// The same repair woken with continuity alone is a different agent, and
+	// the agentref is where that difference is legible.
+	if sent.AgentRef == cold.Ref {
+		t.Fatal("carrying the prior attempt left no trace in the agentref")
 	}
 }
 

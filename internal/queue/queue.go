@@ -16,6 +16,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/store"
@@ -130,6 +131,13 @@ type WorkItem struct {
 	// its own initiative, inherited from the ingress. Externally delivered
 	// work is 0; see loop.OpenRepair for what bounds it.
 	Depth int `json:"depth,omitempty"`
+	// Prior is the attempt this item follows, inherited from the ingress
+	// when the factory opened this work to repair one of its own: the red
+	// sha, which check reported it, and the branch that still carries the
+	// change. It resolves into a layer at wake time, so a repair run's
+	// bundle — and therefore its agentref — records what it was woken
+	// knowing. See [agent.Prior].
+	Prior *agent.Prior `json:"prior,omitempty"`
 	// Head is the commit the item produced, once it has.
 	Head string `json:"head,omitempty"`
 	// Built is a commit this item has already produced but not landed: the

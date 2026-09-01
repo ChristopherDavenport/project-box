@@ -59,6 +59,46 @@ func (s *Seat) RecordHandoff(ctx context.Context, item queue.WorkItem, repoRemot
 	return nil
 }
 
+// HandoffFrom returns the notes one named run left in this seat's scope, in
+// the order they were written.
+//
+// [Seat.WakeLayer] answers "what has this seat been doing lately", which is
+// the right question for the seat's next run and the wrong one for a
+// successor that is not it. Repair work is a different item on a different
+// line, opened as new work through a route, and what it needs is the attempt
+// IT follows rather than the seat's recent history — the same records, keyed
+// by run instead of by recency.
+//
+// The lookup stays inside this seat's scope. A predecessor that sat elsewhere
+// carries its facts to the successor and not its notes, because a seat's
+// memory is its own: reading another's would be exactly the cross-scope read
+// the knowledge plane refuses everywhere else, and it would need a grant to
+// be anything but that.
+func (s *Seat) HandoffFrom(ctx context.Context, run string) ([]string, error) {
+	if run == "" {
+		return nil, nil
+	}
+	records, err := s.Base.Retrieve(ctx, knowledge.Query{Granted: []string{s.Scope()}})
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range records {
+		if r.Run != run {
+			continue
+		}
+		// Marked, not hidden — same rule as the wake layer. A successor
+		// deciding whether its predecessor's note still applies needs to see
+		// that the code underneath it has moved.
+		if r.Stale {
+			out = append(out, r.Claim+" [stale: the code this was about has moved]")
+			continue
+		}
+		out = append(out, r.Claim)
+	}
+	return out, nil
+}
+
 // WakeLayer builds the continuity layer for the seat's next run: its most
 // recent handoffs, newest last, as a resolved inline layer. The bool is
 // false when the seat has no history yet — a first day, not an error.

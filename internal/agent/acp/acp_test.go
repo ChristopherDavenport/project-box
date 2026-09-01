@@ -348,6 +348,16 @@ func fakeAgent(scenario string) {
 					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
 						"content": map[string]any{"type": "text", "text": "Added the widget and committed.\nHANDOFF: the widget package expects blue as the default\n"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "repair":
+				// The run after a red one: it fixes what is already on the
+				// branch rather than starting the work over.
+				os.WriteFile("fix.go", []byte("package app // the repair\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "fix the red")
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "Fixed the default and committed.\nHANDOFF: the red was the widget default, not the test\n"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "lazy":
 				// Declares victory, changes nothing, escalates nothing —
 				// the silent failure the adapter must never let look done.

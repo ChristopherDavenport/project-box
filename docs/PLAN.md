@@ -432,6 +432,7 @@ claim is decoration.
 | Runner confinement | the same probe run twice against one real layout: unconfined it reads the mirror, the store, and a sibling workspace; confined it reads only its workspace and its materialized context set | 2 |
 | Evidence completeness | 25 sampled changes, complete evidence, unaided | 8 |
 | Optimistic lane safety | red main opens repair work; promotion refuses unsoaked commits; fencing identical in both lanes | 9 |
+| Repair wakes warm | a repair run's bundle contains its predecessor's handoff, and its agentref differs from the same repair with no predecessor | 9 |
 | Graph ordering | diamond dependency runs in topo order; failed root parks leaves with cause | 10 |
 | A new stage needs no new stage | a propose/critique pair runs as two graph nodes under two roles — blocked until its dependency settles, each with its own claim, lease, evidence scope and settled record — with `Run` unchanged | 10 |
 | Budget refusal | work waits rather than overdrawing a tenant budget | 11 |
@@ -903,6 +904,34 @@ titles were, the enforcement path has the hole the update path had. Not
 built, and named here: the cross-run version of the zero smell — a counter
 that has never been non-zero in ANY run should be loud — which lives in the
 capacity and evidence planes, not in the parser.
+
+Issue #11 gave repair work the attempt it follows (2026-09-01). A red landing
+opened a fresh ingress carrying the failure reason as its payload, and the
+repair was then an ordinary work item — a task string and nothing else — so
+its agent started cold and re-derived from the diff what the run before it
+already knew. A repair now carries an `agent.Prior`: the run that made the
+attempt, the red sha, the branch that still holds the change (nothing rolled
+back), and which check said what. It rides the ingress the way the depth
+does, and `ItemFor` puts it on the item intake builds.
+
+The predecessor's handoff is deliberately NOT frozen in at that moment,
+because it does not exist yet — notes are written as a run settles, and on
+the optimistic lane the repair is summoned before the run summoning it has
+settled. They resolve at WAKE time instead, from the seat that wrote them:
+`seat.HandoffFrom` asks by run rather than by recency, which is the
+successor's question and the one the wake layer cannot answer. The whole
+thing renders as a task-scope layer beside the task text rather than being
+concatenated into it, so continuity's rule holds here too — the carried
+context is part of the agentref, and a repair woken with its predecessor's
+account is a different agent on the record from the same repair woken cold.
+Two limits, stated rather than implied. A seat's memory is its own, so a
+successor sitting in a different seat carries the facts and not the notes:
+reading another seat's scope would be exactly the cross-scope read the
+knowledge plane refuses everywhere else, and it would want a grant to be
+anything but that. And nothing in box.yaml wires `Red` at all yet — the
+red-main route is test-only configuration, so an optimistic Box today lands,
+checks, records the red, and summons nobody. That is the same unrun second
+lane #7 names, and it is what a live optimistic session would close.
 
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no
