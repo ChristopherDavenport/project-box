@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/authz"
@@ -256,10 +257,34 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		return l.runOptimistic(ctx, q, item, claim, ws, cs, base, head)
 	}
 
+	// Gates already satisfied on THIS head are carried, not re-run. An item
+	// waiting on a person is re-drained every tick for as long as the review
+	// takes, and re-running the whole suite each time is how a worker that is
+	// doing nothing keeps a machine busy: the deterministic shells — the
+	// build, the test run — cannot change their mind about a commit that has
+	// not moved. The gate whose answer CAN change is the human one, and it is
+	// a store read. Any change of head clears the carry, because replayed or
+	// rebuilt content is a different question.
+	carried := item.PassedGates
+	if string(head) != item.Built {
+		carried = nil
+	}
 	var verdicts []forge.Verdict
+	var passedNow []string
 	var gateInfra error
 	gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
 		for _, g := range l.Gates(ws) {
+			if slices.Contains(carried, g.Name()) {
+				// No new evidence: the gate ran once on this content and its
+				// verdict is already on the chain. Recording it again would
+				// be minting a judgement nobody made.
+				verdicts = append(verdicts, forge.Verdict{
+					Gate: g.Name(), Decision: forge.DecisionPass,
+					Reason: "passed on " + short(head) + ", carried while the head stands",
+				})
+				passedNow = append(passedNow, g.Name())
+				continue
+			}
 			v, err := g.Evaluate(ctx, cs)
 			if err != nil {
 				// Infrastructure trouble is never recorded as a rejected change.
@@ -268,6 +293,9 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			}
 			body, _ := json.Marshal(v)
 			l.record(ctx, item, "gate", string(head), string(body))
+			if v.Decision == forge.DecisionPass {
+				passedNow = append(passedNow, g.Name())
+			}
 			verdicts = append(verdicts, v)
 		}
 		if forge.Resolve(verdicts) == forge.DecisionFail {
@@ -284,9 +312,11 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		return q.Park(ctx, item, claim, reasons(verdicts))
 	case forge.DecisionPending:
 		// Carry the commit forward so the next tick re-enters at the gate
-		// rather than at the builder. Waiting on a person is routine and can
-		// last days; it must not cost an agent run per tick to do it.
-		item.Built, item.BuiltBase = string(head), string(base)
+		// rather than at the builder, and the satisfied gates with it so it
+		// re-enters at the ONE gate that has not answered. Waiting on a
+		// person is routine and can last days; it must cost neither an agent
+		// run nor a test suite per tick to do it.
+		item.Built, item.BuiltBase, item.PassedGates = string(head), string(base), passedNow
 		return q.Wait(ctx, item, claim, reasons(verdicts))
 	}
 
@@ -300,7 +330,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		return q.Fail(ctx, item, claim, err.Error())
 	}
 	if notOurTurn != "" {
-		item.Built, item.BuiltBase = string(head), string(base)
+		// The gates passed on this head; if the branch was merely busy, next
+		// tick lands without re-running them. If it moved, the replay changes
+		// the head and the carry drops itself.
+		item.Built, item.BuiltBase, item.PassedGates = string(head), string(base), passedNow
 		return q.Wait(ctx, item, claim, notOurTurn)
 	}
 	defer leaser.Release(ctx, landLease)

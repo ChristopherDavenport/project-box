@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -857,5 +858,136 @@ func TestRepairChainIsBounded(t *testing.T) {
 	// check chain either way, so promotion still never takes the commit.
 	if _, err := red(ctx, queue.WorkItem{ID: "wi-2", Depth: 2}, "sha-c", "still failing"); err == nil {
 		t.Fatal("the repair chain was allowed to run away")
+	}
+}
+
+// countingGate is an expensive deterministic check — the build, the test
+// suite — that says how often it was asked.
+type countingGate struct {
+	name string
+	n    *int
+}
+
+func (g countingGate) Name() string { return g.name }
+
+func (g countingGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	*g.n++
+	return forge.Verdict{Gate: g.name, Decision: forge.DecisionPass, Reason: "ok"}, nil
+}
+
+// TestWaitingOnAPersonDoesNotRerunTheTestSuite: a worker that is only waiting
+// should cost nothing, and tokens were only half of that. The item is
+// re-drained every tick for as long as the review takes, and re-running the
+// whole gate suite each time is how a factory with nothing to do keeps a
+// machine busy — `go test` every fifteen seconds until somebody clicks
+// approve. A gate that passed on this exact commit passed; the one whose
+// answer can change is the human one, and it is a store read.
+func TestWaitingOnAPersonDoesNotRerunTheTestSuite(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	suite := 0
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{
+			countingGate{name: "build-and-test", n: &suite},
+			holdingGate{approved: &approved},
+		}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-49"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-idle", "add a thing"))
+
+	if item, err = e.loop.Run(ctx, item); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting, got %s (%s)", item.State, item.Note)
+	}
+	if suite != 1 {
+		t.Fatalf("the suite should have run once, ran %d times", suite)
+	}
+	if !slices.Contains(item.PassedGates, "build-and-test") {
+		t.Fatalf("the satisfied gate was not carried: %+v", item.PassedGates)
+	}
+
+	// The person takes their time. The factory should be doing nothing.
+	for tick := 1; tick <= 4; tick++ {
+		loaded, lerr := q.Load(ctx, tn, "wi-idle")
+		if lerr != nil {
+			t.Fatal(lerr)
+		}
+		if item, err = e.loop.Run(ctx, loaded); err != nil {
+			t.Fatalf("tick %d: %v", tick, err)
+		}
+		if item.State != queue.StateWaiting {
+			t.Fatalf("tick %d: state %s", tick, item.State)
+		}
+		if suite != 1 {
+			t.Fatalf("tick %d re-ran the suite while only a person was outstanding: %d runs", tick, suite)
+		}
+		if builder.n != 1 {
+			t.Fatalf("tick %d rebuilt: %d builds", tick, builder.n)
+		}
+	}
+
+	// The approval arrives and the carried verdict is good enough to land on:
+	// it was reached on this exact commit and the commit has not moved.
+	approved = true
+	loaded, _ := q.Load(ctx, tn, "wi-idle")
+	if item, err = e.loop.Run(ctx, loaded); err != nil {
+		t.Fatalf("approved run: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+	if suite != 1 || builder.n != 1 {
+		t.Fatalf("landing re-did the work: %d suite runs, %d builds", suite, builder.n)
+	}
+}
+
+// TestMovedHeadRetiresTheCarriedVerdicts: carrying a pass is sound only while
+// the content stands. Replayed onto a new base, the change is a different
+// question and every gate is asked again — otherwise the cheap path would
+// land a commit nothing had judged.
+func TestMovedHeadRetiresTheCarriedVerdicts(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	suite := 0
+	e.loop.Builder = &countingBuilder{}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{
+			countingGate{name: "build-and-test", n: &suite},
+			holdingGate{approved: &approved},
+		}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-50"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-retire", "add a thing"))
+	if _, err = e.loop.Run(ctx, item); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if suite != 1 {
+		t.Fatalf("suite ran %d times", suite)
+	}
+
+	interlope(t, e.remote, "elsewhere.txt", "moved\n")
+
+	loaded, _ := q.Load(ctx, tn, "wi-retire")
+	if _, err = e.loop.Run(ctx, loaded); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if suite != 2 {
+		t.Fatalf("replayed content must be judged again: %d suite runs", suite)
 	}
 }

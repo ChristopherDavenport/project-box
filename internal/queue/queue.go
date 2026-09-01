@@ -84,6 +84,15 @@ type WorkItem struct {
 	// was judged against a base that no longer exists, and a rebuild is the
 	// honest answer rather than a cheap one.
 	BuiltBase string `json:"built_base,omitempty"`
+	// PassedGates names the gates that already returned pass on Built.
+	//
+	// They are carried rather than re-run while that head stands. A gate that
+	// passed on this exact content passed, and asking it again every tick is
+	// how an item that is only waiting on a person keeps a machine busy — the
+	// cheap gate is the one whose answer can change, and the expensive ones
+	// are the deterministic shells. Any change of head clears this, because a
+	// different commit is a different question.
+	PassedGates []string `json:"passed_gates,omitempty"`
 	// Note carries the parked/failed reason.
 	Note string `json:"note,omitempty"`
 }
@@ -189,7 +198,7 @@ func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, reason 
 // build afresh rather than re-offer a commit whose verdict is on the record.
 // Wait is the one transition that keeps it, because waiting is the one state
 // the same commit is still the answer to.
-func (w *WorkItem) dropResume() { w.Built, w.BuiltBase = "", "" }
+func (w *WorkItem) dropResume() { w.Built, w.BuiltBase, w.PassedGates = "", "", nil }
 
 // Wait records a pending gate and frees the claim; the item resumes when the
 // gate answers. It keeps any resume point the caller set on the item — see
