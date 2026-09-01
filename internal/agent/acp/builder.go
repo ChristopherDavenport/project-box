@@ -127,10 +127,21 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	// events, which need a collector, while this is on the chain.
 	tools, _ := json.Marshal(tally(res.ToolCalls))
 	denied, _ := json.Marshal(tally(res.Denied))
+	// The four-way split, not just the total. The runtime has parsed these
+	// since the field names were pinned and then thrown them away at the
+	// record, which left "20,076,747 tokens" as the only account of a
+	// $13.60 run — a number that cannot be reasoned about, because cache
+	// reads are the bulk of an agent re-reading a repository and are priced
+	// an order of magnitude below input. Four runs came in between $0.68 and
+	// $1.54 per million and nothing on the record could say why.
 	b.record(ctx, ws.Run, "agent-result", bundle.Ref,
-		fmt.Sprintf(`{"stop":%q,"tool_calls":%d,"denied":%d,"escalated":%v,"wall_ms":%d,"tokens":%d,"cost_usd":%.4f,"metered":%v,"unknown_updates":%s,"tools":%s,"denied_tools":%s}`,
-			res.StopReason, len(res.ToolCalls), len(res.Denied), res.Escalated != "", elapsed.Milliseconds(),
-			res.Usage.Total(), res.Usage.CostUSD, res.Usage.Reported, unknown, tools, denied))
+		fmt.Sprintf(`{"stop":%q,"tool_calls":%d,"unenforced":%d,"denied":%d,"escalated":%v,"wall_ms":%d,`+
+			`"tokens":%d,"input_tokens":%d,"output_tokens":%d,"cached_read_tokens":%d,"cached_write_tokens":%d,`+
+			`"cost_usd":%.4f,"metered":%v,"unknown_updates":%s,"tools":%s,"denied_tools":%s}`,
+			res.StopReason, len(res.ToolCalls), res.Unenforced, len(res.Denied), res.Escalated != "", elapsed.Milliseconds(),
+			res.Usage.Total(), res.Usage.InputTokens, res.Usage.OutputTokens,
+			res.Usage.CachedReadTokens, res.Usage.CachedWriteTokens,
+			res.Usage.CostUSD, res.Usage.Reported, unknown, tools, denied))
 	if reason := escalation(res); reason != "" {
 		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason}
 	}

@@ -423,6 +423,42 @@ func fakeAgent(scenario string) {
 					"update": map[string]any{"sessionUpdate": "reasoning_delta",
 						"content": map[string]any{"type": "text", "text": "hmm"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "metaname":
+				// The real dialect: tool_call_update carries no title, and
+				// names the tool only under _meta.claudeCode.toolName. The
+				// title, when there is one, is prose — for Bash it is the
+				// whole command line, which an exact-match policy can never
+				// match and a tally counts as a brand new tool every time.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-1", "status": "in_progress",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}}}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-2", "status": "in_progress",
+						"title": "cd /work && find . -name '*.go' | head -80",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "metadenied":
+				// A DENIED tool that names itself only in the metadata. This
+				// used to walk straight through: no title meant nothing to
+				// match, so the enforcement path skipped it entirely.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-1", "status": "in_progress",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "DeleteProd"}}}})
+				time.Sleep(5 * time.Second) // only the client killing us ends this
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "nameless":
+				// Neither a title nor a toolName: genuinely unmatchable, and
+				// the run must say how many times that happened.
+				for i, id2 := range []string{"t-1", "t-2", "t-3"} {
+					_ = i
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "tool_call_update",
+							"toolCallId": id2, "status": "in_progress"}})
+				}
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "rogue":
 				// Execute a denied tool without asking, then dawdle: only the
 				// client killing us ends this session.

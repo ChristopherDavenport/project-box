@@ -153,9 +153,20 @@ type Result struct {
 	StopReason string
 	// Text accumulates the agent's message chunks.
 	Text string
-	// ToolCalls lists every tool title that appeared on the stream, permitted
-	// or not, in order — the raw material for the run's telemetry.
+	// ToolCalls names every tool call that appeared on the stream, permitted
+	// or not, in order — the harness's stable tool name where the dialect
+	// gives one, the human title otherwise. See [sessionUpdate.tool] for why
+	// that preference matters to more than tidiness.
 	ToolCalls []string
+	// Unenforced counts tool calls that arrived with no name at all, and so
+	// were never matched against policy.
+	//
+	// A number rather than a flag, because the flag was already there and
+	// said nothing useful: "some calls could not be checked" is a caveat an
+	// operator scrolls past, and "91 of 232 could not be" is the reason to
+	// stop and fix the dialect. Non-zero means enforcement had a hole of
+	// exactly this size.
+	Unenforced int
 	// Denied lists permission requests refused by policy.
 	Denied []string
 	// Escalated carries the agent's own reason for declining or escalating
@@ -280,31 +291,34 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				// Both spellings announce the same call, so the id decides
 				// whether it is new. A dialect that only ever sends the update
 				// form still gets counted, and still gets judged.
+				name := u.tool()
 				key := u.Update.ToolCallID
 				if key == "" {
-					key = u.Update.Title
+					key = name
 				}
 				mu.Lock()
 				first := !seenCalls[key]
 				seenCalls[key] = true
 				if first {
-					res.ToolCalls = append(res.ToolCalls, u.Update.Title)
-					if u.Update.Title == "" {
-						// Policy matches on the title. Without one there is
-						// nothing to match, so enforcement did not happen here
-						// and must not be reported as if it had.
-						res.noteUnknown("tool_call:untitled")
+					res.ToolCalls = append(res.ToolCalls, name)
+					if name == "" {
+						// Nothing to match on, so enforcement did not happen
+						// here and must not be reported as if it had. Counted,
+						// not merely noted: "some calls were unchecked" is a
+						// caveat, "91 of 232 were" is a finding.
+						res.Unenforced++
+						res.noteUnknown("tool_call:unnamed")
 					}
 				}
 				mu.Unlock()
-				if !first || u.Update.Title == "" {
+				if !first || name == "" {
 					break
 				}
-				if ok, _ := b.Tools.Permits(u.Update.Title); !ok {
-					telemetry.ToolCall(ctx, u.Update.Title, false)
+				if ok, _ := b.Tools.Permits(name); !ok {
+					telemetry.ToolCall(ctx, name, false)
 					// The agent is executing a denied tool without asking.
 					mu.Lock()
-					violated = fmt.Errorf("%w: %q", ErrPolicyViolation, u.Update.Title)
+					violated = fmt.Errorf("%w: %q", ErrPolicyViolation, name)
 					mu.Unlock()
 					cancel() // kills the process via CommandContext
 				}
@@ -471,6 +485,19 @@ type sessionUpdate struct {
 	Meta *wireMeta `json:"_meta,omitempty"`
 }
 
+// tool names a call the way policy and the tally both want it named: the
+// harness's stable tool name when the dialect supplies one, the human title
+// otherwise, and empty when neither — which is a fact the caller must record
+// rather than paper over, because it means nothing was matched.
+func (u sessionUpdate) tool() string {
+	for _, m := range []*wireMeta{u.Update.Meta, u.Meta} {
+		if m != nil && m.ClaudeCode != nil && m.ClaudeCode.ToolName != "" {
+			return m.ClaudeCode.ToolName
+		}
+	}
+	return u.Update.Title
+}
+
 // usage finds a cost report on an update, at either of the two places the
 // dialect may hang it. Both spellings are part of the pinned dialect: an
 // agent that reports somewhere else reads as unmetered — loudly — rather
@@ -487,6 +514,22 @@ func (u sessionUpdate) usage() *wireUsage {
 
 type wireMeta struct {
 	Usage *wireUsage `json:"usage,omitempty"`
+	// ClaudeCode carries the harness's own account of a tool call. toolName is
+	// the STABLE identifier — "Bash", "Edit", "Read" — as against title, which
+	// is prose written for a human to read and for Bash is the whole command
+	// line.
+	//
+	// That distinction turned out to be the difference between a tool policy
+	// and a decoration. Permits is an exact match, so a deny list naming
+	// "Bash" never fired against a title of `cd /Users/... && find . -name
+	// '*.go'`, and the tally keyed on the same string grew a new entry per
+	// command — 46 "distinct tools" in one run of 53 calls. Meanwhile
+	// tool_call_update carries no title at all, and the enforcement path
+	// skipped those outright: measured across four real runs, 91 of 232 calls
+	// went unmatched for want of anything to match on.
+	ClaudeCode *struct {
+		ToolName string `json:"toolName"`
+	} `json:"claudeCode,omitempty"`
 }
 
 // wireUsage is the cost report as it appears on the wire, taken from the
