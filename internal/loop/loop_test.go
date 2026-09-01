@@ -819,3 +819,43 @@ func TestUnconfirmedRedParksWithoutRepair(t *testing.T) {
 		t.Fatalf("the observed red should stand alone on the chain: %+v", sts)
 	}
 }
+
+// TestRepairChainIsBounded: one repair per red sha is not a bound on the
+// CHAIN. Each repair produces a NEW sha, which can itself be red, so an
+// optimistic lane over a genuinely broken tree opens repair after repair —
+// every one a real agent session — and sha-keyed idempotency cannot collapse
+// them because no two are the same sha.
+func TestRepairChainIsBounded(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	route := ingress.Route{Name: "red-main", Kind: ingress.RouteRedMain,
+		Opens: ingress.KindIssue, Box: "shop", Requester: "gargoyle"}
+	red := OpenRepair(e.router, route, 2)
+
+	id, err := red(ctx, queue.WorkItem{ID: "wi-0"}, "sha-a", "tests fail")
+	if err != nil || id == "" {
+		t.Fatalf("the first repair should open: %q %v", id, err)
+	}
+	// The repair is one deeper than the work that summoned it, and that is
+	// what the next one will be measured against.
+	head, err := e.store.Log().Head(ctx, tn, "ingress/"+id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ing ingress.Ingress
+	if err := json.Unmarshal(head.Body, &ing); err != nil {
+		t.Fatal(err)
+	}
+	if ing.Depth != 1 {
+		t.Fatalf("repair opened at depth %d, want 1", ing.Depth)
+	}
+
+	if _, err := red(ctx, queue.WorkItem{ID: "wi-1", Depth: 1}, "sha-b", "still failing"); err != nil {
+		t.Fatalf("depth 1 is still inside the bound: %v", err)
+	}
+	// At the bound the factory stops summoning itself. The red stays on the
+	// check chain either way, so promotion still never takes the commit.
+	if _, err := red(ctx, queue.WorkItem{ID: "wi-2", Depth: 2}, "sha-c", "still failing"); err == nil {
+		t.Fatal("the repair chain was allowed to run away")
+	}
+}

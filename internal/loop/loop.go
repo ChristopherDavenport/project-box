@@ -68,12 +68,36 @@ type Loop struct {
 	TTL time.Duration
 }
 
+// MaxRepairDepth bounds how far the factory will chase its own tail when no
+// depth is configured: a repair, a repair of that, a repair of that.
+const MaxRepairDepth = 3
+
 // OpenRepair wires Red to an ingress route: the red commit's sha is the
 // delivery key, so however many post-land checks report the same red, one
 // repair item exists.
-func OpenRepair(router *ingress.StoreRouter, route ingress.Route) func(context.Context, queue.WorkItem, forge.Commit, string) (string, error) {
-	return func(ctx context.Context, _ queue.WorkItem, head forge.Commit, reason string) (string, error) {
-		ing, _, err := router.Open(ctx, route, ingress.Delivery{Key: "red-" + string(head), Payload: []byte(reason)})
+//
+// maxDepth bounds the CHAIN, which sha-keyed idempotency cannot. One repair
+// per red sha is not a bound when each repair produces a new sha that can
+// itself be red: an optimistic lane over a genuinely broken tree will open
+// repair after repair, each one a real agent session, and the only thing
+// standing in front of that is the budget. Zero uses [MaxRepairDepth];
+// negative means no bound, which is a decision an operator can make and the
+// factory will not make for them.
+func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) func(context.Context, queue.WorkItem, forge.Commit, string) (string, error) {
+	if maxDepth == 0 {
+		maxDepth = MaxRepairDepth
+	}
+	return func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error) {
+		if maxDepth > 0 && item.Depth >= maxDepth {
+			// Deep enough. The red is on the check chain either way, so
+			// promotion will not take the commit; what stops here is the
+			// factory summoning itself again.
+			return "", fmt.Errorf("repair chain reached depth %d without going green — stopping rather than opening another: %s",
+				item.Depth, reason)
+		}
+		ing, _, err := router.Open(ctx, route, ingress.Delivery{
+			Key: "red-" + string(head), Payload: []byte(reason), Depth: item.Depth + 1,
+		})
 		if err != nil {
 			return "", err
 		}
@@ -85,7 +109,7 @@ func OpenRepair(router *ingress.StoreRouter, route ingress.Route) func(context.C
 // what keeps "why does this change exist" answerable from the other end.
 func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 	return queue.WorkItem{ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID,
-		Requester: ing.Requester, Repo: ing.Repo, Task: task}
+		Requester: ing.Requester, Repo: ing.Repo, Task: task, Depth: ing.Depth}
 }
 
 // Run drives one item from claim to settled state. The returned item reports

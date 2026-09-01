@@ -116,7 +116,7 @@ func setup(t *testing.T, soak time.Duration, prodApprovals int) *world {
 		Red: loop.OpenRepair(w.router, ingress.Route{
 			Name: "red-main", Kind: ingress.RouteRedMain, Opens: ingress.KindIssue,
 			Box: "shop", Requester: "gargoyle",
-		}),
+		}, 0),
 		TTL: time.Hour,
 	}
 

@@ -63,6 +63,10 @@ type WorkItem struct {
 	DependsOn []string `json:"depends_on,omitempty"`
 	Task      string   `json:"task"`
 	State     State    `json:"state"`
+	// Depth is how many times the factory has reopened this line of work on
+	// its own initiative, inherited from the ingress. Externally delivered
+	// work is 0; see loop.OpenRepair for what bounds it.
+	Depth int `json:"depth,omitempty"`
 	// Head is the commit the item produced, once it has.
 	Head string `json:"head,omitempty"`
 	// Built is a commit this item has already produced but not landed: the

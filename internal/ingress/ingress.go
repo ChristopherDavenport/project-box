@@ -62,7 +62,13 @@ type Ingress struct {
 	// never by this field. Autonomous origination still names one: work with
 	// no principal behind it has no authorization to inherit.
 	Requester string
-	Opened    time.Time
+	// Depth is how many times this work has already been reopened by the
+	// factory itself — a repair of a repair of a repair. Externally
+	// delivered work is depth 0 and stays there; only the factory's own
+	// routes increment it, and only so that a chain it starts can be
+	// stopped. See loop.OpenRepair.
+	Depth  int `json:"depth,omitempty"`
+	Opened time.Time
 	// Closed is zero while open.
 	Closed time.Time
 	// Campaign is set when Kind is KindCampaign, Incident when KindIncident.
@@ -199,7 +205,10 @@ type Delivery struct {
 	Key string
 	// Payload is the source's own representation, retained so a wrongly routed
 	// event can be diagnosed against what actually arrived.
-	Payload  []byte
+	Payload []byte
+	// Depth is set only by the factory reopening its own work; see
+	// [Ingress.Depth]. An external delivery leaves it zero.
+	Depth    int
 	Received time.Time
 }
 
