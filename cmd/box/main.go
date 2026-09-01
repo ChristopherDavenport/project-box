@@ -14,14 +14,20 @@ import (
 	"strings"
 
 	"github.com/ChristopherDavenport/project-box/internal/api"
+	"github.com/ChristopherDavenport/project-box/internal/boxctx"
 	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/gateway"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
+	"github.com/ChristopherDavenport/project-box/internal/version"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println("box " + version.String())
+		os.Exit(0)
+	}
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "box:", err)
 		os.Exit(1)
@@ -38,12 +44,33 @@ func run(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() > 0 && fs.Arg(0) == "context" {
+		return contextCmd(fs.Args()[1:])
+	}
 	if *tn == "" || fs.NArg() == 0 {
-		return fmt.Errorf("usage: box -tenant <id> [-db path] <exceptions|stop|resume|sample|signoff|provenance> ...")
+		return fmt.Errorf("usage: box -tenant <id> [-db path|-daemon addr] <status|exceptions|submit|item|provenance|stop|resume|room|context> ...")
 	}
 	t := tenant.ID(*tn)
 	if err := t.Validate(); err != nil {
 		return err
+	}
+	// Contexts fill in what flags left empty — flags always win.
+	if cx, name, ok, err := boxctx.Resolve(os.Getenv("BOX_CONTEXT")); err != nil {
+		return err
+	} else if ok {
+		if *daemon == "" {
+			*daemon = cx.Daemon
+		}
+		if *token == "" {
+			*token = cx.Token
+		}
+		if *tn == "" {
+			*tn = cx.Tenant
+		}
+		if cx.Actor != "" && *actor == os.Getenv("USER") {
+			*actor = cx.Actor
+		}
+		_ = name
 	}
 	if fs.Arg(0) == "room" {
 		return room(*daemon, fs.Args()[1:])
@@ -243,4 +270,68 @@ func room(daemonAddr string, rest []string) error {
 	}
 	fmt.Printf("control room: http://%s/  (ctrl-c to close)\n", ln.Addr())
 	return http.Serve(ln, gateway.Gate(*socket, ""))
+}
+
+// contextCmd manages named daemon endpoints: create, use, ls, rm.
+func contextCmd(args []string) error {
+	if len(args) == 0 {
+		return fmt.Errorf("usage: box context <create|use|ls|rm> ...")
+	}
+	f, err := boxctx.Load()
+	if err != nil {
+		return err
+	}
+	switch args[0] {
+	case "create":
+		sub := flag.NewFlagSet("context create", flag.ContinueOnError)
+		daemon := sub.String("daemon", "", "unix:/path or tcp:host:port")
+		token := sub.String("token", "", "gate token, stored 0600")
+		tenant := sub.String("tenant", "", "default tenant for this context")
+		actor := sub.String("actor", "", "default actor")
+		if len(args) < 2 {
+			return fmt.Errorf("usage: box context create <name> -daemon ... [-token ...] [-tenant ...]")
+		}
+		name := args[1]
+		if err := sub.Parse(args[2:]); err != nil {
+			return err
+		}
+		if *daemon == "" {
+			return fmt.Errorf("usage: box context create <name> -daemon ... [-token ...] [-tenant ...]")
+		}
+		f.Contexts[name] = boxctx.Context{Daemon: *daemon, Token: *token, Tenant: *tenant, Actor: *actor}
+		if f.Current == "" {
+			f.Current = name
+		}
+		return boxctx.Save(f)
+	case "use":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: box context use <name>")
+		}
+		if _, ok := f.Contexts[args[1]]; !ok {
+			return fmt.Errorf("no context %q", args[1])
+		}
+		f.Current = args[1]
+		return boxctx.Save(f)
+	case "ls":
+		for _, n := range boxctx.Names(f) {
+			mark := " "
+			if n == f.Current {
+				mark = "*"
+			}
+			c := f.Contexts[n]
+			fmt.Printf("%s %-16s %-30s tenant=%s\n", mark, n, c.Daemon, c.Tenant)
+		}
+		return nil
+	case "rm":
+		if len(args) != 2 {
+			return fmt.Errorf("usage: box context rm <name>")
+		}
+		delete(f.Contexts, args[1])
+		if f.Current == args[1] {
+			f.Current = ""
+		}
+		return boxctx.Save(f)
+	default:
+		return fmt.Errorf("unknown context command %q", args[0])
+	}
 }

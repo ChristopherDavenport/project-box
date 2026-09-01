@@ -73,9 +73,10 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) error
 	if resp.StatusCode >= 400 {
 		var e struct {
 			Error string `json:"error"`
+			Code  string `json:"code"`
 		}
 		json.NewDecoder(resp.Body).Decode(&e)
-		return fmt.Errorf("api: %s %s: %d %s", method, path, resp.StatusCode, e.Error)
+		return &Error{Method: method, Path: path, Status: resp.StatusCode, Code: e.Code, Message: e.Error}
 	}
 	if out != nil {
 		return json.NewDecoder(resp.Body).Decode(out)
@@ -136,4 +137,17 @@ func (c *Client) Reload(ctx context.Context) (string, error) {
 func (c *Client) Activity(ctx context.Context) ([]Activity, error) {
 	var out []Activity
 	return out, c.do(ctx, "GET", "/v1/activity", nil, &out)
+}
+
+// Error is the typed API failure: match on Code, never on Message — the
+// prose is for people and may change; the code is the contract.
+type Error struct {
+	Method, Path  string
+	Status        int
+	Code, Message string
+}
+
+// Error renders for humans.
+func (e *Error) Error() string {
+	return fmt.Sprintf("api: %s %s: %d %s (%s)", e.Method, e.Path, e.Status, e.Message, e.Code)
 }

@@ -28,6 +28,10 @@ type Config struct {
 	// (boxgate), never the daemon's own concern.
 	Listen string `yaml:"listen"`
 	Every  string `yaml:"every"`
+	// Drain bounds the graceful-shutdown wait for in-flight runs; empty
+	// means 30s. SIGTERM stops new claims immediately; running work gets
+	// this long to settle before it is cancelled.
+	Drain  string `yaml:"drain"`
 	OTLP   string `yaml:"otlp"`
 	Budget Budget `yaml:"budget"`
 	Boxes  []Box  `yaml:"boxes"`
@@ -103,6 +107,12 @@ func (c *Config) validate() error {
 	if _, err := time.ParseDuration(c.Every); err != nil {
 		return fmt.Errorf("boxcfg: every: %w", err)
 	}
+	if c.Drain == "" {
+		c.Drain = "30s"
+	}
+	if _, err := time.ParseDuration(c.Drain); err != nil {
+		return fmt.Errorf("boxcfg: drain: %w", err)
+	}
 	if c.Budget.Window != "" {
 		if _, err := time.ParseDuration(c.Budget.Window); err != nil {
 			return fmt.Errorf("boxcfg: budget.window: %w", err)
@@ -161,6 +171,12 @@ func (c *Config) validate() error {
 // EveryDuration returns the parsed tick interval.
 func (c Config) EveryDuration() time.Duration {
 	d, _ := time.ParseDuration(c.Every)
+	return d
+}
+
+// DrainDuration returns the parsed graceful-shutdown window.
+func (c Config) DrainDuration() time.Duration {
+	d, _ := time.ParseDuration(c.Drain)
 	return d
 }
 

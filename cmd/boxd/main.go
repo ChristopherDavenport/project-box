@@ -37,9 +37,14 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/telemetry"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
+	"github.com/ChristopherDavenport/project-box/internal/version"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println("boxd " + version.String())
+		os.Exit(0)
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "boxd:", err)
 		os.Exit(1)

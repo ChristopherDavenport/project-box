@@ -34,6 +34,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
+	"github.com/ChristopherDavenport/project-box/internal/version"
 )
 
 // Server serves one tenant's daemon API — over a unix domain socket, and
@@ -146,6 +147,7 @@ type Status struct {
 	Exceptions int       `json:"exceptions"`
 	UptimeSec  int64     `json:"uptime_sec"`
 	Routes     []string  `json:"routes"`
+	Version    string    `json:"version"`
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
@@ -181,6 +183,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		Tenant: s.Tenant, Box: s.Box, Runner: s.Runner, Stopped: stopped,
 		Pending: pending, Exceptions: exceptions,
 		UptimeSec: int64(time.Since(s.Started).Seconds()), Routes: s.routeNames(),
+		Version: version.String(),
 	})
 }
 
@@ -244,7 +247,7 @@ func (s *Server) openIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	route, ok := s.route(req.Route)
 	if !ok {
-		httpErr(w, 404, fmt.Sprintf("no route %q — routes are operator configuration, not caller request", req.Route))
+		httpErrCode(w, 404, "route_not_found", fmt.Sprintf("no route %q — routes are operator configuration, not caller request", req.Route))
 		return
 	}
 	ing, opened, err := s.Router.Open(r.Context(), route, ingress.Delivery{
@@ -309,10 +312,35 @@ func writeJSON(w http.ResponseWriter, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
+// httpErr writes the error envelope every client parses: a human message
+// and a MACHINE code. The dockerd lesson adopted early: clients that must
+// string-match error prose calcify the prose; codes are the contract.
 func httpErr(w http.ResponseWriter, code int, msg string) {
+	httpErrCode(w, code, defaultCode(code), msg)
+}
+
+func httpErrCode(w http.ResponseWriter, status int, code, msg string) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": msg, "code": code})
+}
+
+func defaultCode(status int) string {
+	switch status {
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusBadRequest:
+		return "bad_request"
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusUnprocessableEntity:
+		return "invalid"
+	case http.StatusNotImplemented:
+		return "unsupported"
+	case http.StatusMethodNotAllowed:
+		return "method_not_allowed"
+	}
+	return "internal"
 }
 
 // Listen binds the daemon's ONLY listener kind: a unix domain socket. The

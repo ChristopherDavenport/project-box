@@ -26,9 +26,14 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/gateway"
+	"github.com/ChristopherDavenport/project-box/internal/version"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "--version" {
+		fmt.Println("boxgate " + version.String())
+		os.Exit(0)
+	}
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "boxgate:", err)
 		os.Exit(1)

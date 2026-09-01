@@ -40,6 +40,24 @@ type Pump struct {
 	Queue *queue.Queue
 
 	mu sync.RWMutex // guards Loops swaps against in-flight drains
+	// inflight tracks running item executions for graceful drain: on
+	// shutdown the daemon stops claiming and WAITS here — killing a paid
+	// agent run mid-item is safe under fencing, but it is waste, and waste
+	// with a half-written story.
+	inflight sync.WaitGroup
+}
+
+// Quiesce blocks until every in-flight run settles or the context ends,
+// reporting whether the pump drained clean.
+func (p *Pump) Quiesce(ctx context.Context) bool {
+	done := make(chan struct{})
+	go func() { p.inflight.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // SetLoops swaps the executor table — the heart of config reload. In-flight
@@ -135,8 +153,10 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			return settled, err
 		}
 		wg.Add(1)
+		p.inflight.Add(1)
 		go func(item queue.WorkItem) {
 			defer wg.Done()
+			defer p.inflight.Done()
 			defer release()
 			out, err := lp.Run(ctx, item)
 			mu.Lock()

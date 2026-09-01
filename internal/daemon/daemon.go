@@ -256,17 +256,50 @@ func (d *Daemon) Run(ctx context.Context) error {
 		defer cancel()
 		httpSrv.Shutdown(shctx)
 	}()
-	slog.Info("boxd up", "tenant", d.tenant, "api", listen, "every", d.Every())
+	// Work runs on its own context so shutdown can DRAIN: the signal stops
+	// new claims immediately, in-flight runs get the drain window to settle,
+	// and only then is their context cancelled — the dockerd stop-timeout
+	// shape.
+	workCtx, cancelWork := context.WithCancel(context.Background())
+	defer cancelWork()
+
+	slog.Info("boxd up", "tenant", d.tenant, "api", listen, "every", d.Every(), "drain", d.drain())
+	ticks := 0
 	for {
 		select {
 		case <-ctx.Done():
+			slog.Info("draining", "grace", d.drain())
+			dctx, cancel := context.WithTimeout(context.Background(), d.drain())
+			clean := d.pump.Quiesce(dctx)
+			cancel()
+			cancelWork()
+			if !clean {
+				slog.Warn("drain window elapsed with work in flight — cancelled; fencing makes re-runs safe")
+			}
 			return ctx.Err()
 		case <-time.After(d.Every()):
-			if _, err := d.Tick(ctx); err != nil {
+			if _, err := d.Tick(workCtx); err != nil {
 				slog.Error("tick", "err", err)
+			}
+			ticks++
+			if ticks%housekeepingEvery == 0 {
+				if err := d.mirror.Prune(workCtx); err != nil {
+					slog.Warn("prune", "err", err)
+				}
 			}
 		}
 	}
+}
+
+// housekeepingEvery spaces the prune sweep: every Nth tick, the mirror
+// reaps workspaces whose leases no longer answer — the `docker system
+// prune` job as a standing task rather than a remembered chore.
+const housekeepingEvery = 20
+
+func (d *Daemon) drain() time.Duration {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.cfg.DrainDuration()
 }
 
 func firstLine(s string) string {

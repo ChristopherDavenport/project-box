@@ -695,6 +695,22 @@ Playwright drove the real UI — submit through the JH form, the landing
 arriving on the live feed, then a reload on the running process and the
 new route appearing in the form with no restart.
 
+A dockerd-hygiene pass (2026-08-31) pulled the operational lessons worth
+having before a fleet exists: build identity everywhere (internal/version,
+ldflags-stamped, --version on all three binaries and in /v1/status — a node
+can say what it runs); typed API error codes adopted before any client
+could calcify on prose (match Code, never Message); graceful drain on
+SIGTERM (claims stop instantly, in-flight runs get the configured drain
+window to settle — verified live: TERM mid-build, 4s shutdown, the commit
+landed); the prune sweep as a standing daemon task; and `box context`
+(named daemon endpoints, docker-context shape, 0600 config). Pulled-later,
+recorded: the shim split / live-restore (only when agent runs get long —
+re-run-under-fencing is honest today), and container-sandboxed builders as
+the runner-confinement answer, with docker now on the box to provide it.
+Rejected: API version negotiation, labels/filters (estate facts are our
+labels), the plugin wire protocol (Go interfaces + exec seams), and the
+registry model (git is our distribution).
+
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
-review sampling/sign-off endpoints for the control room, and OIDC at the
-auth seam.
+container-sandboxed builders (runner confinement), review sampling/sign-off
+endpoints for the control room, and OIDC as a boxgate variant.
