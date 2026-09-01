@@ -48,7 +48,7 @@ func run(args []string) error {
 		return contextCmd(fs.Args()[1:])
 	}
 	if *tn == "" || fs.NArg() == 0 {
-		return fmt.Errorf("usage: box -tenant <id> [-db path|-daemon addr] <status|exceptions|submit|item|provenance|stop|resume|room|context> ...")
+		return fmt.Errorf("usage: box -tenant <id> [-db path|-daemon addr] <status|queue|exceptions|submit|item|provenance|stop|resume|room|context> ...")
 	}
 	t := tenant.ID(*tn)
 	if err := t.Validate(); err != nil {
@@ -89,6 +89,17 @@ func run(args []string) error {
 	rest := fs.Args()[1:]
 
 	switch fs.Arg(0) {
+	case "queue":
+		sub := flag.NewFlagSet("queue", flag.ContinueOnError)
+		state := sub.String("state", "", "comma-separated states (pending, claimed, waiting, parked, done, failed); empty shows all")
+		if err := sub.Parse(rest); err != nil {
+			return err
+		}
+		entries, err := room.Queue(ctx, parseStates(*state)...)
+		if err != nil {
+			return err
+		}
+		printQueue(entries)
 	case "exceptions":
 		items, err := room.Exceptions(ctx)
 		if err != nil {
@@ -167,6 +178,54 @@ func run(args []string) error {
 	return nil
 }
 
+func parseStates(s string) []queue.State {
+	var out []queue.State
+	for part := range strings.SplitSeq(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, queue.State(part))
+		}
+	}
+	return out
+}
+
+// printQueue renders the queue the way an operator reads it: one line per
+// unit, and the note underneath. The note is the answer to "why is it still
+// there" — which the queue has always written and a counter can never carry.
+func printQueue(entries []control.QueueEntry) {
+	if len(entries) == 0 {
+		fmt.Println("the queue is empty")
+		return
+	}
+	for _, e := range entries {
+		origin := e.Route
+		if e.Key != "" {
+			origin += "/" + e.Key
+		}
+		if origin == "" {
+			origin = e.Ingress
+		}
+		fmt.Printf("%-22s %-8s %6s  %-22s %s\n", e.ID, e.State, age(e.AgeSec), origin, e.Task)
+		if e.Note != "" {
+			fmt.Printf("    %s [%s in state]\n", e.Note, age(e.InStateSec))
+		}
+	}
+	fmt.Printf("\n%d item(s)\n", len(entries))
+}
+
+// age renders a duration at the precision an operator cares about: seconds
+// while a run is live, days once something has been forgotten.
+func age(sec int64) string {
+	switch {
+	case sec < 90:
+		return fmt.Sprintf("%ds", sec)
+	case sec < 5400:
+		return fmt.Sprintf("%dm", sec/60)
+	case sec < 172800:
+		return fmt.Sprintf("%dh", sec/3600)
+	}
+	return fmt.Sprintf("%dd", sec/86400)
+}
+
 // viaDaemon serves the client-mode subcommands over the daemon API — the
 // same JSON any UX consumes. Review sampling and sign-off stay direct-store
 // for now; they are the operator's own acts and the API grows them when a
@@ -185,6 +244,21 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		}
 		fmt.Printf("tenant=%s box=%s runner=%s stopped=%v pending=%d exceptions=%d up=%ds routes=%v\n",
 			st.Tenant, st.Box, st.Runner, st.Stopped, st.Pending, st.Exceptions, st.UptimeSec, st.Routes)
+	case "queue":
+		sub := flag.NewFlagSet("queue", flag.ContinueOnError)
+		state := sub.String("state", "", "comma-separated states (pending, claimed, waiting, parked, done, failed); empty shows all")
+		if err := sub.Parse(rest); err != nil {
+			return err
+		}
+		var states []string
+		if *state != "" {
+			states = append(states, *state)
+		}
+		entries, err := c.Items(ctx, states...)
+		if err != nil {
+			return err
+		}
+		printQueue(entries)
 	case "exceptions":
 		items, err := c.Exceptions(ctx)
 		if err != nil {

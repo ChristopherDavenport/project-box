@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/authz"
@@ -66,14 +67,52 @@ type Loop struct {
 	// — configure it; see OpenRepair.
 	Red func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error)
 	TTL time.Duration
+	// BuildTimeout bounds one build. Zero means [DefaultBuildTimeout]; a
+	// negative value means no bound, which an operator may choose.
+	//
+	// Nothing bounded an agent session before: the lease TTL does not, because
+	// Checkout renews it and no one kills the process when it lapses. An agent
+	// that hangs or loops ran until the daemon stopped, spending the whole
+	// time. A clock is the difference between a runaway costing a bounded
+	// amount and costing whatever it likes.
+	BuildTimeout time.Duration
 }
+
+// DefaultBuildTimeout bounds a build when the Box states none. Long enough
+// for real work, short enough that a wedged session is an incident tonight
+// rather than an invoice next month.
+const DefaultBuildTimeout = 30 * time.Minute
+
+// MaxRepairDepth bounds how far the factory will chase its own tail when no
+// depth is configured: a repair, a repair of that, a repair of that.
+const MaxRepairDepth = 3
 
 // OpenRepair wires Red to an ingress route: the red commit's sha is the
 // delivery key, so however many post-land checks report the same red, one
 // repair item exists.
-func OpenRepair(router *ingress.StoreRouter, route ingress.Route) func(context.Context, queue.WorkItem, forge.Commit, string) (string, error) {
-	return func(ctx context.Context, _ queue.WorkItem, head forge.Commit, reason string) (string, error) {
-		ing, _, err := router.Open(ctx, route, ingress.Delivery{Key: "red-" + string(head), Payload: []byte(reason)})
+//
+// maxDepth bounds the CHAIN, which sha-keyed idempotency cannot. One repair
+// per red sha is not a bound when each repair produces a new sha that can
+// itself be red: an optimistic lane over a genuinely broken tree will open
+// repair after repair, each one a real agent session, and the only thing
+// standing in front of that is the budget. Zero uses [MaxRepairDepth];
+// negative means no bound, which is a decision an operator can make and the
+// factory will not make for them.
+func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) func(context.Context, queue.WorkItem, forge.Commit, string) (string, error) {
+	if maxDepth == 0 {
+		maxDepth = MaxRepairDepth
+	}
+	return func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error) {
+		if maxDepth > 0 && item.Depth >= maxDepth {
+			// Deep enough. The red is on the check chain either way, so
+			// promotion will not take the commit; what stops here is the
+			// factory summoning itself again.
+			return "", fmt.Errorf("repair chain reached depth %d without going green — stopping rather than opening another: %s",
+				item.Depth, reason)
+		}
+		ing, _, err := router.Open(ctx, route, ingress.Delivery{
+			Key: "red-" + string(head), Payload: []byte(reason), Depth: item.Depth + 1,
+		})
 		if err != nil {
 			return "", err
 		}
@@ -85,16 +124,75 @@ func OpenRepair(router *ingress.StoreRouter, route ingress.Route) func(context.C
 // what keeps "why does this change exist" answerable from the other end.
 func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 	return queue.WorkItem{ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID,
-		Requester: ing.Requester, Repo: ing.Repo, Task: task}
+		Requester: ing.Requester, Repo: ing.Repo, Task: task, Depth: ing.Depth}
+}
+
+// Poll asks whether a held item's outstanding gate has answered yet, and
+// writes nothing whatsoever: no claim, no lease, no evidence. It reports
+// whether anything has changed, so the pump can leave a still-waiting item
+// entirely alone.
+//
+// A check is not a transition. An item waiting on a person is re-drained
+// every tick for as long as the review takes, and running it through Run to
+// learn "still pending" costs a claim record, an authorization record, a
+// resume record, a gate verdict and a waiting record — five or more, every
+// fifteen seconds, for days. That is a chain that says nothing happened, at
+// length, and then has to be compacted away (issue #3). The review is held;
+// asking after it should leave no mark.
+//
+// Anything it cannot answer cleanly reports changed, so the doubt is resolved
+// by the real path rather than by a shortcut that decided to skip.
+func (l *Loop) Poll(ctx context.Context, item queue.WorkItem) bool {
+	if item.State != queue.StateWaiting || item.Built == "" {
+		return true // nothing is being held; this is not our question
+	}
+	ws, ok := l.Mirror.HeldWorkspace(item.ID, l.Repo.Name, forge.Commit(item.BuiltBase))
+	if !ok {
+		return true // the tree is gone; Run decides whether to adopt or rebuild
+	}
+	cs := forge.ChangeSet{
+		ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
+		Intent: item.Task,
+		Members: []forge.Member{{
+			Repo: l.Repo.Name, Branch: l.Branch,
+			Base: forge.Commit(item.BuiltBase), Head: forge.Commit(item.Built),
+		}},
+	}
+	outstanding := 0
+	for _, g := range l.Gates(ws) {
+		if slices.Contains(item.PassedGates, g.Name()) {
+			continue // carried; it cannot change its mind about this head
+		}
+		outstanding++
+		v, err := g.Evaluate(ctx, cs)
+		if err != nil || v.Decision != forge.DecisionPending {
+			// An answer, or a gate that could not give one. Either way the
+			// held state is over and Run must record what happens next.
+			return true
+		}
+	}
+	// Nothing outstanding means the item is waiting on the branch rather than
+	// on a person, and its turn may have come.
+	return outstanding == 0
 }
 
 // Run drives one item from claim to settled state. The returned item reports
 // where it ended: done, parked, waiting, or failed — an error return means
 // the loop itself broke, not that the change was judged and refused.
-func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, error) {
+func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem, rerr error) {
 	if err := forge.ValidateLane(l.Lane, l.Repo.Role); err != nil {
 		return item, err
 	}
+	// The workspace outlives the lease for exactly as long as the resume point
+	// does: held while the item waits with a commit to come back to, handed
+	// back to Prune the moment it settles or gives that commit up.
+	defer func() {
+		if out.State == queue.StateWaiting && out.Built != "" {
+			l.Mirror.Hold(item.ID, l.Repo.Name)
+			return
+		}
+		l.Mirror.Discard(item.ID, l.Repo.Name)
+	}()
 	q := &queue.Queue{Store: l.Store, Runner: l.Runner, TTL: l.TTL}
 	item, claim, err := q.Claim(ctx, item)
 	if err != nil {
@@ -109,14 +207,24 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 
 	leaser := l.Store.Leaser(l.Runner)
 	ref := "refs/heads/" + l.Branch
-	repoLease, err := leaser.Acquire(ctx, forge.LeaseRequest{
-		Tenant: item.Tenant, Repo: l.Repo.Name, Ref: ref, Run: item.ID, TTL: l.TTL,
+	// The workspace's lease, not the branch's. A build is a whole agent
+	// session, so holding the branch across it serialized every unit of work
+	// on a repo even when the changes could not possibly collide: a budget of
+	// three concurrent runs produced exactly one, because the meter allowed
+	// three and the lease admitted one (issue #18). The branch is taken later,
+	// for the length of a landing rather than the length of a session.
+	//
+	// This lease is no less real. It is the authority the workspace exists
+	// under, the claim Checkout renews, and what lets Prune reap the trees of
+	// a runner that died. It is keyed by run, so nothing contends for it —
+	// which is the point: it protects a tree, and trees were never shared.
+	wsLease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+		Tenant: item.Tenant, Repo: l.Repo.Name, Ref: "run/" + item.ID, Run: item.ID, TTL: l.TTL,
 	})
 	if err != nil {
-		// The branch is busy: not an exception, just not our turn.
-		return q.Wait(ctx, item, claim, fmt.Sprintf("branch %s is leased: %v", l.Branch, err))
+		return q.Wait(ctx, item, claim, fmt.Sprintf("workspace for %s is leased: %v", item.ID, err))
 	}
-	defer leaser.Release(ctx, repoLease)
+	defer leaser.Release(ctx, wsLease)
 
 	if err := l.Mirror.Fetch(ctx, l.Repo); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
@@ -125,53 +233,128 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	if err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	}
-	ws, err := l.Mirror.Checkout(ctx, repoLease, base)
-	if err != nil {
-		return q.Fail(ctx, item, claim, err.Error())
-	}
-
+	// A resume point from an earlier attempt: this item already built a commit
+	// and is back because a gate could not answer yet, or because it lost a
+	// landing race. Rebuilding would buy the same change for the price of
+	// another agent run — the most expensive thing the factory does.
+	var ws forge.Workspace
 	var head forge.Commit
-	if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
-		var err error
-		head, err = l.Builder.Build(ctx, ws, item.Task)
-		if err == nil {
-			l.record(ctx, item, "built", string(head), "")
+	resumed := false
+	if item.Built != "" {
+		adopted, ok, aerr := l.Mirror.Adopt(ctx, wsLease, forge.Commit(item.Built), base)
+		if aerr != nil {
+			return q.Fail(ctx, item, claim, aerr.Error())
 		}
-		return err
-	}); serr != nil {
-		var esc *Escalation
-		if errors.As(serr, &esc) {
-			// The agent's own act, attributed to the agent: actor is the
-			// seat, not the runner that hosted it.
-			l.Store.Log().Append(ctx, evidence.Record{
-				Tenant: item.Tenant, Scope: "workitem/" + item.ID,
-				Kind: "escalated", Subject: item.ID, Actor: esc.Seat,
-				OnBehalfOf: item.Requester, Body: []byte(esc.Reason),
-				Trace: telemetry.TraceID(ctx),
-			})
-			item, _ = q.Park(ctx, item, claim, esc.Error())
+		switch {
+		case !ok:
+			// No tree to take — a reclaimed disk, another runner. Build again:
+			// rebuilding is always sound and reusing is not.
+		case item.BuiltBase == string(base):
+			ws, head, resumed = adopted, forge.Commit(item.Built), true
+			// On the record, so the chain shows one commit judged twice rather
+			// than two builds that happened to agree.
+			l.record(ctx, item, "build-resumed", string(head),
+				fmt.Sprintf(`{"base":%q,"waiting_on":%q}`, base, item.Note))
+		default:
+			// The branch moved while this change waited or lost its turn to
+			// land. Replay rather than rebuild: the commit already exists, and
+			// buying it a second time from an agent is exactly the cost that
+			// makes concurrency on one branch not worth having. The gates run
+			// again below, on the replayed content, which is what makes
+			// reusing the commit safe rather than merely cheap.
+			replayed, rerr := git.Rebase(ctx, adopted.Dir, base, forge.Commit(item.BuiltBase))
+			if rerr == nil {
+				ws, head, resumed = adopted, replayed, true
+				l.record(ctx, item, "build-rebased", string(replayed),
+					fmt.Sprintf(`{"was":%q,"from":%q,"onto":%q}`, item.Built, item.BuiltBase, base))
+			} else {
+				// A conflict is a judgement call, and the agent is the one
+				// who makes those. Recorded, then built afresh.
+				l.record(ctx, item, "rebase-refused", item.Built,
+					fmt.Sprintf(`{"onto":%q,"reason":%q}`, base, rerr.Error()))
+			}
+		}
+	}
+	if !resumed {
+		ws, err = l.Mirror.Checkout(ctx, wsLease, base)
+		if err != nil {
+			return q.Fail(ctx, item, claim, err.Error())
+		}
+		if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
+			bctx, cancelBuild := l.buildDeadline(ctx)
+			defer cancelBuild()
+			var berr error
+			head, berr = l.Builder.Build(bctx, ws, item.Task)
+			if berr == nil {
+				l.record(ctx, item, "built", string(head), "")
+			} else if bctx.Err() != nil && ctx.Err() == nil {
+				// The clock ran out, not the caller. Say so plainly: "context
+				// deadline exceeded" on a parked item tells nobody which
+				// deadline or how long it was.
+				berr = fmt.Errorf("build exceeded its %s budget and was stopped: %w", l.buildTimeout(), berr)
+			}
+			return berr
+		}); serr != nil {
+			var esc *Escalation
+			if errors.As(serr, &esc) {
+				// The agent's own act, attributed to the agent: actor is the
+				// seat, not the runner that hosted it.
+				l.Store.Log().Append(ctx, evidence.Record{
+					Tenant: item.Tenant, Scope: "workitem/" + item.ID,
+					Kind: "escalated", Subject: item.ID, Actor: esc.Seat,
+					OnBehalfOf: item.Requester, Body: []byte(esc.Reason),
+					Trace: telemetry.TraceID(ctx),
+				})
+				item, _ = q.Park(ctx, item, claim, esc.Error())
+				return l.settle(ctx, item), nil
+			}
+			item, _ = q.Park(ctx, item, claim, "build: "+serr.Error())
 			return l.settle(ctx, item), nil
 		}
-		item, _ = q.Park(ctx, item, claim, "build: "+serr.Error())
-		return l.settle(ctx, item), nil
 	}
 
+	// The gating ChangeSet carries no lease: the branch is not ours yet, and
+	// gates judge content rather than authority. The land window fills it in.
 	cs := forge.ChangeSet{
 		ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
 		Intent: item.Task,
 		Members: []forge.Member{{
-			Repo: l.Repo.Name, Branch: l.Branch, Base: base, Head: head, Lease: repoLease,
+			Repo: l.Repo.Name, Branch: l.Branch, Base: base, Head: head,
 		}},
 	}
 
 	if l.Lane == forge.LaneOptimistic {
-		return l.runOptimistic(ctx, q, item, claim, ws, cs, head)
+		return l.runOptimistic(ctx, q, item, claim, ws, cs, base, head)
 	}
 
+	// Gates already satisfied on THIS head are carried, not re-run. An item
+	// waiting on a person is re-drained every tick for as long as the review
+	// takes, and re-running the whole suite each time is how a worker that is
+	// doing nothing keeps a machine busy: the deterministic shells — the
+	// build, the test run — cannot change their mind about a commit that has
+	// not moved. The gate whose answer CAN change is the human one, and it is
+	// a store read. Any change of head clears the carry, because replayed or
+	// rebuilt content is a different question.
+	carried := item.PassedGates
+	if string(head) != item.Built {
+		carried = nil
+	}
 	var verdicts []forge.Verdict
+	var passedNow []string
 	var gateInfra error
 	gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
 		for _, g := range l.Gates(ws) {
+			if slices.Contains(carried, g.Name()) {
+				// No new evidence: the gate ran once on this content and its
+				// verdict is already on the chain. Recording it again would
+				// be minting a judgement nobody made.
+				verdicts = append(verdicts, forge.Verdict{
+					Gate: g.Name(), Decision: forge.DecisionPass,
+					Reason: "passed on " + short(head) + ", carried while the head stands",
+				})
+				passedNow = append(passedNow, g.Name())
+				continue
+			}
 			v, err := g.Evaluate(ctx, cs)
 			if err != nil {
 				// Infrastructure trouble is never recorded as a rejected change.
@@ -180,6 +363,9 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 			}
 			body, _ := json.Marshal(v)
 			l.record(ctx, item, "gate", string(head), string(body))
+			if v.Decision == forge.DecisionPass {
+				passedNow = append(passedNow, g.Name())
+			}
 			verdicts = append(verdicts, v)
 		}
 		if forge.Resolve(verdicts) == forge.DecisionFail {
@@ -195,6 +381,12 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	case forge.DecisionFail:
 		return q.Park(ctx, item, claim, reasons(verdicts))
 	case forge.DecisionPending:
+		// Carry the commit forward so the next tick re-enters at the gate
+		// rather than at the builder, and the satisfied gates with it so it
+		// re-enters at the ONE gate that has not answered. Waiting on a
+		// person is routine and can last days; it must cost neither an agent
+		// run nor a test suite per tick to do it.
+		item.Built, item.BuiltBase, item.PassedGates = string(head), string(base), passedNow
 		return q.Wait(ctx, item, claim, reasons(verdicts))
 	}
 
@@ -203,6 +395,19 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	} else if deny != "" {
 		return q.Park(ctx, item, claim, deny)
 	}
+	landLease, notOurTurn, err := l.openLandWindow(ctx, item, base)
+	if err != nil {
+		return q.Fail(ctx, item, claim, err.Error())
+	}
+	if notOurTurn != "" {
+		// The gates passed on this head; if the branch was merely busy, next
+		// tick lands without re-running them. If it moved, the replay changes
+		// the head and the carry drops itself.
+		item.Built, item.BuiltBase, item.PassedGates = string(head), string(base), passedNow
+		return q.Wait(ctx, item, claim, notOurTurn)
+	}
+	defer leaser.Release(ctx, landLease)
+	cs.Members[0].Lease = landLease
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
 		_, err := git.NewLander(l.Mirror, l.Store.Log()).Land(ctx, cs)
 		if err == nil {
@@ -220,17 +425,92 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (queue.WorkItem, er
 	return l.settle(ctx, item), err
 }
 
+// openLandWindow takes the branch for the length of a landing and confirms it
+// still stands where this change was built. An empty reason means the window
+// is open and the caller owns the lease until it releases it.
+//
+// This is the only part of a run that holds the branch. Fetch, checkout, the
+// build, and in the gated lane the gates too, all run leaseless — narrowing
+// the region the lease covers, never widening what may pass through it. The
+// landing is fenced exactly as before: the leaser judges the token and the
+// push presents the expected old value.
+//
+// A busy branch, or one that moved while we were building, is "not our turn"
+// rather than anyone's problem. The caller waits with its commit kept as a
+// resume point, and next tick replays it onto the new base for the price of a
+// git operation and a gate run instead of another agent session.
+func (l *Loop) openLandWindow(ctx context.Context, item queue.WorkItem, base forge.Commit) (forge.Lease, string, error) {
+	leaser := l.Store.Leaser(l.Runner)
+	ref := "refs/heads/" + l.Branch
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+		Tenant: item.Tenant, Repo: l.Repo.Name, Ref: ref, Run: item.ID, TTL: l.TTL,
+	})
+	if err != nil {
+		return forge.Lease{}, fmt.Sprintf("branch %s is landing another change: %v", l.Branch, err), nil
+	}
+	// The mirror's own ref does not move when the lander pushes, so it has to
+	// be asked again before it can be trusted as the expected old value.
+	if err := l.Mirror.Fetch(ctx, l.Repo); err != nil {
+		leaser.Release(ctx, lease)
+		return forge.Lease{}, "", err
+	}
+	now, err := l.Mirror.Resolve(ctx, l.Repo, ref)
+	if err != nil {
+		leaser.Release(ctx, lease)
+		return forge.Lease{}, "", err
+	}
+	if now != base {
+		leaser.Release(ctx, lease)
+		return forge.Lease{}, fmt.Sprintf("branch %s moved from %s to %s while this change was building",
+			l.Branch, short(base), short(now)), nil
+	}
+	return lease, "", nil
+}
+
+func (l *Loop) buildTimeout() time.Duration {
+	if l.BuildTimeout == 0 {
+		return DefaultBuildTimeout
+	}
+	return l.BuildTimeout
+}
+
+// buildDeadline bounds one build, unless the Box asked for no bound.
+func (l *Loop) buildDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	d := l.buildTimeout()
+	if d < 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, d)
+}
+
+func short(c forge.Commit) string {
+	if len(c) > 12 {
+		return string(c[:12])
+	}
+	return string(c)
+}
+
 // runOptimistic is land-then-check: the lease and the expected-old-value
 // check guard the landing exactly as in the gated lane — fencing is never
 // optimistic — and the gates run afterwards as checks on the branch. A red
 // check is re-run once before repair work opens — confirm the red before
 // summoning anyone; nothing rolls back by itself.
-func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, ws forge.Workspace, cs forge.ChangeSet, head forge.Commit) (queue.WorkItem, error) {
+func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, ws forge.Workspace, cs forge.ChangeSet, base, head forge.Commit) (queue.WorkItem, error) {
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	} else if deny != "" {
 		return q.Park(ctx, item, claim, deny)
 	}
+	landLease, notOurTurn, err := l.openLandWindow(ctx, item, base)
+	if err != nil {
+		return q.Fail(ctx, item, claim, err.Error())
+	}
+	if notOurTurn != "" {
+		item.Built, item.BuiltBase = string(head), string(base)
+		return q.Wait(ctx, item, claim, notOurTurn)
+	}
+	defer l.Store.Leaser(l.Runner).Release(ctx, landLease)
+	cs.Members[0].Lease = landLease
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
 		_, err := git.NewLander(l.Mirror, l.Store.Log()).Land(ctx, cs)
 		return err

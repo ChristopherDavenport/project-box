@@ -106,12 +106,14 @@ func New(path string) (*Daemon, error) {
 		return nil, err
 	}
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: cfg.Budget.MaxConcurrent,
-		MaxPerWindow: cfg.Budget.MaxPerWindow, Window: cfg.WindowDuration()})
+		MaxPerWindow:       cfg.Budget.MaxPerWindow,
+		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
+		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration()})
 	d.pump = &pump.Pump{Store: s, Tenant: t, Runner: cfg.Runner, Queue: d.queue, Meter: d.meter, Loops: loops}
 	d.API = &api.Server{
 		Store: s, Tenant: t, Routes: routes,
 		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner},
-		Queue:  d.queue, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
+		Queue:  d.queue, Meter: d.meter, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
 		Started: time.Now(),
 		Reload:  d.reloadForAPI,
 	}
@@ -131,10 +133,10 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 	routes := map[string]ingress.Route{}
 	for _, bx := range cfg.Boxes {
 		var agentBuilder *acp.Builder
-		if bx.Agent != "" {
+		if len(bx.Agent) > 0 {
 			agentBuilder = &acp.Builder{
 				Store: d.store, Tenant: d.tenant, Box: bx.Name,
-				Command: []string{bx.Agent},
+				Command: bx.Agent,
 				Composer: &agent.Composer{Source: agent.StaticLayers{{
 					Name: "builder", Scope: agent.ScopeRole,
 					Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},
@@ -143,6 +145,11 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				}}},
 				Seat:   &seat.Seat{Name: bx.Seat, Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
 				Mirror: d.mirror,
+				// The stream is the only place the cost is visible, so it is
+				// the adapter that charges the meter.
+				Spend: func(ctx context.Context, run string, u acp.Usage) {
+					d.meter.Charge(ctx, run, u.Total(), u.Reported)
+				},
 			}
 		}
 		for _, r := range bx.Repos {
@@ -158,7 +165,8 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					return []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
 						Commands: [][]string{{"sh", "-c", check}}}}
 				},
-				TTL: 30 * time.Minute,
+				TTL:          30 * time.Minute,
+				BuildTimeout: cfg.BuildTimeoutDuration(),
 			}
 			if agentBuilder != nil {
 				lp.Builder, lp.Handoff = agentBuilder, agentBuilder.Handoff
@@ -203,7 +211,9 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 	d.pump.SetLoops(loops)
 	d.API.SetRoutes(routes)
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
-		MaxPerWindow: ncfg.Budget.MaxPerWindow, Window: ncfg.WindowDuration()})
+		MaxPerWindow:       ncfg.Budget.MaxPerWindow,
+		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow,
+		AllowUnmetered:     ncfg.Budget.AllowUnmetered, Window: ncfg.WindowDuration()})
 	d.mu.Lock()
 	d.cfg = ncfg
 	d.every = ncfg.EveryDuration()

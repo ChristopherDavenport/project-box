@@ -1,7 +1,101 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { Task } from '@lit/task';
-import { getStatus, getExceptions, getItem, getItemEvidence, getProvenance, openIngress } from './api.js';
+import { getStatus, getItems, getExceptions, getItem, getItemEvidence, getProvenance, openIngress } from './api.js';
 import { ActivityController } from './sse.js';
+
+/** age renders a duration at the precision an operator cares about. */
+export function age(sec) {
+  if (sec == null) return '';
+  if (sec < 90) return `${sec}s`;
+  if (sec < 5400) return `${Math.floor(sec / 60)}m`;
+  if (sec < 172800) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86400)}d`;
+}
+
+/**
+ * describe renders a record's body as the one line a watcher wants.
+ *
+ * Bodies arrive base64-encoded — the chain endpoint serves raw evidence
+ * records and Go marshals `[]byte` that way — and are JSON for structured
+ * records, prose for reasons and notes. Anything unreadable falls back to the
+ * subject rather than showing the operator an encoded blob.
+ */
+export function describe(r) {
+  let body = '';
+  try { body = atob(r.Body ?? ''); } catch { return r.Subject ?? ''; }
+  if (!body) return r.Subject ?? '';
+  let o = null;
+  try { o = JSON.parse(body); } catch { /* prose, not JSON */ }
+  if (o && typeof o === 'object') {
+    switch (r.Kind) {
+      case 'gate':
+        return `${o.Gate}: ${o.Decision}${o.Reason ? ' — ' + firstLine(o.Reason) : ''}`;
+      case 'agent-run':
+        return `${o.seat} as ${o.role}, mode ${o.mode}`;
+      case 'agent-result': {
+        const bits = [`${o.stop}`, `${Math.round((o.wall_ms ?? 0) / 100) / 10}s`];
+        // Unmetered is the fact worth seeing: an unreported cost is not a
+        // zero cost, and it halts the window.
+        bits.push(o.metered ? `${fmtTokens(o.tokens)} tokens` : 'cost NOT reported');
+        // The agent's own figure in money, when it gave one. Tokens are the
+        // brake; dollars are what the invoice is actually denominated in.
+        if (o.cost_usd) bits.push(`$${o.cost_usd.toFixed(4)}`);
+        // Which tools, not how many — a count cannot tell an ordinary run
+        // from a runaway, because both are a number.
+        bits.push(o.tools ? tools(o.tools) : `${o.tool_calls} tools`);
+        if (o.denied_tools) bits.push(`DENIED ${tools(o.denied_tools)}`);
+        if (o.unknown_updates?.length) bits.push(`dialect drift: ${o.unknown_updates.join(', ')}`);
+        return bits.join(' · ');
+      }
+      case 'authz':
+        return o.reason ?? '';
+      default:
+        return firstLine(body);
+    }
+  }
+  return firstLine(body);
+}
+
+function firstLine(s) {
+  const i = String(s).indexOf('\n');
+  return i < 0 ? String(s) : String(s).slice(0, i);
+}
+
+/** A tool tally as one line, busiest first — the runaway signature is a name
+ *  with a big number next to it. */
+function tools(t) {
+  return Object.entries(t)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, n]) => (n > 1 ? `${name}×${n}` : name))
+    .join(' ');
+}
+
+/** Tokens at a glance: an operator reads 1.2M, not 1203481. */
+export function fmtTokens(n) {
+  if (n == null) return '0';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${Math.round(n / 100) / 10}k`;
+  return `${Math.round(n / 100_000) / 10}M`;
+}
+
+/** Where a unit came from, as one readable string. */
+function origin(e) {
+  if (e.route) return e.key ? `${e.route}/${e.key}` : e.route;
+  return e.ingress ?? '';
+}
+
+// The states an operator sorts work into. `live` is the default because the
+// question the room exists to answer is what is happening now, not what has
+// ever happened.
+const FILTERS = {
+  live: ['pending', 'claimed', 'waiting'],
+  pending: ['pending'],
+  claimed: ['claimed'],
+  waiting: ['waiting'],
+  parked: ['parked'],
+  done: ['done'],
+  all: [],
+};
 
 const KIND_APPEARANCE = {
   'ingress-open': 'neutral', queued: 'neutral', claimed: 'neutral',
@@ -21,13 +115,28 @@ export class BoxDashboard extends LitElement {
     .stat .l { color: var(--jh-color-content-secondary-enabled); font-size: .8rem; }
     .feed { max-height: 420px; overflow-y: auto; }
     .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); }
+    .idle { color: var(--jh-color-content-secondary-enabled); }
   `;
 
   _status = new Task(this, {
     task: async (_, { signal }) => getStatus(signal),
     args: () => [],
   });
-  _activity = new ActivityController(this);
+  _running = new Task(this, {
+    task: async (_, { signal }) => getItems(FILTERS.live, signal),
+    args: () => [],
+  });
+  _activity = new ActivityController(this, { onEvent: () => this._refresh() });
+
+  _refresh() {
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => { this._status.run(); this._running.run(); }, 400);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    clearTimeout(this._timer);
+  }
 
   render() {
     return html`
@@ -40,8 +149,52 @@ export class BoxDashboard extends LitElement {
               <div class="stat"><div class="n">${s.pending}</div><div class="l">pending</div></div>
               <div class="stat"><div class="n">${s.exceptions}</div><div class="l">exceptions</div></div>
               <div class="stat"><div class="n">${s.stopped ? 'stopped' : 'running'}</div><div class="l">claims</div></div>
+              ${s.spend ? html`
+                <div class="stat">
+                  <div class="n">${fmtTokens(s.spend.tokens)}</div>
+                  <div class="l">tokens${s.spend.max_tokens ? ` of ${fmtTokens(s.spend.max_tokens)}` : ''}</div>
+                </div>
+                <div class="stat">
+                  <div class="n">${s.spend.running}/${s.spend.max_concurrent}</div>
+                  <div class="l">running</div>
+                </div>` : nothing}
               <div class="stat"><div class="n">${s.routes.length}</div><div class="l">routes</div></div>
-            </div>`,
+            </div>
+            ${/* The total alone is a lie whenever this number is not zero, so
+                 it is never shown on its own. */ ''}
+            ${s.spend?.unmetered
+              ? html`<jh-notification appearance="negative" type="banner" hide-dismiss-button>
+                  ${s.spend.unmetered} run(s) this window did not report a cost — the spend above is
+                  incomplete and claims are stopped until the window turns.
+                </jh-notification>`
+              : nothing}
+            ${s.spend?.refusing && !s.spend.unmetered
+              ? html`<jh-notification appearance="neutral" type="banner" hide-dismiss-button>
+                  The meter is pacing work: the factory is idle because it is over budget, not because
+                  there is nothing to do.
+                </jh-notification>`
+              : nothing}`,
+        })}
+      </jh-card>
+      <jh-card header-title="In flight" header-subtitle="What the factory is doing right now, unit by unit" padding="medium">
+        ${this._running.render({
+          pending: () => html`<jh-progress accessible-label="Loading in-flight work"></jh-progress>`,
+          error: (e) => html`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${e.message}</jh-notification>`,
+          complete: (items) => (items?.length ?? 0) === 0
+            ? html`<p class="idle">Nothing in flight.</p>`
+            : html`<jh-list-group accessible-label="In-flight work">
+                ${items.map((e) => html`
+                  <jh-list-item
+                    primary-text=${e.task || e.id}
+                    secondary-text=${e.note || origin(e)}
+                    primary-metadata=${e.stage ?? ''}
+                    secondary-metadata=${age(e.in_state_sec) + ' in stage'}
+                    show-divider>
+                    <jh-tag slot="jh-list-item-left" size="small" label=${e.state}></jh-tag>
+                    <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
+                      label="Open" href=${'/items/' + e.id}></jh-button>
+                  </jh-list-item>`)}
+              </jh-list-group>`,
         })}
       </jh-card>
       <jh-card header-title="Activity" header-subtitle="Everything the factory does, as it does it" padding="medium">
@@ -63,6 +216,93 @@ export class BoxDashboard extends LitElement {
   }
 }
 customElements.define('box-dashboard', BoxDashboard);
+
+/**
+ * Work: every unit and why it is where it is.
+ *
+ * The room could show what was stuck and what had landed, and nothing in
+ * between — `pending=14` was the whole view into the queue. The notes were
+ * always written ("branch main is leased", a gate's reasons) and never shown.
+ */
+export class BoxWork extends LitElement {
+  static styles = css`
+    :host { display: block; }
+    .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+    .filters button {
+      font: inherit; font-size: .8rem; cursor: pointer; padding: 4px 10px; border-radius: 999px;
+      border: 1px solid var(--jh-color-border-primary-enabled, #ccc);
+      background: transparent; color: var(--jh-color-content-primary-enabled);
+    }
+    .filters button[aria-pressed="true"] {
+      background: var(--jh-color-container-secondary-enabled); font-weight: 600;
+    }
+    .note { white-space: pre-wrap; font-size: .8rem; color: var(--jh-color-content-secondary-enabled); }
+    .blocked { font-size: .8rem; color: var(--jh-color-content-secondary-enabled); }
+    .empty { color: var(--jh-color-content-secondary-enabled); }
+    .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); margin-bottom: 8px; }
+  `;
+  static properties = { _filter: { state: true } };
+
+  constructor() {
+    super();
+    this._filter = 'live';
+    this._activity = new ActivityController(this, { limit: 1, onEvent: () => this._refresh() });
+  }
+
+  _task = new Task(this, {
+    task: async ([f], { signal }) => getItems(FILTERS[f], signal),
+    args: () => [this._filter],
+  });
+
+  // The feed is chatty and the fold is cheap; coalesce a burst into one fetch.
+  _refresh() {
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => this._task.run(), 400);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    clearTimeout(this._timer);
+  }
+
+  render() {
+    return html`
+      <jh-card header-title="Work" header-subtitle="Every unit, and why it is where it is" padding="medium">
+        <div class="filters" role="group" aria-label="Filter by state">
+          ${Object.keys(FILTERS).map((f) => html`
+            <button type="button" aria-pressed=${this._filter === f ? 'true' : 'false'}
+              @click=${() => { this._filter = f; }}>${f}</button>`)}
+        </div>
+        <div class="live">${this._activity.connected ? 'live' : 'reconnecting…'}</div>
+        ${this._task.render({
+          pending: () => html`<jh-progress accessible-label="Loading work"></jh-progress>`,
+          error: (e) => html`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${e.message}</jh-notification>`,
+          complete: (items) => (items?.length ?? 0) === 0
+            ? html`<p class="empty">Nothing in this state.</p>`
+            : html`<jh-list-group accessible-label="Work items">
+                ${items.map((e) => html`
+                  <jh-list-item
+                    primary-text=${e.task || e.id}
+                    secondary-text=${origin(e)}
+                    primary-metadata=${age(e.age_sec)}
+                    secondary-metadata=${e.stage ? `${e.stage} · ${age(e.in_state_sec)}` : ''}
+                    show-divider>
+                    <jh-tag slot="jh-list-item-left" size="small" label=${e.state}></jh-tag>
+                    <div slot="jh-list-item-content">
+                      ${e.note ? html`<div class="note">${e.note}</div>` : nothing}
+                      ${e.blocked_by?.length
+                        ? html`<div class="blocked">blocked by ${e.blocked_by.join(', ')}</div>`
+                        : nothing}
+                    </div>
+                    <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
+                      label="Open" href=${'/items/' + e.id}></jh-button>
+                  </jh-list-item>`)}
+              </jh-list-group>`,
+        })}
+      </jh-card>`;
+  }
+}
+customElements.define('box-work', BoxWork);
 
 /** Exceptions: what still needs a person. */
 export class BoxExceptions extends LitElement {
@@ -98,7 +338,19 @@ export class BoxItem extends LitElement {
     :host { display: grid; gap: 16px; }
     pre { white-space: pre-wrap; word-break: break-all; font-size: .8rem;
           background: var(--jh-color-container-secondary-enabled); padding: 8px; border-radius: 6px; }
+    .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); margin-bottom: 8px; }
   `;
+  constructor() {
+    super();
+    // A run's own records — the agent starting, each gate verdict, an
+    // escalation and its reason — now reach the feed, so this page follows a
+    // unit as it works instead of being a snapshot you reload.
+    this._activity = new ActivityController(this, {
+      limit: 1,
+      onEvent: (a) => { if (a.scope === `workitem/${this.itemId}`) this._refresh(); },
+    });
+  }
+
   _task = new Task(this, {
     task: async ([id], { signal }) => {
       const [item, evidence] = await Promise.all([getItem(id, signal), getItemEvidence(id, signal)]);
@@ -106,6 +358,16 @@ export class BoxItem extends LitElement {
     },
     args: () => [this.itemId],
   });
+
+  _refresh() {
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => this._task.run(), 400);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    clearTimeout(this._timer);
+  }
 
   render() {
     return this._task.render({
@@ -117,11 +379,16 @@ export class BoxItem extends LitElement {
              ${item.head ? html` <a href=${'/provenance/' + item.head}><code>${item.head.slice(0, 12)}</code></a>` : nothing}</p>
           ${item.note ? html`<pre>${item.note}</pre>` : nothing}
         </jh-card>
-        <jh-card header-title="Evidence" header-subtitle="The item's chain, in order" padding="medium">
-          <jh-list-group accessible-label="Evidence records">
+        <jh-card header-title="Timeline" header-subtitle="What this run did, in order" padding="medium">
+          <div class="live">${this._activity.connected ? 'live' : 'reconnecting…'}</div>
+          <jh-list-group accessible-label="Run timeline">
             ${(evidence ?? []).map((r) => html`
-              <jh-list-item primary-text=${r.Kind} secondary-text=${r.Subject}
-                primary-metadata=${'seq ' + r.Seq} secondary-metadata=${r.Actor} show-divider></jh-list-item>`)}
+              <jh-list-item
+                primary-text=${r.Kind}
+                secondary-text=${describe(r)}
+                primary-metadata=${r.At ? new Date(r.At).toLocaleTimeString() : ''}
+                secondary-metadata=${r.Actor}
+                show-divider></jh-list-item>`)}
           </jh-list-group>
         </jh-card>`,
     });

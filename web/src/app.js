@@ -45,6 +45,7 @@ export class BoxApp extends LitElement {
 
   _router = new Router(this, [
     { path: '/', render: () => html`<box-dashboard></box-dashboard>` },
+    { path: '/work', render: () => html`<box-work></box-work>` },
     { path: '/exceptions', render: () => html`<box-exceptions></box-exceptions>` },
     { path: '/items/:id', render: ({ id }) => html`<box-item .itemId=${id}></box-item>` },
     { path: '/provenance/:sha', render: ({ sha }) => html`<box-provenance .sha=${sha}></box-provenance>` },
@@ -74,6 +75,7 @@ export class BoxApp extends LitElement {
         <h1>Box Control Room</h1>
         <nav>
           <a href="/" class=${this._active('/')}>Dashboard</a>
+          <a href="/work" class=${this._active('/work')}>Work</a>
           <a href="/exceptions" class=${this._active('/exceptions')}>Exceptions</a>
           <a href="/submit" class=${this._active('/submit')}>Submit</a>
         </nav>

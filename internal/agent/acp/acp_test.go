@@ -108,6 +108,117 @@ func TestEscalationIsARecordedAct(t *testing.T) {
 	}
 }
 
+// TestUsageIsCarriedFromTheTurn: the turn's own total is the account, and it
+// is what the capacity meter charges. Cache reads count — cheaper, never free.
+func TestUsageIsCarriedFromTheTurn(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "metered").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !res.Usage.Reported {
+		t.Fatal("a reported cost read as unreported")
+	}
+	if got := res.Usage.Total(); got != 11000 {
+		t.Fatalf("total tokens %d, want 11000 (1200+300+9000+500)", got)
+	}
+	// The cache figures are the point. Reading only input+output would give
+	// 1500 here and look entirely plausible.
+	if res.Usage.CachedReadTokens != 9000 || res.Usage.CachedWriteTokens != 500 {
+		t.Fatalf("cache counters lost to a field-name mismatch: %+v", res.Usage)
+	}
+	if res.Usage.CostUSD != 0.0432 {
+		t.Fatalf("the turn's cost in money was dropped: %+v", res.Usage)
+	}
+	if slices.Contains(res.UnknownUpdates, "usage_update") {
+		t.Fatal("usage_update read as dialect drift; it is part of the dialect")
+	}
+}
+
+// TestRenamedUsageFieldsAreLoud: a usage object present and parsing to nothing
+// is what a rename looks like from here, and it is indistinguishable from a
+// free turn unless something says so. This is the case that actually bit —
+// the cache counters were spelled with the Anthropic API's names rather than
+// the adapter's, so two of four fields read zero and Reported stayed true.
+func TestRenamedUsageFieldsAreLoud(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "renamed").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !slices.Contains(res.UnknownUpdates, "usage:all-zero") {
+		t.Fatalf("a usage object that parsed to nothing went unremarked: %+v", res)
+	}
+}
+
+// TestUsageAccumulatesFromTheStream: a dialect that reports per update rather
+// than per turn is still metered, and the two are never summed together.
+func TestUsageAccumulatesFromTheStream(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "streamusage").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !res.Usage.Reported || res.Usage.Total() != 300 {
+		t.Fatalf("streamed usage lost: %+v", res.Usage)
+	}
+}
+
+// TestSilenceIsNotZeroSpend is the whole reason Usage carries Reported. An
+// agent that says nothing about cost has not run for free, and a meter that
+// reads unknown as zero is a brake that quietly disengaged.
+func TestSilenceIsNotZeroSpend(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "polite").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.Usage.Reported {
+		t.Fatal("silence was recorded as a cost report")
+	}
+	if res.Usage.Total() != 0 {
+		t.Fatalf("unreported usage invented a total: %+v", res.Usage)
+	}
+}
+
+// TestDialectDriftIsLoud: the last drift zeroed a metric across eight
+// experiment runs and nobody noticed until a human read the column. An
+// unrecognised update kind is now a fact on the result, and a tool call
+// announced in the update spelling is still counted and still judged —
+// the same shapes carry policy, so parsing them is not only bookkeeping.
+func TestDialectDriftIsLoud(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "drift").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !slices.Contains(res.ToolCalls, "Bash") {
+		t.Fatalf("a tool call in the update spelling went uncounted: %+v", res.ToolCalls)
+	}
+	if len(res.ToolCalls) != 1 {
+		t.Fatalf("one call counted more than once: %+v", res.ToolCalls)
+	}
+	if !slices.Contains(res.UnknownUpdates, "reasoning_delta") {
+		t.Fatalf("an unknown update kind was swallowed: %+v", res.UnknownUpdates)
+	}
+}
+
+// TestProtocolDialectIsAsserted: a version we do not speak is refused at
+// initialize, before a session is opened or a token is spent.
+func TestProtocolDialectIsAsserted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := runtimeFor(t, "dialect").Run(ctx, bundle(), "do the work")
+	if !errors.Is(err, ErrProtocolDialect) {
+		t.Fatalf("want ErrProtocolDialect, got %v", err)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && (haystack == needle || len(haystack) > 0 && (func() bool {
 		for i := 0; i+len(needle) <= len(haystack); i++ {
@@ -173,7 +284,11 @@ func fakeAgent(scenario string) {
 		id := m["id"]
 		switch m["method"] {
 		case "initialize":
-			f.write(map[string]any{"id": id, "result": map[string]any{"protocolVersion": 1}})
+			v := 1
+			if scenario == "dialect" {
+				v = 2 // an agent from a protocol this runtime has not read
+			}
+			f.write(map[string]any{"id": id, "result": map[string]any{"protocolVersion": v}})
 		case "session/new":
 			sessionID = "sess-1"
 			f.write(map[string]any{"id": id, "result": map[string]any{"sessionId": sessionID}})
@@ -232,6 +347,70 @@ func fakeAgent(scenario string) {
 					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
 						"content": map[string]any{"type": "text", "text": "All done! (it was not)"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "toolsy":
+				// A day's work with a paper trail: one tool used, one asked
+				// for and refused.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call",
+						"toolCallId": "t-1", "title": "Bash", "kind": "execute"}})
+				f.request("session/request_permission", map[string]any{
+					"sessionId": sessionID,
+					"toolCall":  map[string]any{"toolCallId": "t-2", "title": "DeleteProd", "kind": "execute"},
+					"options": []map[string]any{
+						{"optionId": "yes", "name": "Allow", "kind": "allow_once"},
+						{"optionId": "no", "name": "Reject", "kind": "reject_once"},
+					},
+				})
+				os.WriteFile("widget.go", []byte("package app // built by the fake worker\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "add widget")
+				f.write(map[string]any{"id": id, "result": map[string]any{
+					"stopReason": "end_turn",
+					"usage":      map[string]any{"inputTokens": 10, "outputTokens": 5},
+				}})
+			case "metered":
+				// The real dialect, copied from claude-agent-acp's
+				// sessionUsage() and turnOutcome(): usage on the prompt
+				// response root, plus a usage_update carrying the money.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "usage_update",
+						"used": 11000, "size": 200000,
+						"cost": map[string]any{"amount": 0.0432, "currency": "USD"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{
+					"stopReason": "end_turn",
+					"usage": map[string]any{
+						"inputTokens": 1200, "outputTokens": 300,
+						"cachedReadTokens": 9000, "cachedWriteTokens": 500,
+						"totalTokens": 11000,
+					}}})
+			case "renamed":
+				// The failure this pinning exists to catch: a usage object is
+				// present, and every field in it has been renamed.
+				f.write(map[string]any{"id": id, "result": map[string]any{
+					"stopReason": "end_turn",
+					"usage": map[string]any{
+						"input_tokens": 1200, "output_tokens": 300,
+					}}})
+			case "streamusage":
+				// Cost dribbled out per update instead, under _meta.
+				for range 2 {
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+							"content": map[string]any{"type": "text", "text": "chunk"}},
+						"_meta": map[string]any{"usage": map[string]any{"inputTokens": 100, "outputTokens": 50}},
+					})
+				}
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "drift":
+				// The dialect moved: a tool call announced only in the update
+				// spelling, and a kind this runtime has never heard of.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-9", "title": "Bash", "status": "in_progress"}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "reasoning_delta",
+						"content": map[string]any{"type": "text", "text": "hmm"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "rogue":
 				// Execute a denied tool without asking, then dawdle: only the
 				// client killing us ends this session.
@@ -262,4 +441,28 @@ func lower(s string) string {
 		}
 	}
 	return string(b)
+}
+
+// TestConfiningWrapperGetsTheWorkspace: runner confinement is a wrapper
+// around the agent (issue #6), and every wrapper worth having must be told
+// which directory to let through. The workspace path is chosen per run, so
+// the argv cannot name it — it names a placeholder and the runtime fills it
+// in. A live experiment already caught an agent reading the factory's mirror
+// and a sibling workspace; this is what makes putting something in front of
+// it configurable at all.
+func TestConfiningWrapperGetsTheWorkspace(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rt := runtimeFor(t, "polite")
+	// A stand-in for the confinement: handed the workspace the way
+	// `docker run -v` or sandbox-exec would be, and unable to start if the
+	// placeholder never became a path.
+	rt.Command = []string{"/bin/sh", "-c", `cd "` + WorkspacePlaceholder + `" && exec "$0"`, os.Args[0]}
+	res, err := rt.Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run through a wrapper: %v", err)
+	}
+	if res.StopReason != "end_turn" {
+		t.Fatalf("the wrapped agent did not complete: %q", res.StopReason)
+	}
 }

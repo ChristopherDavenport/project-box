@@ -57,6 +57,10 @@ db: box.db
 root: forge
 listen: unix:boxd.sock
 every: 15s
+budget:
+  max_concurrent: 3
+  max_tokens_per_window: 2000000   # the brake, in the currency of the invoice
+  window: 1h
 boxes:
   - name: shop
     agent: /path/to/claude-agent-acp   # or per-repo `build:` commands
@@ -66,6 +70,25 @@ boxes:
         remote: git@github.com:you/api.git
         check: go test ./...
 ```
+
+`agent:` also takes an argv, which is how a confining wrapper goes in front
+of the agent — `{{workspace}}` becomes the run's workspace path:
+
+```yaml
+    agent: [docker, run, --rm, -i,
+            -v, "{{workspace}}:{{workspace}}", -w, "{{workspace}}",
+            box/agent:1, claude-agent-acp]
+```
+
+A run that finishes without reporting what it cost stops new claims until the
+window turns over, whether or not a token ceiling is set — measurement is the
+precondition for a budget, not a feature of one, and a budget that reads
+unknown as zero is not a budget. `allow_unmetered: true` proceeds blind, and
+the saying so is on the record.
+
+`build_timeout` bounds one build (default 30m; a negative duration means no
+bound). Nothing else does: the lease TTL is renewed while a run holds it, so
+without this an agent that hangs runs until the daemon stops.
 
 Open work and step back — the daemon's ticks do the rest:
 

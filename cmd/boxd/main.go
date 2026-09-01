@@ -63,6 +63,8 @@ func run() error {
 	every := flag.Duration("every", 15*time.Second, "tick interval")
 	maxConcurrent := flag.Int("max-concurrent", 2, "concurrent runs")
 	maxPerHour := flag.Int("max-per-hour", 0, "run starts per hour, 0 = unlimited")
+	maxTokensPerHour := flag.Int64("max-tokens-per-hour", 0,
+		"tokens per hour, 0 = unlimited; setting it also stops claims after any run that does not report its cost")
 	buildCmd := flag.String("build", "", "builder command run in the workspace (commits its own change)")
 	agentBin := flag.String("agent", "", "ACP agent binary (e.g. claude-agent-acp); overrides -build with a real agent")
 	seatName := flag.String("seat", "mason", "seat identity for the agent's continuity")
@@ -108,6 +110,10 @@ func run() error {
 		return err
 	}
 
+	meter := &capacity.Meter{Store: s, Tenant: t, Actor: *runner,
+		Budget: capacity.Budget{MaxConcurrent: *maxConcurrent, MaxPerWindow: *maxPerHour,
+			MaxTokensPerWindow: *maxTokensPerHour, Window: time.Hour}}
+
 	var builder loop.Builder = shellBuilder{cmd: *buildCmd}
 	var handoff func(context.Context, queue.WorkItem) error
 	if *agentBin != "" {
@@ -122,6 +128,9 @@ func run() error {
 			}}},
 			Seat:   &seat.Seat{Name: *seatName, Base: &knowledge.Base{Store: s, Tenant: t}},
 			Mirror: m,
+			Spend: func(ctx context.Context, run string, u acp.Usage) {
+				meter.Charge(ctx, run, u.Total(), u.Reported)
+			},
 		}
 		builder, handoff = ab, ab.Handoff
 	}
@@ -129,8 +138,7 @@ func run() error {
 	q := &queue.Queue{Store: s, Runner: *runner, TTL: 30 * time.Minute}
 	p := &pump.Pump{
 		Store: s, Tenant: t, Runner: *runner, Queue: q,
-		Meter: &capacity.Meter{Store: s, Tenant: t, Actor: *runner,
-			Budget: capacity.Budget{MaxConcurrent: *maxConcurrent, MaxPerWindow: *maxPerHour, Window: time.Hour}},
+		Meter: meter,
 		Loops: map[string]*loop.Loop{*box: {
 			Store: s, Runner: *runner, Mirror: m, Repo: repo, Branch: *branch,
 			Lane:    forge.Lane(*lane),

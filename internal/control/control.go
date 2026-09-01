@@ -11,7 +11,10 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
@@ -53,6 +56,177 @@ func (r *Room) Exceptions(ctx context.Context) ([]queue.WorkItem, error) {
 		}
 	}
 	return out, nil
+}
+
+// QueueEntry is one unit of work as an operator needs to see it: what it is,
+// where it came from, how long it has been there, and — the part a counter
+// can never carry — why it is where it is.
+type QueueEntry struct {
+	ID    string      `json:"id"`
+	State queue.State `json:"state"`
+	Box   string      `json:"box,omitempty"`
+	Repo  string      `json:"repo,omitempty"`
+	// Ingress, Route and Key are the trail back to the occurrence that asked
+	// for this work. Route and Key are empty for ingresses opened before they
+	// were recorded.
+	Ingress string `json:"ingress,omitempty"`
+	Route   string `json:"route,omitempty"`
+	Key     string `json:"key,omitempty"`
+	// Task is the instruction's first line: enough to recognise the unit,
+	// never the whole prompt.
+	Task string `json:"task"`
+	// Note is why the item is in this state — "branch main is leased", a
+	// gate's reasons, a park cause. The queue has always written it and
+	// nothing has ever shown it.
+	Note string `json:"note,omitempty"`
+	// Head is the landed commit; Built one produced and not yet landed.
+	Head  string `json:"head,omitempty"`
+	Built string `json:"built,omitempty"`
+	// Stage is the furthest point this item has reached, read off the last
+	// record on its chain: claimed, building, gating, landing, done. A
+	// claimed item was a black box — "state=claimed" and nothing else — and
+	// the records that would have said more were never on any feed.
+	Stage string `json:"stage,omitempty"`
+	// DependsOn is the work graph as declared; BlockedBy is the part of it
+	// that has not settled yet. An operator asking why nothing is moving
+	// needs the second, and the queue has never shown either.
+	DependsOn []string `json:"depends_on,omitempty"`
+	BlockedBy []string `json:"blocked_by,omitempty"`
+	// Opened is the first record in the item's chain, Changed the last.
+	Opened     time.Time `json:"opened"`
+	Changed    time.Time `json:"changed"`
+	AgeSec     int64     `json:"age_sec"`
+	InStateSec int64     `json:"in_state_sec"`
+}
+
+// Queue lists the work items in any of the given states, oldest first — the
+// order the factory would take them. No states means every item the tenant
+// has ever submitted.
+//
+// A count is not a queue. `pending=14` was the entire visibility into a
+// morning's work: no way to see what the factory was sitting on, and no way
+// to read the notes it had already written about why. Everything here is a
+// fold over records that existed the whole time.
+func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, error) {
+	now := time.Now().UTC()
+	seen := map[string]bool{}
+	var out []QueueEntry
+	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/pending", 1) {
+		if err != nil {
+			return nil, err
+		}
+		if seen[rec.Subject] {
+			continue
+		}
+		seen[rec.Subject] = true
+		e, err := r.entry(ctx, rec.Subject, now)
+		if err != nil {
+			return nil, err
+		}
+		if len(states) > 0 && !slices.Contains(states, e.State) {
+			continue
+		}
+		out = append(out, e)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Opened.Before(out[j].Opened) })
+	return out, nil
+}
+
+// entry folds one item's chain into a listing row. It walks the chain once
+// for both the state and the clock: Load would give the first and throw away
+// the second.
+func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry, error) {
+	var w queue.WorkItem
+	var opened, changed time.Time
+	stage := ""
+	found := false
+	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "workitem/"+id, 1) {
+		if err != nil {
+			return QueueEntry{}, err
+		}
+		// Zero first: each body is the whole item, and omitempty means a
+		// cleared field is absent rather than empty. See queue.Load.
+		w = queue.WorkItem{}
+		if err := json.Unmarshal(rec.Body, &w); err != nil {
+			return QueueEntry{}, fmt.Errorf("control: item %s record %d: %w", id, rec.Seq, err)
+		}
+		if !found {
+			opened = rec.At
+		}
+		if s := stageOf(rec.Kind); s != "" {
+			stage = s
+			changed = rec.At // time in STAGE, not merely time since the last write
+		}
+		found = true
+	}
+	if !found {
+		return QueueEntry{}, fmt.Errorf("control: no such item %s", id)
+	}
+	e := QueueEntry{
+		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,
+		Task: firstLine(w.Task), Note: w.Note, Head: w.Head, Built: w.Built,
+		Stage: stage, DependsOn: w.DependsOn,
+		Opened: opened, Changed: changed,
+		AgeSec: int64(now.Sub(opened).Seconds()), InStateSec: int64(now.Sub(changed).Seconds()),
+	}
+	// Which dependencies have not settled — the answer to "why is nothing
+	// moving", which the declared list alone does not give.
+	for _, dep := range w.DependsOn {
+		d, derr := (&queue.Queue{Store: r.Store, Runner: r.Actor}).Load(ctx, r.Tenant, dep)
+		if derr != nil || d.State != queue.StateDone {
+			e.BlockedBy = append(e.BlockedBy, dep)
+		}
+	}
+	if w.Ingress != "" {
+		// Best effort: an item whose origination cannot be read is still a
+		// row worth showing, just a thinner one.
+		if head, err := r.Store.Log().Head(ctx, r.Tenant, "ingress/"+w.Ingress); err == nil && head.Seq > 0 {
+			var ing struct {
+				Route string `json:"route"`
+				Key   string `json:"key"`
+			}
+			if json.Unmarshal(head.Body, &ing) == nil {
+				e.Route, e.Key = ing.Route, ing.Key
+			}
+		}
+	}
+	return e, nil
+}
+
+// stageOf names the point in the run a record marks. Only records that move
+// an item forward count: the rest are commentary, and "time in stage" that
+// reset on every note would measure nothing.
+func stageOf(kind string) string {
+	switch kind {
+	case "queued":
+		return "queued"
+	case "claimed":
+		return "claimed"
+	case "agent-run":
+		return "building"
+	case "build-resumed", "build-rebased":
+		return "resumed"
+	case "built", "agent-result":
+		return "built"
+	case "gate":
+		return "gating"
+	case "land":
+		return "landing"
+	case "done":
+		return "done"
+	case "waiting":
+		return "waiting"
+	case "parked", "escalated":
+		return "parked"
+	case "failed":
+		return "failed"
+	}
+	return ""
+}
+
+func firstLine(s string) string {
+	head, _, _ := strings.Cut(s, "\n")
+	return head
 }
 
 // Sample picks n settled items for human review, deterministically from the

@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -44,6 +45,11 @@ type Builder struct {
 	// Mirror materializes the bundle's context set; nil is fine when
 	// bundles carry no context repos.
 	Mirror *gitforge.Mirror
+	// Spend, when set, reports what a run cost to the capacity meter. The
+	// adapter is the only place that can: the loop sees a commit, the pump
+	// sees a slot, and only the stream sees tokens. Nil leaves the factory
+	// unable to brake on cost, which is the state this hook exists to end.
+	Spend func(ctx context.Context, run string, u Usage)
 
 	mu    sync.Mutex
 	notes map[string][]string // run id -> extracted handoff notes
@@ -94,14 +100,32 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, prompt(bundle, task, contextDir))
 	elapsed := time.Since(started)
+	// Cost is charged even when the run failed. A session that errored
+	// halfway still spent what it spent, and a meter that only charges for
+	// successes is a meter that undercounts exactly when things go wrong.
+	if b.Spend != nil {
+		b.Spend(ctx, ws.Run, res.Usage)
+	}
 	if err != nil {
 		return "", err
 	}
 	// The run's shape on the record: what it cost and how it ended, for the
-	// capacity plane and for experiments that compare runs.
+	// capacity plane and for experiments that compare runs. Unknown dialect
+	// updates ride along, because a metric that drifts to zero must be
+	// visible here rather than inferred from a table of zeros later.
+	unknown, _ := json.Marshal(res.UnknownUpdates)
+	// WHICH tools, not just how many. A count cannot tell an ordinary run
+	// from a runaway — both are a number — and "the agent made 340 tool
+	// calls" is a fact nobody can act on while "it ran Bash 340 times" is.
+	// The tally is bounded by the tool vocabulary, so it stays complete
+	// however long the session ran; the per-call sequence lives on the span
+	// events, which need a collector, while this is on the chain.
+	tools, _ := json.Marshal(tally(res.ToolCalls))
+	denied, _ := json.Marshal(tally(res.Denied))
 	b.record(ctx, ws.Run, "agent-result", bundle.Ref,
-		fmt.Sprintf(`{"stop":%q,"tool_calls":%d,"denied":%d,"escalated":%v,"wall_ms":%d}`,
-			res.StopReason, len(res.ToolCalls), len(res.Denied), res.Escalated != "", elapsed.Milliseconds()))
+		fmt.Sprintf(`{"stop":%q,"tool_calls":%d,"denied":%d,"escalated":%v,"wall_ms":%d,"tokens":%d,"cost_usd":%.4f,"metered":%v,"unknown_updates":%s,"tools":%s,"denied_tools":%s}`,
+			res.StopReason, len(res.ToolCalls), len(res.Denied), res.Escalated != "", elapsed.Milliseconds(),
+			res.Usage.Total(), res.Usage.CostUSD, res.Usage.Reported, unknown, tools, denied))
 	if reason := escalation(res); reason != "" {
 		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason}
 	}
@@ -183,6 +207,23 @@ func handoffNotes(text string) []string {
 				out = append(out, n)
 			}
 		}
+	}
+	return out
+}
+
+// tally counts each name once per appearance. Nil for an empty list, so the
+// record carries `null` rather than an empty object claiming a measurement
+// that was never taken.
+func tally(names []string) map[string]int {
+	if len(names) == 0 {
+		return nil
+	}
+	out := map[string]int{}
+	for _, n := range names {
+		if n == "" {
+			n = "(untitled)" // a dialect that names no tool still ran one
+		}
+		out[n]++
 	}
 	return out
 }

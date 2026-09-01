@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 
+	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
@@ -94,6 +96,17 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 func (c *Client) Exceptions(ctx context.Context) ([]queue.WorkItem, error) {
 	var out []queue.WorkItem
 	return out, c.do(ctx, "GET", "/v1/exceptions", nil, &out)
+}
+
+// Items lists the work queue, narrowed to the given states or unfiltered when
+// none are given.
+func (c *Client) Items(ctx context.Context, states ...string) ([]control.QueueEntry, error) {
+	path := "/v1/items"
+	if len(states) > 0 {
+		path += "?state=" + url.QueryEscape(strings.Join(states, ","))
+	}
+	var out []control.QueueEntry
+	return out, c.do(ctx, "GET", path, nil, &out)
 }
 
 // Item fetches one item's state.

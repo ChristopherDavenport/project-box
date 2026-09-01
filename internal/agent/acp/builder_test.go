@@ -190,3 +190,33 @@ func mustSh(t *testing.T, dir, name string, args ...string) string {
 	}
 	return string(out)
 }
+
+// TestTheRecordSaysWhichToolsRan: a count cannot tell an ordinary run from a
+// runaway — both are a number — and "the agent made 340 tool calls" is a fact
+// nobody can act on while "it ran Bash 340 times" is. The names were on the
+// Result all along and were dropped at the record site.
+func TestTheRecordSaysWhichToolsRan(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "toolsy")
+	ctx := context.Background()
+	item := runItem(t, s, lp, router, "issue-tools", "use a tool")
+	if item.State != queue.StateDone {
+		t.Fatalf("item: %+v", item)
+	}
+	body := ""
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-issue-tools", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "agent-result" {
+			body = string(r.Body)
+		}
+	}
+	if body == "" {
+		t.Fatal("no agent-result on the chain")
+	}
+	for _, want := range []string{`"tools":{"Bash":1}`, `"denied_tools":{"DeleteProd":1}`, `"metered":true`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("agent-result missing %s:\n%s", want, body)
+		}
+	}
+}

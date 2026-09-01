@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
@@ -52,6 +53,10 @@ type Server struct {
 	Routes map[string]ingress.Route
 	Router *ingress.StoreRouter
 	Queue  *queue.Queue
+	// Meter, when set, puts the capacity window's account on /v1/status —
+	// what the factory has spent, and how much of that it could not measure.
+	// A cost brake nobody can read is a brake nobody trusts.
+	Meter *capacity.Meter
 	// Box and Runner identify this daemon in /v1/status.
 	Box, Runner string
 	Started     time.Time
@@ -95,6 +100,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.status)
 	mux.HandleFunc("GET /v1/exceptions", s.exceptions)
+	mux.HandleFunc("GET /v1/items", s.items)
 	mux.HandleFunc("GET /v1/items/{id}", s.item)
 	mux.HandleFunc("GET /v1/items/{id}/evidence", s.itemEvidence)
 	mux.HandleFunc("GET /v1/provenance/{sha}", s.provenance)
@@ -148,6 +154,10 @@ type Status struct {
 	UptimeSec  int64     `json:"uptime_sec"`
 	Routes     []string  `json:"routes"`
 	Version    string    `json:"version"`
+	// Spend is the capacity window's account. Nil when the server was wired
+	// without a meter; absent rather than zero, because a zero here would
+	// read as "nothing spent" when it means "nobody asked".
+	Spend *capacity.Report `json:"spend,omitempty"`
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
@@ -179,12 +189,44 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 			exceptions++
 		}
 	}
-	writeJSON(w, Status{
+	st := Status{
 		Tenant: s.Tenant, Box: s.Box, Runner: s.Runner, Stopped: stopped,
 		Pending: pending, Exceptions: exceptions,
 		UptimeSec: int64(time.Since(s.Started).Seconds()), Routes: s.routeNames(),
 		Version: version.String(),
-	})
+	}
+	if s.Meter != nil {
+		rep := s.Meter.Report()
+		st.Spend = &rep
+	}
+	writeJSON(w, st)
+}
+
+// items lists the work queue. `?state=` narrows it and may repeat or be
+// comma-separated; unfiltered returns everything the tenant has submitted.
+//
+// The listing verb the surface never had: `pending=14` was the whole view
+// into the queue, and /v1/items/{id} needs an id you could only know from the
+// submit response you kept.
+func (s *Server) items(w http.ResponseWriter, r *http.Request) {
+	var states []queue.State
+	for _, v := range r.URL.Query()["state"] {
+		for part := range strings.SplitSeq(v, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				states = append(states, queue.State(part))
+			}
+		}
+	}
+	room := &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r)}
+	out, err := room.Queue(r.Context(), states...)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if out == nil {
+		out = []control.QueueEntry{}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) exceptions(w http.ResponseWriter, r *http.Request) {

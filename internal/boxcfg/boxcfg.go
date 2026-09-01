@@ -31,26 +31,79 @@ type Config struct {
 	// Drain bounds the graceful-shutdown wait for in-flight runs; empty
 	// means 30s. SIGTERM stops new claims immediately; running work gets
 	// this long to settle before it is cancelled.
-	Drain  string `yaml:"drain"`
-	OTLP   string `yaml:"otlp"`
-	Budget Budget `yaml:"budget"`
-	Boxes  []Box  `yaml:"boxes"`
+	Drain string `yaml:"drain"`
+	// BuildTimeout bounds one build; empty means 30m, and "-1s" (any negative
+	// duration) means no bound. Nothing bounded an agent session before: the
+	// lease TTL does not, because Checkout renews it.
+	BuildTimeout string `yaml:"build_timeout"`
+	OTLP         string `yaml:"otlp"`
+	Budget       Budget `yaml:"budget"`
+	Boxes        []Box  `yaml:"boxes"`
 }
 
 // Budget mirrors capacity.Budget in config form.
 type Budget struct {
-	MaxConcurrent int    `yaml:"max_concurrent"`
-	MaxPerWindow  int    `yaml:"max_per_window"`
-	Window        string `yaml:"window"`
+	MaxConcurrent int `yaml:"max_concurrent"`
+	MaxPerWindow  int `yaml:"max_per_window"`
+	// MaxTokensPerWindow is the brake denominated the way the invoice is;
+	// zero means unbounded.
+	MaxTokensPerWindow int64 `yaml:"max_tokens_per_window"`
+	// AllowUnmetered keeps the factory working after a run that would not say
+	// what it cost. Off by default: measurement is the precondition for a
+	// budget, not a feature of one, and an agent whose spend is invisible is
+	// a position nobody chooses on purpose.
+	AllowUnmetered bool   `yaml:"allow_unmetered"`
+	Window         string `yaml:"window"`
+}
+
+// Argv is a command, written in YAML either as one string for the common
+// case or as a list when it needs arguments:
+//
+//	agent: claude-agent-acp
+//	agent: [docker, run, --rm, -v, "{{workspace}}:{{workspace}}",
+//	        -w, "{{workspace}}", box/agent:1, claude-agent-acp]
+//
+// A bare string is split on nothing — it is one argument, not a shell line —
+// because a config that quietly reinterprets spaces is a config that runs
+// something the operator did not write.
+type Argv []string
+
+// UnmarshalYAML accepts a scalar or a sequence.
+func (a *Argv) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		if s == "" {
+			*a = nil
+			return nil
+		}
+		*a = Argv{s}
+		return nil
+	}
+	var xs []string
+	if err := n.Decode(&xs); err != nil {
+		return err
+	}
+	*a = xs
+	return nil
 }
 
 // Box is one system: many repos, one optional agent identity.
 type Box struct {
 	Name string `yaml:"name"`
-	// Agent is the ACP binary; when set, every repo in the box builds
+	// Agent is the ACP agent's argv; when set, every repo in the box builds
 	// through it (with Seat's continuity). When empty, each repo's Build
 	// command runs instead.
-	Agent string `yaml:"agent"`
+	//
+	// An argv rather than a path because runner confinement is a wrapper
+	// (issue #6): `docker run` or `sandbox-exec` goes in front of the agent,
+	// and a single-token field could not express one. A live experiment
+	// already found an agent reading the factory's mirror and a sibling
+	// workspace, so the ability to put something in front of it is the
+	// difference between confinement being configurable and being a plan.
+	Agent Argv   `yaml:"agent"`
 	Seat  string `yaml:"seat"`
 	Repos []Repo `yaml:"repos"`
 }
@@ -113,6 +166,11 @@ func (c *Config) validate() error {
 	if _, err := time.ParseDuration(c.Drain); err != nil {
 		return fmt.Errorf("boxcfg: drain: %w", err)
 	}
+	if c.BuildTimeout != "" {
+		if _, err := time.ParseDuration(c.BuildTimeout); err != nil {
+			return fmt.Errorf("boxcfg: build_timeout: %w", err)
+		}
+	}
 	if c.Budget.Window != "" {
 		if _, err := time.ParseDuration(c.Budget.Window); err != nil {
 			return fmt.Errorf("boxcfg: budget.window: %w", err)
@@ -130,7 +188,7 @@ func (c *Config) validate() error {
 		if len(bx.Repos) == 0 {
 			return fmt.Errorf("boxcfg: box %s has no repos", bx.Name)
 		}
-		if bx.Agent != "" && bx.Seat == "" {
+		if len(bx.Agent) > 0 && bx.Seat == "" {
 			bx.Seat = "mason"
 		}
 		for j := range bx.Repos {
@@ -157,7 +215,7 @@ func (c *Config) validate() error {
 				return fmt.Errorf("boxcfg: route %q defined by both %s and %s/%s — route names are the API's vocabulary and must be unique", r.Route, prev, bx.Name, r.Name)
 			}
 			seenRoutes[r.Route] = bx.Name + "/" + r.Name
-			if bx.Agent == "" && r.Build == "" {
+			if len(bx.Agent) == 0 && r.Build == "" {
 				return fmt.Errorf("boxcfg: box %s repo %s: no agent and no build command — nothing would ever do the work", bx.Name, r.Name)
 			}
 			if r.Check == "" {
@@ -177,6 +235,16 @@ func (c Config) EveryDuration() time.Duration {
 // DrainDuration returns the parsed graceful-shutdown window.
 func (c Config) DrainDuration() time.Duration {
 	d, _ := time.ParseDuration(c.Drain)
+	return d
+}
+
+// BuildTimeoutDuration returns the parsed build bound; zero means the loop's
+// own default applies.
+func (c Config) BuildTimeoutDuration() time.Duration {
+	if c.BuildTimeout == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(c.BuildTimeout)
 	return d
 }
 
