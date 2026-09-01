@@ -272,9 +272,17 @@ type Report struct {
 }
 
 // Report snapshots the window.
+//
+// It rolls the window forward first. Reading is not a side-effect-free act
+// here: the counters belong to whichever window the clock is in, and a report
+// that answered from a window the clock has left would show yesterday's spend
+// until something happened to claim.
 func (m *Meter) Report() Report {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if w := m.windowAt(m.now()); !w.Equal(m.windowStart) {
+		m.resetWindow(w)
+	}
 	maxC := m.Budget.MaxConcurrent
 	if maxC <= 0 {
 		maxC = 1
@@ -284,8 +292,29 @@ func (m *Meter) Report() Report {
 		Running: m.running, Started: m.started,
 		MaxConcurrent: maxC, MaxPerWindow: m.Budget.MaxPerWindow,
 		Window: m.Budget.Window, WindowSec: int64(m.Budget.Window.Seconds()),
-		Refusing: m.refused,
+		Refusing: m.wouldRefuse(),
 	}
+}
+
+// wouldRefuse reports whether a claim asked for right now would be turned
+// away on budget grounds. Callers hold mu.
+//
+// Distinct from m.refused, which answers "have I already written the refusal
+// record for this window" and exists so one refusal is evidence and the next
+// thousand polls are not. Reporting that field as the room's state conflated
+// the two, and the difference showed the moment the ceiling was raised: the
+// budget was lifted, a run started, and the room went on saying "refusing"
+// with work visibly in flight, because something had refused an hour earlier.
+func (m *Meter) wouldRefuse() bool {
+	switch {
+	case m.Budget.MaxPerWindow > 0 && m.started >= m.Budget.MaxPerWindow:
+		return true
+	case m.unmetered > 0 && !m.Budget.AllowUnmetered:
+		return true
+	case m.Budget.MaxTokensPerWindow > 0 && m.spent >= m.Budget.MaxTokensPerWindow:
+		return true
+	}
+	return false
 }
 
 // resetWindow starts a fresh accounting window at its aligned boundary.

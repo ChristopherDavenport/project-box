@@ -139,3 +139,60 @@ func TestReloadCannotClearTheAccount(t *testing.T) {
 		t.Fatal("a config reload lifted the brake")
 	}
 }
+
+// TestRefusingMeansWouldRefuseNow. The room's "refusing" flag reported
+// m.refused, which answers a different question: whether a refusal record has
+// already been written this window. The two came apart the moment the ceiling
+// was raised — the budget was lifted, a run started, and the status endpoint
+// went on saying refusing=true with work visibly in flight.
+func TestRefusingMeansWouldRefuseNow(t *testing.T) {
+	now := time.Date(2026, 9, 1, 14, 20, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	budget := Budget{MaxConcurrent: 1, MaxTokensPerWindow: 6_000_000, Window: time.Hour}
+	m, _ := meters(t, budget, clock)
+	ctx := context.Background()
+
+	release, _ := m.Acquire(ctx, "run-1")
+	m.Charge(ctx, "run-1", 20_076_747, true)
+	release()
+	if _, err := m.Acquire(ctx, "run-2"); !errors.Is(err, ErrBudget) {
+		t.Fatal("setup: the meter should be braking")
+	}
+	if !m.Report().Refusing {
+		t.Fatal("over budget and not reporting it")
+	}
+
+	// The operator raises the ceiling above what has been spent.
+	budget.MaxTokensPerWindow = 30_000_000
+	m.SetBudget(budget)
+
+	if m.Report().Refusing {
+		t.Fatal("still reporting refusing after the ceiling was raised above the spend")
+	}
+	if _, err := m.Acquire(ctx, "run-3"); err != nil {
+		t.Fatalf("the raised ceiling did not admit work: %v", err)
+	}
+}
+
+// TestReportRollsTheWindowForward. Reading is not side-effect free: the
+// counters belong to whichever window the clock is in, so a report taken
+// after the hour turns must show the new window rather than the old total.
+func TestReportRollsTheWindowForward(t *testing.T) {
+	now := time.Date(2026, 9, 1, 14, 20, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	m, _ := meters(t, Budget{MaxConcurrent: 1, MaxTokensPerWindow: 6_000_000, Window: time.Hour}, clock)
+	ctx := context.Background()
+
+	release, _ := m.Acquire(ctx, "run-1")
+	m.Charge(ctx, "run-1", 20_076_747, true)
+	release()
+	if !m.Report().Refusing {
+		t.Fatal("setup: should be braking")
+	}
+
+	now = now.Add(time.Hour) // the hour turns; nobody has claimed since
+	r := m.Report()
+	if r.Tokens != 0 || r.Refusing {
+		t.Fatalf("a stale window was reported after the turn: %+v", r)
+	}
+}

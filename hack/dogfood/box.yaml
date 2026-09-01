@@ -28,16 +28,14 @@ budget:
   # One at a time. Issue #18 (three concurrent runs producing one) is fixed,
   # but the point of the dogfood is the agent, not the lease.
   max_concurrent: 1
-  # The pacing brake, in the currency the invoice is denominated in. It gates
-  # whether a run may START, and the window is aligned to the clock, so it
-  # survives a restart rather than resetting with the process.
+  # Sized from measurement, not from hope. Four runs: 1.0M, 5.3M, 7.5M,
+  # 20.1M — mean 8.5M. A 6M window admitted 0.7 average runs an hour, so the
+  # factory was braked essentially all the time and the number was doing
+  # nothing but stopping work. 30M admits about 3.5, which at fifteen to
+  # twenty minutes a run is roughly continuous operation for one seat.
   #
-  # Measured, and the spread is the point: one issue cost 918,520 tokens
-  # ($1.61) because the agent read the code and correctly escalated; the next
-  # cost 20,076,747 ($13.60) over 110 tool calls and 21 minutes, and produced
-  # a commit that passed its gate. Budget for the second number, not the
-  # first. Hot-reloadable — edit and `kill -HUP`.
-  max_tokens_per_window: 6000000
+  # ~$24/hour at the observed $0.85/M. Hot-reloadable: edit and `kill -HUP`.
+  max_tokens_per_window: 30000000
   window: 1h
   # The runaway bound, which the window cannot express: the window gates
   # starts, so its real ceiling is "the limit, plus one whole run". That is
