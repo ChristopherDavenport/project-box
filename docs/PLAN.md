@@ -868,6 +868,42 @@ one role — so the extension point is real in the queue and unreachable from
 box.yaml. A producer and a routing key, and no evidence is missing meanwhile,
 which is why it is not a §2 retrofit.
 
+Issue #9 closed the rest of the dialect problem (2026-09-01). The earlier
+round taught the runtime v0.70's shapes and made drift a recorded fact; what
+was still missing is the part that keeps it true tomorrow. The dialect is now
+PINNED as data — testdata/claude-agent-acp-0.70.jsonl is a whole session's
+frames in wire order, and conformance_test.go replays it at the runtime and
+asserts what the parser made of each one. Teaching a newer dialect is a diff
+of frames rather than an edit to a hand-written fake, which is the difference
+between a pin and a habit. The pin covers the conversation and not only the
+parsing: each client frame must be the call the client actually makes there,
+so a runtime that stopped setting the permission mode fails it. And every
+counter is asserted twice — against its exact value, and against zero with
+the shape feeding it named — because a metric that CAN silently read zero is
+the failure, not the particular wrong number. Verified by breaking it three
+ways: rename a usage field, drop the tool_call_update spelling (finding 5a
+itself, now a test failure), skip set_mode.
+
+`Runtime.Transcript` records both directions, and `Builder.Transcript`
+carries it to the only path a real agent runs through, so BOX_ACP_TRANSCRIPT
+on the live smoke re-records the pin from an actual agent — a pin nobody can
+re-record rots into fiction, which is the failure it exists to catch.
+TestTheRecorderProducesAReplayableTranscript holds the recorder to that job:
+replay the pin while recording, replay the recording, same Result.
+
+Stated rather than implied: the committed transcript is ASSEMBLED, not
+captured — every shape in it is one this repository already paid to learn
+(the usage field names from the adapter's own sessionUsage(), the untitled
+tool_call_update naming its tool under _meta.claudeCode.toolName from 232
+measured calls, no _box/escalate frame because 0.70 cannot call unknown
+methods), and testdata/README.md says so and says how to replace it. The
+thin frame is session/request_permission: its title has never been observed
+in a real recording, and if it turns out to be prose the way tool_call
+titles were, the enforcement path has the hole the update path had. Not
+built, and named here: the cross-run version of the zero smell — a counter
+that has never been non-zero in ANY run should be loud — which lives in the
+capacity and evidence planes, not in the parser.
+
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no
 code (Phase 9 shipped it, and boxcfg's default IS optimistic) — it needs a

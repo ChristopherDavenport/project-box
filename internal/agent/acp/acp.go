@@ -144,6 +144,17 @@ type Runtime struct {
 	// end cannot be stopped in the middle by anything short of a clock, which
 	// is what build_timeout is for.
 	MaxTokens int64
+	// Transcript, when set, receives every frame that crosses the wire in
+	// either direction, one JSON object per line: {"from":…,"frame":…}.
+	//
+	// This is how the pinned dialect is refreshed. The shapes below are
+	// asserted by replaying a recorded transcript (see testdata/), and a pin
+	// nobody can re-record is one that rots into fiction — which would repeat
+	// the failure it exists to catch, since the last drift was found by a
+	// human reading a column of zeros rather than by anything in this package.
+	// Recording is off by default: a transcript carries the prompt and the
+	// agent's output, so it is run material, not a log.
+	Transcript io.Writer
 }
 
 // Result is what a completed run reports.
@@ -336,6 +347,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			return nil, fmt.Errorf("acp: unhandled agent request %q", method)
 		}
 	})
+	conn.tape = rt.Transcript
 	go conn.serve()
 
 	var initRes struct {
@@ -569,9 +581,40 @@ type conn struct {
 	r       *bufio.Scanner
 	handler func(method string, params json.RawMessage) (any, error)
 
+	tapeMu sync.Mutex
+	tape   io.Writer
+
 	mu      sync.Mutex
 	nextID  int64
 	pending map[int64]chan rpcResult
+}
+
+// record writes one frame to the transcript in the direction it crossed.
+// Nothing else may write to the tape, so its own lock is enough.
+func (c *conn) record(from string, frame []byte) {
+	c.tapeMu.Lock()
+	defer c.tapeMu.Unlock()
+	if c.tape == nil {
+		return
+	}
+	// A frame that is not JSON is kept as text rather than dropped. serve
+	// skips malformed lines, so the transcript would otherwise be the one
+	// place a dialect emitting garbage looked clean.
+	e := struct {
+		From  string          `json:"from"`
+		Frame json.RawMessage `json:"frame,omitempty"`
+		Raw   string          `json:"raw,omitempty"`
+	}{From: from}
+	if json.Valid(frame) {
+		e.Frame = frame
+	} else {
+		e.Raw = string(frame)
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		return
+	}
+	c.tape.Write(append(line, '\n'))
 }
 
 type rpcResult struct {
@@ -610,6 +653,7 @@ func (c *conn) send(m rpcMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, err = c.w.Write(append(b, '\n'))
+	c.record("client", b)
 	return err
 }
 
@@ -647,6 +691,7 @@ func (c *conn) serve() {
 		if len(line) == 0 {
 			continue
 		}
+		c.record("agent", line)
 		var m rpcMessage
 		if err := json.Unmarshal(line, &m); err != nil {
 			continue // a malformed line is the agent's bug; keep serving

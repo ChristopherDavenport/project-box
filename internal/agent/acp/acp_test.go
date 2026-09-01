@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,6 +279,12 @@ func (f *fakeConn) notify(method string, params map[string]any) {
 
 func fakeAgent(scenario string) {
 	f := &fakeConn{enc: json.NewEncoder(os.Stdout), dec: bufio.NewScanner(os.Stdin)}
+	// The scripted scenarios below each probe one shape. "replay:<path>" is
+	// the whole dialect instead, supplied as data — see conformance_test.go.
+	if path, ok := strings.CutPrefix(scenario, "replay:"); ok {
+		replayTranscript(f, path)
+		return
+	}
 	mode := ""
 	var sessionID string
 	for {

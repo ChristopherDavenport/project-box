@@ -1023,7 +1023,19 @@ turns any prompt injection or confused agent into a production change.
 
 1. **ACP stream interception** — the agent runtime speaks ACP, whose stream
    carries tool calls and permission requests. The only place policy can be
-   enforced without patching the agent.
+   enforced without patching the agent. Having a protocol is why there are no
+   per-provider adapters here, and that remains the right call — but one
+   protocol still has versions, so **the dialect is pinned and asserted**
+   (decided 2026-09-01), the way a skill resolves to a digest and never to a
+   branch. A transcript recorded from a known-good agent replays in a
+   conformance test, so an update shape that moves fails a build. It moved
+   once already and cost nothing visible: the tool-call metric read zero
+   across eight experiment runs and the only thing that noticed was a human
+   reading a column of zeros. The shapes that carry the count are the shapes
+   that carry enforcement, so a dialect this runtime cannot parse is not an
+   undercount, it is a denied tool nobody recognised. Same argument as the
+   store conformance suite, on a different surface: the property is asserted
+   by a suite rather than believed.
 2. **Role-scoped authority** — an agent holds leases only on repo roles its Box
    policy grants. `env` and `infra` are distinct grants from `service`.
 3. **Gates** — nothing lands unreviewed, and a gate evaluates the ChangeSet

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -56,6 +57,10 @@ type Builder struct {
 	// sees a slot, and only the stream sees tokens. Nil leaves the factory
 	// unable to brake on cost, which is the state this hook exists to end.
 	Spend func(ctx context.Context, run string, u Usage)
+	// Transcript, when set, records the run's protocol frames — see
+	// [Runtime.Transcript]. This is the only path a real agent runs through,
+	// so it is the only place the pinned dialect can be re-recorded from one.
+	Transcript io.Writer
 
 	mu    sync.Mutex
 	notes map[string][]string // run id -> extracted handoff notes
@@ -131,7 +136,8 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained),
 	})
 
-	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: contextDir, Env: b.Env, MaxTokens: b.MaxTokens}
+	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: contextDir, Env: b.Env,
+		MaxTokens: b.MaxTokens, Transcript: b.Transcript}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, sent)
 	elapsed := time.Since(started)
