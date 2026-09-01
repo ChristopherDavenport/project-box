@@ -7,9 +7,14 @@ export class ActivityController {
   events = [];
   connected = false;
 
-  constructor(host, { limit = 100 } = {}) {
+  // onEvent fires for every activity record as it lands, so a view that
+  // renders derived state — the queue, one item's timeline — can refresh
+  // itself instead of making the operator reload the page to see the factory
+  // move.
+  constructor(host, { limit = 100, onEvent } = {}) {
     this._host = host;
     this._limit = limit;
+    this._onEvent = onEvent;
     host.addController(this);
   }
 
@@ -24,9 +29,11 @@ export class ActivityController {
       this._host.requestUpdate();
     });
     this._es.addEventListener('activity', (e) => {
+      const a = JSON.parse(e.data);
       // New reference, never a mutation: Lit change detection is `!==`.
-      this.events = [...this.events, JSON.parse(e.data)].slice(-this._limit);
+      this.events = [...this.events, a].slice(-this._limit);
       this._host.requestUpdate();
+      this._onEvent?.(a);
     });
     this._es.onerror = () => {
       this.connected = false;

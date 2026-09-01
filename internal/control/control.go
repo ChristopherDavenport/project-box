@@ -82,6 +82,16 @@ type QueueEntry struct {
 	// Head is the landed commit; Built one produced and not yet landed.
 	Head  string `json:"head,omitempty"`
 	Built string `json:"built,omitempty"`
+	// Stage is the furthest point this item has reached, read off the last
+	// record on its chain: claimed, building, gating, landing, done. A
+	// claimed item was a black box — "state=claimed" and nothing else — and
+	// the records that would have said more were never on any feed.
+	Stage string `json:"stage,omitempty"`
+	// DependsOn is the work graph as declared; BlockedBy is the part of it
+	// that has not settled yet. An operator asking why nothing is moving
+	// needs the second, and the queue has never shown either.
+	DependsOn []string `json:"depends_on,omitempty"`
+	BlockedBy []string `json:"blocked_by,omitempty"`
 	// Opened is the first record in the item's chain, Changed the last.
 	Opened     time.Time `json:"opened"`
 	Changed    time.Time `json:"changed"`
@@ -128,6 +138,7 @@ func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, 
 func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry, error) {
 	var w queue.WorkItem
 	var opened, changed time.Time
+	stage := ""
 	found := false
 	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "workitem/"+id, 1) {
 		if err != nil {
@@ -142,7 +153,10 @@ func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry,
 		if !found {
 			opened = rec.At
 		}
-		changed = rec.At
+		if s := stageOf(rec.Kind); s != "" {
+			stage = s
+			changed = rec.At // time in STAGE, not merely time since the last write
+		}
 		found = true
 	}
 	if !found {
@@ -151,8 +165,17 @@ func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry,
 	e := QueueEntry{
 		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,
 		Task: firstLine(w.Task), Note: w.Note, Head: w.Head, Built: w.Built,
+		Stage: stage, DependsOn: w.DependsOn,
 		Opened: opened, Changed: changed,
 		AgeSec: int64(now.Sub(opened).Seconds()), InStateSec: int64(now.Sub(changed).Seconds()),
+	}
+	// Which dependencies have not settled — the answer to "why is nothing
+	// moving", which the declared list alone does not give.
+	for _, dep := range w.DependsOn {
+		d, derr := (&queue.Queue{Store: r.Store, Runner: r.Actor}).Load(ctx, r.Tenant, dep)
+		if derr != nil || d.State != queue.StateDone {
+			e.BlockedBy = append(e.BlockedBy, dep)
+		}
 	}
 	if w.Ingress != "" {
 		// Best effort: an item whose origination cannot be read is still a
@@ -168,6 +191,37 @@ func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry,
 		}
 	}
 	return e, nil
+}
+
+// stageOf names the point in the run a record marks. Only records that move
+// an item forward count: the rest are commentary, and "time in stage" that
+// reset on every note would measure nothing.
+func stageOf(kind string) string {
+	switch kind {
+	case "queued":
+		return "queued"
+	case "claimed":
+		return "claimed"
+	case "agent-run":
+		return "building"
+	case "build-resumed", "build-rebased":
+		return "resumed"
+	case "built", "agent-result":
+		return "built"
+	case "gate":
+		return "gating"
+	case "land":
+		return "landing"
+	case "done":
+		return "done"
+	case "waiting":
+		return "waiting"
+	case "parked", "escalated":
+		return "parked"
+	case "failed":
+		return "failed"
+	}
+	return ""
 }
 
 func firstLine(s string) string {

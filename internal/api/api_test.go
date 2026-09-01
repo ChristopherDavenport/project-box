@@ -363,3 +363,63 @@ func TestQueueOverTheWire(t *testing.T) {
 		t.Fatalf("unfiltered: %d %v", len(all), err)
 	}
 }
+
+// TestRunInternalsReachTheStream: a claimed item used to be a black box. The
+// index scopes say a unit exists and later that it landed; everything between
+// — the agent starting, the commit, each gate verdict, an escalation and its
+// reason — lives on the item's own chain, which nothing was tailing. Watching
+// a run meant reloading a page.
+func TestRunInternalsReachTheStream(t *testing.T) {
+	w := rig(t)
+	ts := httptest.NewServer(w.srv.Handler())
+	defer ts.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	c, _ := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if _, err := c.OpenIngress(ctx, "issues", "issue-inner", "watch me work"); err != nil {
+		t.Fatal(err)
+	}
+	// Intake first, so the item exists before the subscriber connects and is
+	// picked up as in-flight rather than only via index/pending.
+	if _, err := w.pump.Intake(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	req, _ := http.NewRequestWithContext(ctx, "GET", ts.URL+"/v1/events", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() && !strings.HasPrefix(sc.Text(), "event: hello") {
+	}
+
+	go w.pump.Drain(ctx)
+
+	// The run's own records, not merely the index's summary of it.
+	want := map[string]bool{"\"kind\":\"claimed\"": false, "\"kind\":\"built\"": false, "\"kind\":\"gate\"": false}
+	deadline := time.Now().Add(15 * time.Second)
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "data: ") && strings.Contains(line, "workitem/") {
+			for k := range want {
+				if strings.Contains(line, k) {
+					want[k] = true
+				}
+			}
+		}
+		all := true
+		for _, seen := range want {
+			all = all && seen
+		}
+		if all {
+			return
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+	}
+	t.Fatalf("the subscriber never saw the run's internals: %v", want)
+}

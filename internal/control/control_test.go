@@ -227,3 +227,57 @@ func TestQueueListsWhatACountCannot(t *testing.T) {
 		t.Fatalf("multi-state filter: %+v", two)
 	}
 }
+
+// TestQueueShowsStageAndWhatBlocks: the room could show what was stuck and
+// what had landed, and nothing in between. A claimed item read "state=claimed"
+// and nothing else, and a blocked one never named what it was blocked on —
+// which is the first question when nothing is moving (issue #14).
+func TestQueueShowsStageAndWhatBlocks(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	root := submit(t, q, "wi-root")
+	dependent, err := q.Submit(ctx, queue.WorkItem{
+		ID: "wi-dependent", Tenant: tn, Box: "shop", Ingress: "ing-1",
+		Task: "waits on the root", DependsOn: []string{"wi-root"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = dependent
+
+	// The root gets claimed and starts building.
+	_, claim, err := q.Claim(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := r.Queue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]QueueEntry{}
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
+	if got := byID["wi-root"].Stage; got != "claimed" {
+		t.Fatalf("a claimed item should say where it got to, said %q", got)
+	}
+	if got := byID["wi-dependent"].BlockedBy; len(got) != 1 || got[0] != "wi-root" {
+		t.Fatalf("blocked item does not name what blocks it: %v", got)
+	}
+
+	// The root lands; the dependent is no longer blocked by it.
+	if _, err := q.Done(ctx, root, claim, "abc123"); err != nil {
+		t.Fatal(err)
+	}
+	entries, err = r.Queue(ctx, queue.StatePending)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if e.ID == "wi-dependent" && len(e.BlockedBy) != 0 {
+			t.Fatalf("a settled dependency still reads as blocking: %v", e.BlockedBy)
+		}
+	}
+}

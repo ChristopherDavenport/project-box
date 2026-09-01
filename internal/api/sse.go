@@ -1,12 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
 // activityScopes are the chains that together tell the daemon's story from
@@ -81,6 +83,22 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// A claimed item was a black box: the index scopes say a unit exists and
+	// later that it landed, and everything between — the agent starting, the
+	// commit, each gate verdict, an escalation and its reason — lives on the
+	// item's own chain, which nothing was tailing. Watching a run meant
+	// reloading a page. In-flight items are followed too, and dropped again
+	// when they settle, so the tail set is bounded by work actually moving.
+	following := s.inFlight(r.Context())
+	for id := range following {
+		scope := "workitem/" + id
+		for rec, err := range s.Store.Log().Since(r.Context(), s.Tenant, scope, 1) {
+			if err == nil && rec.Seq > last[scope] {
+				last[scope] = rec.Seq
+			}
+		}
+	}
+
 	fmt.Fprintf(w, "event: hello\ndata: {\"tenant\":%q}\n\n", s.Tenant)
 	fl.Flush()
 	tick := time.NewTicker(time.Second)
@@ -98,11 +116,60 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 					last[scope] = rec.Seq
 					b, _ := json.Marshal(toActivity(scope, rec))
 					fmt.Fprintf(w, "event: activity\ndata: %s\n\n", b)
+					// A newly indexed item is one to follow from here on.
+					if scope == "index/pending" {
+						following[rec.Subject] = true
+					}
+				}
+			}
+			for id := range following {
+				scope := "workitem/" + id
+				settled := false
+				for rec, err := range s.Store.Log().Since(r.Context(), s.Tenant, scope, last[scope]+1) {
+					if err != nil {
+						return
+					}
+					last[scope] = rec.Seq
+					b, _ := json.Marshal(toActivity(scope, rec))
+					fmt.Fprintf(w, "event: activity\ndata: %s\n\n", b)
+					settled = settled || terminalKind(rec.Kind)
+				}
+				if settled {
+					// Its story is told. A settled item that is re-queued
+					// re-enters through index/pending.
+					delete(following, id)
 				}
 			}
 			fl.Flush()
 		}
 	}
+}
+
+// terminalKind reports whether a record settles an item.
+func terminalKind(k string) bool {
+	return k == "done" || k == "failed" || k == "parked"
+}
+
+// inFlight names the items whose chains are worth following: everything the
+// tenant has submitted that has not settled. One fold at connect, never per
+// tick — the set only grows through index/pending, which is already tailed.
+func (s *Server) inFlight(ctx context.Context) map[string]bool {
+	out := map[string]bool{}
+	for rec, err := range s.Store.Log().Since(ctx, s.Tenant, "index/pending", 1) {
+		if err != nil {
+			return out
+		}
+		item, lerr := s.Queue.Load(ctx, s.Tenant, rec.Subject)
+		if lerr != nil {
+			continue
+		}
+		switch item.State {
+		case queue.StateDone, queue.StateFailed, queue.StateParked:
+		default:
+			out[rec.Subject] = true
+		}
+	}
+	return out
 }
 
 func sortActivities(a []Activity) {
