@@ -31,7 +31,9 @@ already paid to learn, and the price is recorded next to each:
   cost in money;
 - there is no `_box/escalate` frame because 0.70 cannot call unknown methods.
   That is why the adapter keeps an `ESCALATE:` text fallback
-  (`continuity-2026-08-31`, finding 2).
+  (`continuity-2026-08-31`, finding 2). `_box/handoff` is absent for the same
+  reason and keeps a `HANDOFF-NOW:` fallback for it; both verbs are exercised
+  against the scripted fake, which is where an unobserved shape belongs.
 
 **The thin frame is `session/request_permission`.** The fake-agent suite has
 always modelled its `toolCall.title` as a bare tool name, and no run recorded

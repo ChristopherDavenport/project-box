@@ -87,11 +87,16 @@ function origin(e) {
 // The states an operator sorts work into. `live` is the default because the
 // question the room exists to answer is what is happening now, not what has
 // ever happened.
+// `handedoff` belongs in `live` and not in the parked lane: a session asked
+// for a fresh one and the item is between them, needing nobody. Left out, work
+// would vanish from the default view at the moment an agent said it was not
+// finished — which is the reading an operator must never be given.
 const FILTERS = {
-  live: ['pending', 'claimed', 'waiting'],
+  live: ['pending', 'claimed', 'waiting', 'handedoff'],
   pending: ['pending'],
   claimed: ['claimed'],
   waiting: ['waiting'],
+  handedoff: ['handedoff'],
   parked: ['parked'],
   done: ['done'],
   all: [],

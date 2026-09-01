@@ -142,6 +142,45 @@ and a queue drained briskly except for the one item nobody wants looks healthy
 by every other measure. An exception queue with an unbounded oldest-item age
 is the finding written for you.
 
+### A session is not the unit of work
+
+A run ends in one of three ways an agent can choose, and only two of them
+existed. It can finish, and it can **escalate** — a recorded refusal that
+parks. What it could not say is the thing an agent 80% through a change and
+out of context actually means: *I am not finished and I am not stuck.*
+Escalating parks work that needs no person and discards what the session
+built; grinding on produces the low-quality commit the working contract exists
+to prevent. So there is a third transition (decided 2026-09-01): the agent
+requests a **handoff**, the session ends, and the same item goes back to the
+queue for a fresh one.
+
+Gas City makes the same distinction with `request-restart`, and the half worth
+copying is *who decides*. The agent requests; the orchestrator kills the
+session and chooses whether another follows. Here that decision is a bound —
+hops are counted on the item, each one an evidence record, and exhausting the
+limit parks with the reason named. A session able to summon its own successor
+indefinitely is an unbounded spend with no landing, and the hop count doubles
+as the answer to "how many sessions did this change take", which is the most
+direct signal there is about whether an item was sized for one.
+
+**Handed off is not parked, for the reason waiting is not parked.** The
+exception queue names work that needs a person; a handed-off item needs
+nothing but another session. Filing it there would bury real exceptions under
+routine continuity exactly as filing a pending gate there would bury them
+under routine review latency — the same argument, a third time, on a third
+axis. It is not pending either: pending says nobody has started this, and an
+item three sessions deep has been started three times.
+
+What makes it worth the state is that the successor **continues** rather than
+restarts. The workspace is held and the partial commit kept, so the next
+session adopts the tree the last one stopped in — and the notes it left are
+written to the seat *at the hop* rather than at settle, because the item does
+not settle and a note deferred to settle is a note the successor wakes
+without. That is the continuity machinery of Phase 12 fired at the moment it
+is worth the most, which is the cheapest available extension of the one result
+this system has actually measured (`docs/experiments/continuity-2026-08-31.md`:
+4/4 against 0/4).
+
 ### A new stage is a gate, a dependent item, or a change to the transaction
 
 `internal/loop`'s `Run` fixes a sequence — claim, authorize, lease,

@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -53,10 +54,25 @@ func rig(t *testing.T, scenario string) (*sqlite.Store, *loop.Loop, *ingress.Sto
 	mustSh(t, seedDir, "git", "push", "origin", "HEAD:refs/heads/main")
 
 	repo := forge.Repo{Name: "app", Remote: remote, Role: forge.RoleService, DefaultBranch: "main"}
-	m, err := gitforge.NewMirror(t.TempDir(), btn, s.Leaser("runner-1"))
+	mirrorRoot := t.TempDir()
+	m, err := gitforge.NewMirror(mirrorRoot, btn, s.Leaser("runner-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A materialized context set is 0555 all the way down, and a 0555 directory
+	// denies the unlink — so t.TempDir's own cleanup fails on it and reports a
+	// permission error that has nothing to do with the test. Production reclaims
+	// these through RemoveContext, which restores write on the way down for
+	// exactly this reason; cleanups run last-registered-first, so this one runs
+	// before the removal it is clearing the way for.
+	t.Cleanup(func() {
+		filepath.WalkDir(mirrorRoot, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				os.Chmod(p, 0o755)
+			}
+			return nil
+		})
+	})
 	if err := m.Fetch(context.Background(), repo); err != nil {
 		t.Fatal(err)
 	}

@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"sync"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
@@ -183,6 +184,16 @@ type Result struct {
 	// act, not a contrived failure: the caller parks the work with this
 	// reason attributed to the agent.
 	Escalated string
+	// HandedOff carries the agent's own reason for asking mid-run for a fresh
+	// session — the "_box/handoff" extension verb. Distinct from Escalated in
+	// the way that matters to the caller: an escalation wants a person and
+	// this wants nothing but another session, so the work goes back to the
+	// queue rather than into the exception queue.
+	HandedOff string
+	// HandoffNotes are what the session wants its successor to know, from the
+	// verb's notes parameter. They reach the seat AT THE HANDOFF rather than
+	// at settle, because the item does not settle.
+	HandoffNotes []string
 	// Usage is what the run cost, when the agent said. Silence is carried as
 	// Usage.Reported false, never as a zero total.
 	Usage Usage
@@ -268,6 +279,33 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			}
 			mu.Lock()
 			res.Escalated = p.Reason
+			mu.Unlock()
+			return map[string]any{"acknowledged": true}, nil
+		case "_box/handoff":
+			// Extension verb: the agent is out of room and not out of work.
+			// Acknowledged always, for the reason escalate is — a channel that
+			// can be refused is one agents learn not to use, and the answer
+			// they fall back on is the degraded commit.
+			//
+			// Acknowledged, not obeyed here. Whether a fresh session is opened
+			// at all is the caller's decision and bounded by it; this end of
+			// the wire only carries the request.
+			var p struct {
+				Reason string `json:"reason"`
+				Notes  string `json:"notes"`
+			}
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			if p.Reason == "" {
+				// Asked without saying why is still asked. Refusing the verb
+				// for want of prose would teach the same lesson as refusing it
+				// outright.
+				p.Reason = "no reason given"
+			}
+			res.HandedOff = p.Reason
+			res.HandoffNotes = append(res.HandoffNotes, noteLines(p.Notes)...)
 			mu.Unlock()
 			return map[string]any{"acknowledged": true}, nil
 		case "session/update":
@@ -431,6 +469,19 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	}
 	res.StopReason = promptRes.StopReason
 	return res, nil
+}
+
+// noteLines splits a handoff's notes into one claim per line. The verb takes
+// prose because that is what an agent has; the seat stores claims, and a wall
+// of text is one claim nobody can supersede or mark stale independently.
+func noteLines(s string) []string {
+	var out []string
+	for line := range strings.SplitSeq(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
 }
 
 // noteUnknown records a dialect surprise once. Callers hold mu.

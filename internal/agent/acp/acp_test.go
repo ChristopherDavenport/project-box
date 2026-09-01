@@ -110,6 +110,36 @@ func TestEscalationIsARecordedAct(t *testing.T) {
 	}
 }
 
+// TestMidRunHandoffIsARecordedAct: the agent asks for a fresh session and
+// says what its successor needs; the runtime carries both out, acknowledged.
+//
+// Acknowledged is the load-bearing half, as it is for escalate. The answer an
+// agent falls back on when a channel refuses it is the degraded commit, which
+// is the thing this verb exists to stop it producing.
+func TestMidRunHandoffIsARecordedAct(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "handoff").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.HandedOff != "context is nearly full and the migration is half applied" {
+		t.Fatalf("handoff lost: %+v", res)
+	}
+	if res.Escalated != "" {
+		t.Fatalf("a handoff read as an escalation: %+v", res)
+	}
+	// One claim per line: a wall of prose is one note nobody can supersede or
+	// mark stale on its own.
+	want := []string{"widget.go is migrated", "the tests in widget_test.go are not"}
+	if !slices.Equal(res.HandoffNotes, want) {
+		t.Fatalf("notes = %q, want %q", res.HandoffNotes, want)
+	}
+	if contains(res.Text, "refused") {
+		t.Fatal("the handoff channel was refused")
+	}
+}
+
 // TestUsageIsCarriedFromTheTurn: the turn's own total is the account, and it
 // is what the capacity meter charges. Cache reads count — cheaper, never free.
 func TestUsageIsCarriedFromTheTurn(t *testing.T) {
@@ -338,6 +368,56 @@ func fakeAgent(scenario string) {
 					f.notify("session/update", map[string]any{"sessionId": sessionID,
 						"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "escalation refused?!"}}})
 				}
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "handoff":
+				resp := f.request("_box/handoff", map[string]any{
+					"reason": "context is nearly full and the migration is half applied",
+					"notes":  "widget.go is migrated\n\nthe tests in widget_test.go are not\n",
+				})
+				if res, ok := resp["result"].(map[string]any); !ok || res["acknowledged"] != true {
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "handoff refused?!"}}})
+				}
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "halfway", "halfwaytext":
+				// A session that gets part of the way and runs out of room. It
+				// commits what it has — the successor continues in this tree —
+				// and asks for a fresh session rather than degrading.
+				os.WriteFile("part.txt", []byte("half the widget\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "half the widget")
+				if scenario == "halfway" {
+					f.request("_box/handoff", map[string]any{
+						"reason": "out of room with the widget half written",
+						"notes":  "part.txt holds the first half; widget.go is what remains",
+					})
+					f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+					break
+				}
+				// The other channel, for a harness that cannot call an unknown
+				// method — which is every claude-agent-acp shipped so far.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text",
+							"text": "HANDOFF-NOW: out of room with the widget half written\nHANDOFF: part.txt holds the first half; widget.go is what remains\n"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "finisher":
+				// The fresh session. It finishes what is already in the tree,
+				// and refuses to invent it again if the tree came back empty —
+				// so a successor that had to redo the work fails the test
+				// loudly instead of landing an identical-looking commit.
+				if _, err := os.Stat("part.txt"); err != nil {
+					f.request("_box/escalate", map[string]any{
+						"reason": "the predecessor's work is not in this workspace"})
+					f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+					break
+				}
+				os.WriteFile("widget.go", []byte("package app // finished by the successor\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "finish the widget")
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "Finished what the last session started.\nHANDOFF: the widget is whole now\n"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "worker":
 				// A real day's work: edit, commit, hand off.

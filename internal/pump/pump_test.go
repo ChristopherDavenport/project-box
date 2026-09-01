@@ -2,6 +2,7 @@ package pump
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -359,6 +360,91 @@ func TestTwoReposOneTenantSideBySide(t *testing.T) {
 		}
 		if item.Repo != "api" && item.Repo != "web" {
 			t.Fatalf("item lost its target repo: %+v", item)
+		}
+	}
+}
+
+// halfThenWhole hands off on its first session of an item and finishes on the
+// next — a builder standing in for an agent that ran out of room.
+type halfThenWhole struct {
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+func (h *halfThenWhole) Build(_ context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	h.mu.Lock()
+	first := !h.seen[ws.Run]
+	h.seen[ws.Run] = true
+	h.mu.Unlock()
+	if first {
+		os.WriteFile(filepath.Join(ws.Dir, "half.txt"), []byte(task+"\n"), 0o644)
+		if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
+			return "", err
+		}
+		if _, err := sh(ws.Dir, "git", "commit", "-m", "half of "+task); err != nil {
+			return "", err
+		}
+		out, err := sh(ws.Dir, "git", "rev-parse", "HEAD")
+		if err != nil {
+			return "", err
+		}
+		return "", &loop.Handoff{Seat: "mason", Reason: "out of room",
+			Commit: forge.Commit(strings.TrimSpace(out))}
+	}
+	// The second session finds the first's work already here, or says so.
+	if _, err := os.Stat(filepath.Join(ws.Dir, "half.txt")); err != nil {
+		return "", fmt.Errorf("the predecessor's work is not in this workspace")
+	}
+	return fixer{}.Build(context.Background(), ws, task)
+}
+
+// TestAHandedOffItemIsRedispatched is the re-dispatch half of issue #12, at
+// the level that actually decides it. The loop can end a session however it
+// likes; whether a fresh one ever happens is the drain's selection, and a
+// state the drain does not select is a state that means "abandoned quietly".
+//
+// The same executor picks it up, which is what "the same seat" amounts to
+// here: the pump routes by box and repo, and a repo has one builder.
+func TestAHandedOffItemIsRedispatched(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 1})
+	ctx := context.Background()
+	for _, lp := range w.pump.Loops {
+		lp.Builder = &halfThenWhole{seen: map[string]bool{}}
+	}
+	w.open(t, "issue-1", "fix module alpha")
+
+	if _, err := w.pump.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	for rec, err := range w.store.Log().Since(ctx, tn, "index/pending", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		id = rec.Subject
+	}
+	item, err := w.q.Load(ctx, tn, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateHandedOff || item.Hops != 1 {
+		t.Fatalf("first tick: %+v", item)
+	}
+
+	// The next tick is the re-dispatch. Nobody asked for it.
+	if _, err := w.pump.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if item, err = w.q.Load(ctx, tn, id); err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("a handed-off item was never picked up again: %+v", item)
+	}
+	log := mustSh(t, w.remote, "git", "log", "--format=%s", "refs/heads/main")
+	for _, want := range []string{"half of fix module alpha", "fix module alpha"} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("the landed history lost %q:\n%s", want, log)
 		}
 	}
 }

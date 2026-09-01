@@ -39,20 +39,39 @@ func (s *Seat) Scope() string { return "seat/" + s.Name }
 // come from any settled state — a parked run's "here is where I got stuck"
 // is exactly what the next occupant needs most.
 func (s *Seat) RecordHandoff(ctx context.Context, item queue.WorkItem, repoRemote string, notes []string) error {
+	repo, commit := "", ""
+	if repoRemote != "" && item.Head != "" {
+		repo, commit = repoRemote, item.Head
+	}
+	return s.write(ctx, item.ID, repo, commit, notes)
+}
+
+// RecordMidRun writes the notes of a session ending WITHOUT its item settling:
+// an agent that asked for a fresh session mid-change.
+//
+// Closure is normally part of finishing, and for a mid-run handoff that is too
+// late by construction. The item does not settle — it goes back to the queue
+// for a successor of itself — so a note deferred to the settle path is a note
+// the successor wakes without, which is the one thing the verb exists to
+// carry.
+//
+// The notes bind to no commit on purpose. What the session left is committed
+// in a workspace and may never land; binding them to that sha would have them
+// swept stale the moment the tree went, which is the opposite of what the
+// successor needs from them.
+func (s *Seat) RecordMidRun(ctx context.Context, run string, notes []string) error {
+	return s.write(ctx, run, "", "", notes)
+}
+
+func (s *Seat) write(ctx context.Context, run, repo, commit string, notes []string) error {
 	for _, n := range notes {
 		if strings.TrimSpace(n) == "" {
 			continue
 		}
-		r := knowledge.Record{
-			Scope:    s.Scope(),
-			Claim:    n,
-			Producer: s.Name,
-			Run:      item.ID,
-		}
-		if repoRemote != "" && item.Head != "" {
-			r.Repo, r.Commit = repoRemote, item.Head
-		}
-		if _, err := s.Base.Put(ctx, r); err != nil {
+		if _, err := s.Base.Put(ctx, knowledge.Record{
+			Scope: s.Scope(), Claim: n, Producer: s.Name, Run: run,
+			Repo: repo, Commit: commit,
+		}); err != nil {
 			return fmt.Errorf("seat %s: handoff: %w", s.Name, err)
 		}
 	}

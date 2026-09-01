@@ -70,6 +70,12 @@ type Loop struct {
 	// nobody is summoned — configure it; see OpenRepair.
 	Red func(ctx context.Context, item queue.WorkItem, prior agent.Prior) (string, error)
 	TTL time.Duration
+	// MaxHandoffs bounds how many fresh sessions one item may ask for before
+	// it parks instead. Zero means [DefaultMaxHandoffs]; negative means no bound,
+	// which is a decision an operator can make and the factory will not make
+	// for them — the same posture OpenRepair's depth takes, and for the same
+	// reason: both are the factory summoning itself.
+	MaxHandoffs int
 	// BuildTimeout bounds one build. Zero means [DefaultBuildTimeout]; a
 	// negative value means no bound, which an operator may choose.
 	//
@@ -89,6 +95,16 @@ const DefaultBuildTimeout = 30 * time.Minute
 // MaxRepairDepth bounds how far the factory will chase its own tail when no
 // depth is configured: a repair, a repair of that, a repair of that.
 const MaxRepairDepth = 3
+
+// DefaultMaxHandoffs bounds how many times one item may ask for a fresh
+// session when the Box states no limit of its own.
+//
+// An item that has taken four sessions and is still not finished has stopped
+// being a context problem and become a sizing one, and that is a judgement —
+// which is what the exception queue is for. Three is the same number the
+// repair chain uses, for the same reason: it is enough to be worth having and
+// few enough that nobody discovers the bill afterwards.
+const DefaultMaxHandoffs = 3
 
 // OpenRepair wires Red to an ingress route: the red commit's sha is the
 // delivery key, so however many post-land checks report the same red, one
@@ -198,12 +214,16 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		return item, err
 	}
 	// The workspace outlives the lease for exactly as long as the resume point
-	// does: held while the item waits with a commit to come back to, handed
-	// back to Prune the moment it settles or gives that commit up.
+	// does: held while the item waits with a commit to come back to or has
+	// handed off with a change its successor continues, handed back to Prune
+	// the moment it settles or gives that commit up.
 	defer func() {
-		if out.State == queue.StateWaiting && out.Built != "" {
-			l.Mirror.Hold(item.ID, l.Repo.Name)
-			return
+		switch out.State {
+		case queue.StateWaiting, queue.StateHandedOff:
+			if out.Built != "" {
+				l.Mirror.Hold(item.ID, l.Repo.Name)
+				return
+			}
 		}
 		l.Mirror.Discard(item.ID, l.Repo.Name)
 	}()
@@ -268,9 +288,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		case item.BuiltBase == string(base):
 			ws, head, resumed = adopted, forge.Commit(item.Built), true
 			// On the record, so the chain shows one commit judged twice rather
-			// than two builds that happened to agree.
+			// than two builds that happened to agree — or, when the resume is
+			// unfinished, one change continued rather than two attempts at it.
 			l.record(ctx, item, "build-resumed", string(head),
-				fmt.Sprintf(`{"base":%q,"waiting_on":%q}`, base, item.Note))
+				fmt.Sprintf(`{"base":%q,"waiting_on":%q,"unfinished":%v}`, base, item.Note, item.Unfinished))
 		default:
 			// The branch moved while this change waited or lost its turn to
 			// land. Replay rather than rebuild: the commit already exists, and
@@ -282,7 +303,8 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			if rerr == nil {
 				ws, head, resumed = adopted, replayed, true
 				l.record(ctx, item, "build-rebased", string(replayed),
-					fmt.Sprintf(`{"was":%q,"from":%q,"onto":%q}`, item.Built, item.BuiltBase, base))
+					fmt.Sprintf(`{"was":%q,"from":%q,"onto":%q,"unfinished":%v}`,
+						item.Built, item.BuiltBase, base, item.Unfinished))
 			} else {
 				// A conflict is a judgement call, and the agent is the one
 				// who makes those. Recorded, then built afresh.
@@ -296,6 +318,14 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		if err != nil {
 			return q.Fail(ctx, item, claim, err.Error())
 		}
+	}
+	// The builder runs unless a FINISHED change was resumed. An unfinished
+	// resume is the mid-run handoff: the successor takes the same tree at the
+	// same partial commit and goes on from there, which is the difference
+	// between handing off and parking. Skipping the builder on half a change
+	// would gate and land it, which is the degraded commit the verb exists to
+	// avoid producing.
+	if !resumed || item.Unfinished {
 		if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
 			bctx, cancelBuild := l.buildDeadline(ctx)
 			defer cancelBuild()
@@ -311,6 +341,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			}
 			return berr
 		}); serr != nil {
+			var ho *Handoff
+			if errors.As(serr, &ho) {
+				return l.handOff(ctx, q, item, claim, base, ho)
+			}
 			var esc *Escalation
 			if errors.As(serr, &esc) {
 				// The agent's own act, attributed to the agent: actor is the
@@ -406,7 +440,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		// re-enters at the ONE gate that has not answered. Waiting on a
 		// person is routine and can last days; it must cost neither an agent
 		// run nor a test suite per tick to do it.
-		item.Built, item.BuiltBase, item.PassedGates = string(head), string(base), passedNow
+		item.KeepCandidate(head, base, passedNow)
 		return q.Wait(ctx, item, claim, reasons(verdicts))
 	}
 
@@ -423,7 +457,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		// The gates passed on this head; if the branch was merely busy, next
 		// tick lands without re-running them. If it moved, the replay changes
 		// the head and the carry drops itself.
-		item.Built, item.BuiltBase, item.PassedGates = string(head), string(base), passedNow
+		item.KeepCandidate(head, base, passedNow)
 		return q.Wait(ctx, item, claim, notOurTurn)
 	}
 	defer leaser.Release(ctx, landLease)
@@ -526,7 +560,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		return q.Fail(ctx, item, claim, err.Error())
 	}
 	if notOurTurn != "" {
-		item.Built, item.BuiltBase = string(head), string(base)
+		item.KeepCandidate(head, base, nil)
 		return q.Wait(ctx, item, claim, notOurTurn)
 	}
 	defer l.Store.Leaser(l.Runner).Release(ctx, landLease)
@@ -706,6 +740,75 @@ type Escalation struct {
 // Error satisfies error.
 func (e *Escalation) Error() string {
 	return fmt.Sprintf("escalated by %s: %s", e.Seat, e.Reason)
+}
+
+// Handoff is an agent asking mid-run for a fresh session: not finished, and
+// not stuck.
+//
+// That is the case neither of the other two answers tells the truth about. An
+// escalation parks work nobody needs to look at and throws away what the
+// session built; grinding on produces the degraded commit the working
+// contract exists to prevent. "I am not finished, I am not stuck, and here is
+// where I am" is a third thing, so it gets a third transition.
+//
+// The agent requests and the loop decides — the split worth taking from Gas
+// City's request-restart, where the controller and not the agent ends the
+// session. Here the deciding is [Loop.MaxHandoffs]: past it the item parks
+// with the reason named, because a session able to summon its own successor
+// forever is an unbounded spend with no landing.
+type Handoff struct {
+	Seat   string
+	Reason string
+	// Commit is what the session left, already committed in its workspace;
+	// empty when it committed nothing. The tree is held and the successor
+	// adopts it, so the next session continues the change rather than paying
+	// an agent to make it again.
+	Commit forge.Commit
+}
+
+// Error satisfies error.
+func (h *Handoff) Error() string {
+	return fmt.Sprintf("handed off by %s: %s", h.Seat, h.Reason)
+}
+
+// handOff ends the session and returns the item to the queue for a fresh one,
+// unless the hops are spent.
+func (l *Loop) handOff(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, base forge.Commit, h *Handoff) (queue.WorkItem, error) {
+	// The agent's own act, attributed to the agent: actor is the seat, not the
+	// runner that hosted it, exactly as an escalation is. Every hop is a
+	// record, so "how many sessions did this change take" is answered from the
+	// chain rather than estimated from it.
+	l.Store.Log().Append(ctx, evidence.Record{
+		Tenant: item.Tenant, Scope: "workitem/" + item.ID,
+		Kind: "handoff-requested", Subject: item.ID, Actor: h.Seat,
+		OnBehalfOf: item.Requester, Body: []byte(h.Reason),
+		Trace: telemetry.TraceID(ctx),
+	})
+	if limit := l.maxHandoffs(); limit > 0 && item.Hops >= limit {
+		// Spent. An item that has taken the limit and is still not finished
+		// has stopped being a context problem and become a sizing one, which
+		// is a judgement — and judgements are what the exception queue is for.
+		// The reason is named rather than summarised: "handed off too often"
+		// tells nobody what the sessions were trying to do.
+		item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+			"handed off %d times without finishing, and the limit is %d — parking rather than opening another session: %s",
+			item.Hops, limit, h.Reason))
+		return l.settle(ctx, item), nil
+	}
+	if h.Commit != "" && h.Commit != base {
+		// What the session got to, kept for its successor. Nothing landed and
+		// no gate has judged it, so this is a tree to continue in rather than
+		// a candidate to re-offer — see [queue.WorkItem.Unfinished].
+		item.KeepUnfinished(h.Commit, base)
+	}
+	return q.HandOff(ctx, item, claim, h.Reason)
+}
+
+func (l *Loop) maxHandoffs() int {
+	if l.MaxHandoffs == 0 {
+		return DefaultMaxHandoffs
+	}
+	return l.MaxHandoffs
 }
 
 // settle runs the handoff hook after any settle; closure over termination.

@@ -33,6 +33,19 @@ const (
 	// finished. Distinct from parked — conflating them buries real exceptions
 	// under routine review latency.
 	StateWaiting State = "waiting"
+	// StateHandedOff is a session that ended mid-change and asked for a fresh
+	// one: the agent is not finished and is not stuck.
+	//
+	// The third state on the same axis as the second, for the same reason.
+	// Waiting is work held on somebody else's answer; handed off is work whose
+	// session ran out of room with nobody to wait for. Neither needs a person,
+	// so filing either in the exception queue would bury the parkings that do
+	// under routine ones that do not.
+	//
+	// Not pending either, though it is claimable like one. Pending says nobody
+	// has started this, and an item three sessions deep has been started three
+	// times — a state that lies about that is a state an operator cannot use.
+	StateHandedOff State = "handedoff"
 	// StateParked is the exception queue: something went wrong and a person
 	// or a later run has to look.
 	StateParked State = "parked"
@@ -155,6 +168,25 @@ type WorkItem struct {
 	// was judged against a base that no longer exists, and a rebuild is the
 	// honest answer rather than a cheap one.
 	BuiltBase string `json:"built_base,omitempty"`
+	// Unfinished marks Built as work in progress rather than a change offered
+	// for judgement: a session ran out of room, handed off, and left what it
+	// had committed in the tree.
+	//
+	// It is what keeps the two resumes apart. An ordinary resume SKIPS the
+	// builder — the commit is already the answer and only the gate has not
+	// spoken — and doing that to half a change would gate and land exactly the
+	// degraded commit a mid-run handoff exists to prevent. An unfinished
+	// resume adopts the same tree and runs the agent again on top of it.
+	Unfinished bool `json:"unfinished,omitempty"`
+	// Hops counts how many times this item has handed off to a fresh session
+	// of itself.
+	//
+	// It bounds the spend: a session that can summon its own successor
+	// indefinitely is an unbounded bill with no landing, so the limit parks
+	// with the reason named. And it answers "how many sessions did this change
+	// take", which nothing else carries and which is the most direct signal
+	// there is about whether an item was sized for one.
+	Hops int `json:"hops,omitempty"`
 	// PassedGates names the gates that already returned pass on Built.
 	//
 	// They are carried rather than re-run while that head stands. A gate that
@@ -214,6 +246,7 @@ var stateKinds = map[string]bool{
 	"claimed":   true,
 	"built":     true,
 	"waiting":   true,
+	"handedoff": true,
 	"parked":    true,
 	"done":      true,
 	"failed":    true,
@@ -345,9 +378,29 @@ func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, sev Sev
 // dropResume clears the resume point. Every settle does this: the built
 // commit either landed or was judged and refused, so a later attempt must
 // build afresh rather than re-offer a commit whose verdict is on the record.
-// Wait is the one transition that keeps it, because waiting is the one state
-// the same commit is still the answer to.
-func (w *WorkItem) dropResume() { w.Built, w.BuiltBase, w.PassedGates = "", "", nil }
+// Wait and HandOff are the transitions that keep it, because they are the
+// states the same tree is still worth coming back to.
+func (w *WorkItem) dropResume() {
+	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = "", "", nil, false
+}
+
+// KeepCandidate records a finished change to come back to instead of buying
+// it from an agent twice: the commit, the base it stands on, and the gates
+// that have already passed on it.
+func (w *WorkItem) KeepCandidate(head, base forge.Commit, passed []string) {
+	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = string(head), string(base), passed, false
+}
+
+// KeepUnfinished records work in progress a handed-off session left behind.
+//
+// A method rather than three assignments at each call site, because the
+// difference between the two resume points is one boolean and the cost of
+// getting it wrong is asymmetric: a candidate mistaken for unfinished buys a
+// second agent run, and unfinished mistaken for a candidate lands half a
+// change. No gate has judged this content, so any carried verdict goes.
+func (w *WorkItem) KeepUnfinished(head, base forge.Commit) {
+	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = string(head), string(base), nil, true
+}
 
 // Wait records a pending gate and frees the claim; the item resumes when the
 // gate answers. It keeps any resume point the caller set on the item — see
@@ -355,6 +408,26 @@ func (w *WorkItem) dropResume() { w.Built, w.BuiltBase, w.PassedGates = "", "", 
 func (q *Queue) Wait(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
 	w.State, w.Note = StateWaiting, reason
 	err := q.record(ctx, w, "waiting", w.ID, reason)
+	q.Store.Leaser(q.Runner).Release(ctx, lease)
+	return w, err
+}
+
+// HandOff ends a session without settling the item: the agent asked for a
+// fresh one, and the same work goes back to the queue for the same seat. See
+// [StateHandedOff] for why this is neither waiting nor parked, and
+// [WorkItem.Hops] for what bounds it.
+//
+// The resume point survives, as it does through Wait and for a nearer reason:
+// what the session committed is still in the tree, and the successor
+// continuing it is the whole difference between a handoff and a park.
+//
+// The hop is counted here rather than by the caller. The count is the bound,
+// and a bound a stage has to remember to increment is a bound that stops
+// binding the first time somebody adds a second call site.
+func (q *Queue) HandOff(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
+	w.State, w.Note = StateHandedOff, reason
+	w.Hops++
+	err := q.record(ctx, w, "handedoff", w.ID, reason)
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
 }

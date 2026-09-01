@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -200,8 +201,32 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	b.recordJSON(ctx, ws.Run, "agent-text", bundle.Ref, textRecord{
 		AgentRef: bundle.Ref, Text: res.Text, StopReason: res.StopReason,
 	})
+	// Escalation first: it is the stronger claim of the two. An agent that
+	// both declines and asks for a fresh session is stuck, and a fresh session
+	// will be stuck in the same place.
 	if reason := escalation(res); reason != "" {
 		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason}
+	}
+	if reason, notes := handoff(res); reason != "" {
+		// The session's account goes to the seat NOW rather than on the settle
+		// path, because the item does not settle — it goes back to the queue
+		// for a successor of itself, which wakes from this seat's scope. A
+		// note deferred to settle is a note that successor never sees, and
+		// carrying it is the entire point of the verb.
+		if b.Seat != nil {
+			if err := b.Seat.RecordMidRun(ctx, ws.Run, notes); err != nil {
+				return "", fmt.Errorf("acp: recording the handoff: %w", err)
+			}
+		}
+		// What the session got to, committed, so the successor continues it
+		// rather than being bought a second time. No "changed nothing" check
+		// here: a session may legitimately spend its whole context reading and
+		// hand off with only an account of what it found.
+		left, cerr := b.commit(ctx, ws, task, wipTrailer)
+		if cerr != nil {
+			return "", cerr
+		}
+		return "", &loop.Handoff{Seat: b.seatName(), Reason: reason, Commit: left}
 	}
 	b.stashNotes(ws.Run, handoffNotes(res.Text))
 
@@ -209,19 +234,30 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	// commits what it left, and a run that changed nothing is an error —
 	// "done" with an untouched tree is the silent failure mode agents
 	// default to when confused, and it must never look like success.
+	head, err := b.commit(ctx, ws, task, doneTrailer)
+	if err != nil {
+		return "", err
+	}
+	if head == ws.Base {
+		return "", fmt.Errorf("acp: agent finished without changing anything — no commit, no escalation (stop=%q, %d tool calls)", res.StopReason, len(res.ToolCalls))
+	}
+	return head, nil
+}
+
+// commit is the adapter's half of the working contract — the agent commits,
+// or what it left is committed for it — and reports the workspace's head
+// afterwards.
+func (b *Builder) commit(ctx context.Context, ws forge.Workspace, task, trailer string) (forge.Commit, error) {
 	if dirty, err := gitforge.Dirty(ctx, ws.Dir); err != nil {
 		return "", err
 	} else if dirty {
-		if err := gitforge.CommitAll(ctx, ws.Dir, commitMessage(task)); err != nil {
+		if err := gitforge.CommitAll(ctx, ws.Dir, commitMessage(task, trailer)); err != nil {
 			return "", fmt.Errorf("acp: committing the agent's uncommitted work: %w", err)
 		}
 	}
 	head, err := gitforge.RevParse(ctx, ws.Dir, "HEAD")
 	if err != nil {
 		return "", err
-	}
-	if forge.Commit(head) == ws.Base {
-		return "", fmt.Errorf("acp: agent finished without changing anything — no commit, no escalation (stop=%q, %d tool calls)", res.StopReason, len(res.ToolCalls))
 	}
 	return forge.Commit(head), nil
 }
@@ -295,6 +331,7 @@ func prompt(bundle agent.Bundle, task, contextDir string) string {
 ## Working contract
 - You are in a git workspace. Make the change and COMMIT it (git add, git commit) with a clear message. Do not push: landing is the factory's job, not yours.
 - If you cannot or should not proceed, escalate instead of guessing: call the _box/escalate method with {"reason": "..."} if your harness allows it; otherwise reply with a single line starting with ESCALATE: and your reason.
+- If you are not finished but are running out of room, hand off rather than degrading: call the _box/handoff method with {"reason": "...", "notes": "..."} if your harness allows it; otherwise reply with a single line starting with HANDOFF-NOW: and your reason. Commit what you have first — a fresh session continues in this same workspace, so what you leave committed is what it starts from.
 - End your final message with lines starting with "HANDOFF: " carrying anything your successor needs to know.
 `)
 	return w.String()
@@ -306,7 +343,7 @@ func escalation(res Result) string {
 	if res.Escalated != "" {
 		return res.Escalated
 	}
-	for _, line := range strings.Split(res.Text, "\n") {
+	for line := range strings.SplitSeq(res.Text, "\n") {
 		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "ESCALATE:"); ok {
 			return strings.TrimSpace(after)
 		}
@@ -314,9 +351,41 @@ func escalation(res Result) string {
 	return ""
 }
 
+// handoff reads the mid-run handoff from both channels the same way, and
+// returns the reason with the notes to leave behind.
+//
+// The text fallback is HANDOFF-NOW: rather than HANDOFF:, which already means
+// something here — a parting note on a finished run. The two must not be one
+// word, because the difference between them is whether a fresh session is
+// opened, and 0.70 cannot call an unknown method at all: without a text
+// channel the verb would be unreachable from the only agent this factory
+// actually runs.
+//
+// The notes are the verb's, then the final message's HANDOFF: lines, so an
+// agent using either channel leaves its successor the same thing.
+func handoff(res Result) (string, []string) {
+	reason := res.HandedOff
+	if reason == "" {
+		for line := range strings.SplitSeq(res.Text, "\n") {
+			after, ok := strings.CutPrefix(strings.TrimSpace(line), "HANDOFF-NOW:")
+			if !ok {
+				continue
+			}
+			if reason = strings.TrimSpace(after); reason == "" {
+				reason = "no reason given"
+			}
+			break
+		}
+	}
+	if reason == "" {
+		return "", nil
+	}
+	return reason, append(slices.Clone(res.HandoffNotes), handoffNotes(res.Text)...)
+}
+
 func handoffNotes(text string) []string {
 	var out []string
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "HANDOFF:"); ok {
 			if n := strings.TrimSpace(after); n != "" {
 				out = append(out, n)
@@ -343,7 +412,15 @@ func tally(names []string) map[string]int {
 	return out
 }
 
-func commitMessage(task string) string {
+// The two trailers the adapter commits under. They differ because the commits
+// differ: one is a change offered for judgement, the other is a session's
+// working state kept so its successor does not buy it again.
+const (
+	doneTrailer = "(committed by the adapter: the agent made the change and left the ceremony)"
+	wipTrailer  = "(work in progress, committed by the adapter: the session handed off before finishing)"
+)
+
+func commitMessage(task, trailer string) string {
 	line := task
 	if i := strings.IndexByte(line, '\n'); i >= 0 {
 		line = line[:i]
@@ -351,7 +428,7 @@ func commitMessage(task string) string {
 	if len(line) > 72 {
 		line = line[:72]
 	}
-	return line + "\n\n(committed by the adapter: the agent made the change and left the ceremony)"
+	return line + "\n\n" + trailer
 }
 
 func (b *Builder) stashNotes(run string, notes []string) {

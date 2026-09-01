@@ -125,9 +125,22 @@ func (p *Pump) Intake(ctx context.Context) (int, error) {
 	return created, unreadable
 }
 
-// Drain runs every claimable pending or waiting item, within budget. It
-// returns how many items it settled this pass; blocked, stopped, busy and
-// over-budget items simply remain for the next tick.
+// claimable names the states a drain may take work in — equivalently, the
+// states that are not settled. One list rather than two: the selection and
+// the settled count read the same vocabulary, and when they were spelled out
+// separately a state added to one and not the other would have had the pump
+// running an item and then reporting it as finished.
+func claimable(s queue.State) bool {
+	switch s {
+	case queue.StatePending, queue.StateWaiting, queue.StateHandedOff:
+		return true
+	}
+	return false
+}
+
+// Drain runs every claimable item, within budget. It returns how many items
+// it settled this pass; blocked, stopped, busy and over-budget items simply
+// remain for the next tick.
 func (p *Pump) Drain(ctx context.Context) (int, error) {
 	var candidates []queue.WorkItem
 	// One unreadable item must not cost every other item its tick. Aborting
@@ -164,7 +177,10 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			}
 			item = recovered
 		}
-		if item.State == queue.StatePending || item.State == queue.StateWaiting {
+		// Handed off is claimable too, and this is the re-dispatch the verb
+		// promises: a session that asked for a fresh one gets one on the next
+		// tick, from the same executor and therefore the same seat.
+		if claimable(item.State) {
 			candidates = append(candidates, item)
 		}
 	}
@@ -209,7 +225,7 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			defer mu.Unlock()
 			switch {
 			case err == nil:
-				if out.State != queue.StatePending && out.State != queue.StateWaiting {
+				if !claimable(out.State) {
 					settled++
 				}
 			case errors.Is(err, queue.ErrStopped),

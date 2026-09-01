@@ -123,3 +123,51 @@ func TestSecondRunReceivesTheHandoff(t *testing.T) {
 		t.Fatal("a seat read another seat's memory")
 	}
 }
+
+// TestMidRunHandoffReachesTheSuccessor: a session that hands off mid-change
+// does not settle, so the settle path cannot be what carries its notes.
+//
+// The item goes straight back to the queue for a fresh session of the same
+// seat, and that session wakes from this scope. A note written on the settle
+// path would be written after the successor had already woken — which is to
+// say, never, for the one run it was written for.
+func TestMidRunHandoffReachesTheSuccessor(t *testing.T) {
+	s := open(t)
+	ctx := context.Background()
+	st := &Seat{Name: "mason", Base: &knowledge.Base{Store: s, Tenant: tn}}
+
+	if err := st.RecordMidRun(ctx, "wi-hop", []string{
+		"the widget migration is half applied", "widget_test.go still expects the old shape",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	wake, ok, err := st.WakeLayer(ctx, 8)
+	if err != nil || !ok {
+		t.Fatalf("wake: ok=%v err=%v", ok, err)
+	}
+	for _, want := range []string{"half applied", "still expects the old shape", "wi-hop"} {
+		if !strings.Contains(wake.Instructions, want) {
+			t.Fatalf("the mid-run notes lost %q:\n%s", want, wake.Instructions)
+		}
+	}
+	// And by run, which is the successor's own question when it is a repair
+	// rather than the seat's next turn.
+	notes, err := st.HandoffFrom(ctx, "wi-hop")
+	if err != nil || len(notes) != 2 {
+		t.Fatalf("HandoffFrom: %v %v", notes, err)
+	}
+
+	// Bound to no commit, deliberately. What the session left is committed in
+	// a workspace and may never land; binding the notes to that sha would have
+	// them swept stale the moment the tree went — the successor would be told
+	// its own predecessor's account was out of date before reading it.
+	records, err := st.Base.Retrieve(ctx, knowledge.Query{Granted: []string{st.Scope()}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range records {
+		if r.Commit != "" || r.Repo != "" {
+			t.Fatalf("a mid-run note was bound to %s@%s", r.Repo, r.Commit)
+		}
+	}
+}

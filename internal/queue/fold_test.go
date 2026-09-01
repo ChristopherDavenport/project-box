@@ -113,6 +113,10 @@ func TestStateWritersUseStateKinds(t *testing.T) {
 			_, err := qu.Fail(ctx, w, l, "failed")
 			return err
 		}},
+		{"wi-handedoff", func(w WorkItem, l forge.Lease) error {
+			_, err := qu.HandOff(ctx, w, l, "out of room")
+			return err
+		}},
 	} {
 		w := submit(t, qu, tc.id)
 		w, lease, err := qu.Claim(ctx, w)

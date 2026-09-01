@@ -437,6 +437,8 @@ claim is decoration.
 | A new stage needs no new stage | a propose/critique pair runs as two graph nodes under two roles — blocked until its dependency settles, each with its own claim, lease, evidence scope and settled record — with `Run` unchanged | 10 |
 | Budget refusal | work waits rather than overdrawing a tenant budget | 11 |
 | Seat continuity | second run receives predecessor's handoff; escalation parks with agent-attributed reason | 12 |
+| Mid-run handoff | a handed-off run resumes with its predecessor's notes and continues its committed work rather than redoing it; the item is re-dispatched without reaching the exception queue | 12 |
+| Handoff hops are bounded | each hop is an evidence record, and the limit parks with the reason named | 12 |
 
 ### CI gates
 
@@ -491,6 +493,7 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Landing discipline is per-lane policy | optimistic into main where a Box chooses; env/infra and promotion always gated; fencing never optimistic |
 | A lower environment between main and prod | red main is allowed, red prod is not; promotion requires soak plus green |
 | Thunderdome adopted as a lane, not a stance | swarm-repair needs the attribution and reversibility this substrate provides |
+| A mid-run handoff is a third non-settled state, bounded by hops | not finished and not stuck is a third thing: escalating parks work needing nobody and discards what the session built, grinding on produces the commit the contract exists to prevent; the agent requests and the loop decides, which is what the bound is |
 | A new loop stage is a gate or a dependent work item; `Run`'s sequence stays Go | judgement is a `Gate`, work that makes its own change is a node in the graph, and what is left is one unit's transaction — one claim, one lease, one resume point, one meter slot — which a declared sequence would only make it possible to misconfigure |
 
 ## 7. Deferred decisions
@@ -932,6 +935,57 @@ anything but that. And nothing in box.yaml wires `Red` at all yet — the
 red-main route is test-only configuration, so an optimistic Box today lands,
 checks, records the red, and summons nobody. That is the same unrun second
 lane #7 names, and it is what a live optimistic session would close.
+
+Issue #12 gave a session a way to end that is not finishing, parking or
+failing (2026-09-01). `HANDOFF:` lines were read off the agent's FINAL
+message, so a handoff could only ever be a parting note, and an agent out of
+context mid-change had two moves that both lied: escalate, which parks work
+needing no person and throws away what the session built, or push on. The
+third is `_box/handoff` beside `_box/escalate` — `{"reason", "notes"}`,
+acknowledged always for the reason escalate is, with a `HANDOFF-NOW:` text
+fallback because 0.70 cannot call an unknown method and a verb with no text
+channel is a verb the only real agent here cannot reach. The two spellings are
+one word apart on purpose: `HANDOFF:` is still a parting note, and the
+difference between them is whether a fresh session opens.
+
+`StateHandedOff` is the third non-settled state, and the reasoning is the
+queue's own about waiting, used a third time — a handed-off item needs nobody,
+so filing it as an exception would bury the ones that do. Not pending either:
+pending says nobody has started this, and an item three sessions deep has been
+started three times. `Drain` claims it like any other claimable state, which
+is where "re-dispatch" is actually decided; the same executor takes it, and a
+repo has one builder, which is what "the same seat" amounts to.
+
+The successor CONTINUES. The tree is held and what the session committed is
+kept as `Unfinished` — a resume point distinguished from `Built` by one
+boolean, because an ordinary resume SKIPS the builder and doing that to half a
+change would gate and land exactly the degraded commit the verb exists to
+prevent. The notes go to the seat at the hop rather than at settle, since the
+item does not settle and a note deferred to settle is one the successor wakes
+without. Asserted the way it matters: the landed history carries both
+sessions' commits, so a successor that started over fails the test rather than
+producing a plausible-looking commit; the two sessions' agentrefs differ,
+because a run woken with a different memory is a different agent on the
+record.
+
+Hops are bounded — `Loop.MaxHandoffs`, three by default, negative for none,
+the posture the repair depth already takes — and each is an evidence record
+attributed to the seat. Exhausting the limit parks with the reason named: an
+item that has taken four sessions is a sizing problem rather than a context
+problem, which is a judgement, and judgements are what the exception queue is
+for.
+
+The working contract names the verb, because a verb no agent is told about is
+a verb no agent uses. It rides the prompt rather than the bundle, so it
+inherits submit.py's problem exactly — ungoverned text that is not part of the
+agentref — and promoting the contract to a base layer remains the fix for
+both.
+
+Every reader of the state vocabulary learned the word in the same pass, which
+is the failure mode that vocabulary has already had once: `/v1/status` counts
+it as in flight, the room derives a stage from it, and the control room's
+`live` filter lists it. A state that some readers know is worse than no state,
+because work does not disappear loudly — it disappears plausibly.
 
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no

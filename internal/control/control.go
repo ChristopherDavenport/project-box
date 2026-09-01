@@ -395,6 +395,8 @@ func stageOf(kind string) string {
 		return "done"
 	case "waiting":
 		return "waiting"
+	case "handedoff", "handoff-requested":
+		return "handedoff"
 	case "parked", "escalated":
 		return "parked"
 	case "failed":

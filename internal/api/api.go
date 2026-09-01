@@ -201,7 +201,11 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		switch item.State {
-		case queue.StatePending, queue.StateWaiting:
+		case queue.StatePending, queue.StateWaiting, queue.StateHandedOff:
+			// Everything still owed a run. A handed-off item is between
+			// sessions rather than finished, and leaving it out would have the
+			// count drop when an agent asked for a fresh session — work
+			// disappearing from the only number an operator watches.
 			pending++
 		}
 	}
