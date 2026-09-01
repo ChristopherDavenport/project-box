@@ -138,6 +138,14 @@ func (c *Client) Resume(ctx context.Context, reason string) error {
 	return c.do(ctx, "POST", "/v1/resume", ControlRequest{Reason: reason}, nil)
 }
 
+// Evidence is an item's whole chain — the raw material behind every rendered
+// view, and the only place the agent's prompt and its own account of the run
+// can be read back.
+func (c *Client) Evidence(ctx context.Context, id string) ([]evidence.Record, error) {
+	var out []evidence.Record
+	return out, c.do(ctx, "GET", "/v1/items/"+id+"/evidence", nil, &out)
+}
+
 // Reopen takes an item off the exception queue: verb is "resolve" (closed by
 // hand, no landing) or "retry" (back into the queue for another attempt).
 func (c *Client) Reopen(ctx context.Context, verb, id, reason string) (queue.WorkItem, error) {

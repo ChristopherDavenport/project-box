@@ -5,9 +5,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"net"
 	"net/http"
@@ -16,6 +18,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/boxctx"
 	"github.com/ChristopherDavenport/project-box/internal/control"
+	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/gateway"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
@@ -206,6 +209,48 @@ func printQueue(entries []control.QueueEntry) {
 	fmt.Printf("\n%d item(s)\n", len(entries))
 }
 
+// printTranscript renders a run so a person can judge it: what the agent was
+// told, how that instruction was composed, and what it said back.
+//
+// The agentref settles whether two runs had the same instructions and cannot
+// show you either of them, so for evaluating a prompt — as against auditing
+// one — the digest is the wrong artefact entirely. These records are the
+// right one, and they are unreadable as raw chain output: base64 bodies with
+// a multi-kilobyte string inside a JSON field.
+func printTranscript(recs []evidence.Record) error {
+	found := false
+	for _, r := range recs {
+		switch r.Kind {
+		case "agent-prompt":
+			var p struct{ AgentRef, Prompt, Bundle string }
+			if err := json.Unmarshal(r.Body, &p); err != nil {
+				return err
+			}
+			found = true
+			fmt.Printf("=== PROMPT (agentref %s, %s) ===\n\n%s\n", short(p.AgentRef), r.At.Format(time.RFC3339), p.Prompt)
+			fmt.Printf("\n=== BUNDLE ===\n\n%s\n", p.Bundle)
+		case "agent-text":
+			var tx struct{ AgentRef, StopReason, Text string }
+			if err := json.Unmarshal(r.Body, &tx); err != nil {
+				return err
+			}
+			found = true
+			fmt.Printf("\n=== AGENT SAID (stop=%s) ===\n\n%s\n", tx.StopReason, tx.Text)
+		}
+	}
+	if !found {
+		fmt.Println("no agent transcript on this item — it may predate prompt recording, or no agent ran")
+	}
+	return nil
+}
+
+func short(ref string) string {
+	if len(ref) > 12 {
+		return ref[:12]
+	}
+	return ref
+}
+
 // age renders a duration at the precision an operator cares about: seconds
 // while a run is live, days once something has been forgotten.
 // printExceptions renders the exception queue in the order a person should
@@ -335,6 +380,15 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 			return c.Stop(ctx, rest[0])
 		}
 		return c.Resume(ctx, rest[0])
+	case "transcript":
+		if len(rest) == 0 {
+			return fmt.Errorf("transcript needs an item id")
+		}
+		recs, err := c.Evidence(ctx, rest[0])
+		if err != nil {
+			return err
+		}
+		return printTranscript(recs)
 	case "resolve", "retry":
 		sub := flag.NewFlagSet(cmd, flag.ContinueOnError)
 		item := sub.String("item", "", "work item id, as `box queue` lists it")

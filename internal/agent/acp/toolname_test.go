@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"slices"
 	"strings"
@@ -113,5 +114,59 @@ func TestTheRecordSaysWhereTheTokensWent(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("agent-result missing %s:\n%s", want, body)
 		}
+	}
+}
+
+// TestThePromptIsReadableAfterTheRun.
+//
+// The agentref is a sha256 of the bundle: it settles whether two runs had the
+// same instructions and can never show you either of them. Nothing anywhere
+// held the text, so the most consequential input in the system — the thing
+// that decides what an agent does with twenty million tokens — was the one
+// input nobody could read back. Composer.Explain had rendered exactly this
+// since Phase 2 and had no caller.
+func TestThePromptIsReadableAfterTheRun(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	ctx := context.Background()
+	runItem(t, s, lp, router, "issue-prompt", "make the change")
+
+	var prompt, bundleText, agentText string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-issue-prompt", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch r.Kind {
+		case "agent-prompt":
+			var p struct{ Prompt, Bundle string }
+			if err := json.Unmarshal(r.Body, &p); err != nil {
+				t.Fatal(err)
+			}
+			prompt, bundleText = p.Prompt, p.Bundle
+		case "agent-text":
+			var tx struct{ Text string }
+			if err := json.Unmarshal(r.Body, &tx); err != nil {
+				t.Fatal(err)
+			}
+			agentText = tx.Text
+		}
+	}
+
+	// The literal text, not a digest of it: the task, and the contract that
+	// every run in this repository has executed under.
+	for _, want := range []string{"make the change", "## Task", "## Working contract", "_box/escalate"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the recorded prompt is missing %q:\n%s", want, prompt)
+		}
+	}
+	// And where it came from — layers with their digests, the tool policy,
+	// which is what makes the agentref checkable against content rather than
+	// merely comparable to itself.
+	for _, want := range []string{"agentref:", "layers (in application order):", "tools:", "instructions:"} {
+		if !strings.Contains(bundleText, want) {
+			t.Errorf("the bundle explanation is missing %q:\n%s", want, bundleText)
+		}
+	}
+	if agentText == "" {
+		t.Error("the agent's own account of the run was not recorded")
 	}
 }

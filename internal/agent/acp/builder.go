@@ -101,9 +101,28 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		}
 	}
 
+	// The prompt itself, verbatim, immediately before it is sent.
+	//
+	// The agentref proves WHICH prompt ran and detects tampering, but it is a
+	// sha256 and therefore one-way: it can settle a dispute and cannot answer
+	// a question. Nothing anywhere held the text, so the most consequential
+	// input in the system — the thing that decides what an agent does with
+	// twenty million tokens — was the one input nobody could read back.
+	//
+	// The bundle explanation rides along because the prompt alone does not
+	// say where it came from: Explain renders the layers, their digests, the
+	// tool policy and the context set, which is what makes the agentref
+	// checkable against content rather than merely comparable to itself. It
+	// has existed since Phase 2 and had no caller until now.
+	sent := prompt(bundle, task, contextDir)
+	explained, _ := b.Composer.Explain(ctx, bundle)
+	b.recordJSON(ctx, ws.Run, "agent-prompt", bundle.Ref, promptRecord{
+		AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained),
+	})
+
 	rt := &Runtime{Command: b.Command, Dir: ws.Dir, Env: b.Env, MaxTokens: b.MaxTokens}
 	started := time.Now()
-	res, err := rt.Run(ctx, bundle, prompt(bundle, task, contextDir))
+	res, err := rt.Run(ctx, bundle, sent)
 	elapsed := time.Since(started)
 	// Cost is charged even when the run failed. A session that errored
 	// halfway still spent what it spent, and a meter that only charges for
@@ -142,6 +161,20 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 			res.Usage.Total(), res.Usage.InputTokens, res.Usage.OutputTokens,
 			res.Usage.CachedReadTokens, res.Usage.CachedWriteTokens,
 			res.Usage.CostUSD, res.Usage.Reported, unknown, tools, denied))
+	// What the agent actually said, kept rather than mined.
+	//
+	// res.Text was read twice — for HANDOFF lines and for the ESCALATE text
+	// fallback — and then dropped, so the run's own account of itself was
+	// parsed for two keywords and thrown away. It is the only narrative
+	// evidence of WHY a run did what it did, and the difference between an
+	// expensive run and a wasteful one is usually in it.
+	//
+	// Its own record, not a field on agent-result: it is unbounded where the
+	// result is a fixed set of numbers, and an operator reading the metrics
+	// should not have to page a transcript to reach them.
+	b.recordJSON(ctx, ws.Run, "agent-text", bundle.Ref, textRecord{
+		AgentRef: bundle.Ref, Text: res.Text, StopReason: res.StopReason,
+	})
 	if reason := escalation(res); reason != "" {
 		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason}
 	}
@@ -279,6 +312,38 @@ func (b *Builder) wakeNotes() int {
 		return b.WakeNotes
 	}
 	return 8
+}
+
+// promptRecord is the exact input to one agent run, and how it was composed.
+type promptRecord struct {
+	AgentRef string `json:"agentref"`
+	// Prompt is the literal text sent to the agent.
+	Prompt string `json:"prompt"`
+	// Bundle is Composer.Explain's rendering: layers in application order
+	// with their digests, the tool policy, the skills, the context set, and
+	// the merged instructions.
+	Bundle string `json:"bundle"`
+}
+
+// textRecord is the agent's own account of the run: every message chunk it
+// streamed, in order, and how the turn ended.
+type textRecord struct {
+	AgentRef   string `json:"agentref"`
+	StopReason string `json:"stop"`
+	Text       string `json:"text"`
+}
+
+// recordJSON writes a narrative record whose body is a marshalled value —
+// safer than a format string once a field can carry a multi-kilobyte prompt
+// full of quotes and newlines.
+func (b *Builder) recordJSON(ctx context.Context, run, kind, subject string, v any) {
+	body, err := json.Marshal(v)
+	if err != nil {
+		// The record is the point; losing it silently is the failure this
+		// package exists to prevent elsewhere.
+		body = []byte(fmt.Sprintf(`{"marshal_error":%q}`, err.Error()))
+	}
+	b.record(ctx, run, kind, subject, string(body))
 }
 
 func (b *Builder) record(ctx context.Context, run, kind, subject, body string) {
