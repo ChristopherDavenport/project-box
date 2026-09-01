@@ -259,6 +259,9 @@ func (g *log) Append(ctx context.Context, r evidence.Record) (evidence.Record, e
 	if r.Scope == "" {
 		return evidence.Record{}, errors.New("spanner: evidence record needs a scope")
 	}
+	if r.Kind == evidence.KindCompaction {
+		return evidence.Record{}, errors.New("spanner: kind \"compaction\" is reserved — a summary enters the chain only through Compact")
+	}
 	if r.Body == nil {
 		r.Body = []byte{}
 	}
@@ -357,6 +360,83 @@ func (g *log) BySubject(ctx context.Context, t tenant.ID, subject string) iter.S
 
 func (g *log) Verify(ctx context.Context, t tenant.ID, scope string) error {
 	return evidence.VerifyScope(ctx, g, t, scope)
+}
+
+// Compact replaces the scope's prefix with one summary record; see
+// [evidence.Log]. The judgement — prefix verification, receipt checks,
+// summary construction — is evidence.Summarize's; this method supplies the
+// rows, the database's clock, and the prune, in one transaction. The rows
+// strictly below the boundary are deleted by key range and the summary takes
+// the boundary row's seat by replacing every column, so no key is both
+// deleted and written in one commit.
+func (g *log) Compact(ctx context.Context, t tenant.ID, scope string, through uint64, exp evidence.Export, actor string) (evidence.Record, error) {
+	if err := t.Validate(); err != nil {
+		return evidence.Record{}, err
+	}
+	if scope == "" {
+		return evidence.Record{}, errors.New("spanner: compaction needs a scope")
+	}
+	var out evidence.Record
+	_, err := g.s.c.ReadWriteTransaction(ctx, func(ctx context.Context, txn *gspanner.ReadWriteTransaction) error {
+		it := txn.Query(ctx, gspanner.Statement{
+			SQL:    `SELECT ` + recordCols + ` FROM chain WHERE tenant=@t AND scope=@s AND seq<=@q ORDER BY seq`,
+			Params: map[string]any{"t": string(t), "s": scope, "q": int64(through)},
+		})
+		var rs []evidence.Record
+		err := func() error {
+			defer it.Stop()
+			for {
+				row, err := it.Next()
+				if errors.Is(err, iterator.Done) {
+					return nil
+				}
+				if err != nil {
+					return err
+				}
+				r, err := scanRecord(row)
+				if err != nil {
+					return err
+				}
+				rs = append(rs, r)
+			}
+		}()
+		if err != nil {
+			return err
+		}
+		if n := len(rs); n == 0 || rs[n-1].Seq != through {
+			return fmt.Errorf("spanner: %s/%s has no record at seq %d to compact through", t, scope, through)
+		}
+		sum, err := evidence.Summarize(rs, exp, actor)
+		if err != nil {
+			return err
+		}
+		now, err := dbNow(ctx, txn)
+		if err != nil {
+			return err
+		}
+		sum.At = now.UTC()
+		sum, err = evidence.Seal(sum)
+		if err != nil {
+			return err
+		}
+		out = sum
+		return txn.BufferWrite([]*gspanner.Mutation{
+			gspanner.Delete("chain", gspanner.KeyRange{
+				Start: gspanner.Key{string(t), scope, 0},
+				End:   gspanner.Key{string(t), scope, int64(through)},
+				Kind:  gspanner.ClosedOpen,
+			}),
+			gspanner.InsertOrUpdate("chain",
+				[]string{"tenant", "scope", "seq", "id", "prev", "kind", "subject", "actor", "on_behalf_of", "grant_id", "body", "at_ns", "trace"},
+				[]any{string(sum.Tenant), sum.Scope, int64(sum.Seq), sum.ID, sum.Prev, sum.Kind, sum.Subject,
+					sum.Actor, sum.OnBehalfOf, sum.Grant, sum.Body, sum.At.UnixNano(), sum.Trace},
+			),
+		})
+	})
+	if err != nil {
+		return evidence.Record{}, err
+	}
+	return out, nil
 }
 
 func (g *log) query(ctx context.Context, stmt gspanner.Statement) iter.Seq2[evidence.Record, error] {

@@ -14,6 +14,7 @@ package conformance
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -393,6 +394,243 @@ func Run(t *testing.T, open func(t *testing.T) Harness) {
 		}
 	})
 
+	t.Run("chain/compact-preserves-verifiable-seam", func(t *testing.T) {
+		tn := tid(t)
+		log := s.Log()
+		var all []evidence.Record
+		for i := range 6 {
+			r, err := log.Append(ctx, rec(tn, "scope", fmt.Sprintf("sha-%d", i)))
+			if err != nil {
+				t.Fatalf("append %d: %v", i, err)
+			}
+			all = append(all, r)
+		}
+		pruned := all[:4]
+		sum, err := log.Compact(ctx, tn, "scope", 4, receipt(pruned), "compactor")
+		if err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		// The summary takes the pruned head's seat and names its hash, which
+		// is the same hash the surviving successor already names.
+		if sum.Seq != 4 || sum.Prev != all[3].ID || sum.Kind != evidence.KindCompaction {
+			t.Fatalf("summary must sit at the pruned head: %+v", sum)
+		}
+		// The store proves the hot side of the seam.
+		if err := log.Verify(ctx, tn, "scope"); err != nil {
+			t.Fatalf("compacted scope must verify: %v", err)
+		}
+		// The suffix is untouched: the head is the record it always was, and
+		// the hot store holds exactly summary + survivors.
+		head, err := log.Head(ctx, tn, "scope")
+		if err != nil || head.ID != all[5].ID {
+			t.Fatalf("head after compaction: %+v, %v", head, err)
+		}
+		var hot []evidence.Record
+		for r, err := range log.Since(ctx, tn, "scope", 1) {
+			if err != nil {
+				t.Fatalf("since: %v", err)
+			}
+			hot = append(hot, r)
+		}
+		if len(hot) != 3 || hot[0].ID != sum.ID || hot[1].ID != all[4].ID || hot[2].ID != all[5].ID {
+			t.Fatalf("hot store must keep summary + suffix, got %d records", len(hot))
+		}
+		// Offline, an auditor proves both sides from bytes alone: the hot walk
+		// starting at the summary, and the exported run ending at the hash the
+		// summary continues from.
+		if err := evidence.VerifyRecords(hot); err != nil {
+			t.Fatalf("hot side offline: %v", err)
+		}
+		if err := evidence.VerifySeam(sum, pruned); err != nil {
+			t.Fatalf("worm side offline: %v", err)
+		}
+		// Appends continue as if nothing happened.
+		r7, err := log.Append(ctx, rec(tn, "scope", "sha-7"))
+		if err != nil || r7.Seq != 7 || r7.Prev != all[5].ID {
+			t.Fatalf("append after compaction: %+v, %v", r7, err)
+		}
+		if err := log.Verify(ctx, tn, "scope"); err != nil {
+			t.Fatalf("verify after post-compaction append: %v", err)
+		}
+	})
+
+	t.Run("chain/compact-to-head-then-again", func(t *testing.T) {
+		tn := tid(t)
+		log := s.Log()
+		var all []evidence.Record
+		for i := range 3 {
+			r, err := log.Append(ctx, rec(tn, "scope", fmt.Sprintf("sha-%d", i)))
+			if err != nil {
+				t.Fatalf("append %d: %v", i, err)
+			}
+			all = append(all, r)
+		}
+		// Compacting through the head leaves a scope of exactly one summary.
+		sum1, err := log.Compact(ctx, tn, "scope", 3, receipt(all), "compactor")
+		if err != nil {
+			t.Fatalf("compact to head: %v", err)
+		}
+		if err := log.Verify(ctx, tn, "scope"); err != nil {
+			t.Fatalf("bare summary must verify: %v", err)
+		}
+		// The next append chains to the summary itself — the seam's other
+		// spelling.
+		r4, err := log.Append(ctx, rec(tn, "scope", "sha-4"))
+		if err != nil || r4.Seq != 4 || r4.Prev != sum1.ID {
+			t.Fatalf("append onto summary: %+v, %v", r4, err)
+		}
+		r5, err := log.Append(ctx, rec(tn, "scope", "sha-5"))
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		// A second compaction swallows the first summary: its export runs
+		// from the prior summary's seat, so exports chain back to genesis.
+		hot := []evidence.Record{sum1, r4, r5}
+		sum2, err := log.Compact(ctx, tn, "scope", 5, receipt(hot), "compactor")
+		if err != nil {
+			t.Fatalf("second compact: %v", err)
+		}
+		c, err := evidence.ParseCompaction(sum2)
+		if err != nil {
+			t.Fatalf("parse second summary: %v", err)
+		}
+		if c.From != 3 || c.Through != 5 || sum2.Prev != r5.ID {
+			t.Fatalf("second summary must cover back to the first: %+v", c)
+		}
+		if err := log.Verify(ctx, tn, "scope"); err != nil {
+			t.Fatalf("verify after second compaction: %v", err)
+		}
+		if err := evidence.VerifySeam(sum2, hot); err != nil {
+			t.Fatalf("seam over an export that starts at a summary: %v", err)
+		}
+	})
+
+	t.Run("chain/compact-refusals", func(t *testing.T) {
+		tn := tid(t)
+		log := s.Log()
+		var all []evidence.Record
+		for i := range 3 {
+			r, err := log.Append(ctx, rec(tn, "scope", fmt.Sprintf("sha-%d", i)))
+			if err != nil {
+				t.Fatalf("append %d: %v", i, err)
+			}
+			all = append(all, r)
+		}
+		// The summary kind is reserved for the seam.
+		forged := rec(tn, "scope", "sha-x")
+		forged.Kind = evidence.KindCompaction
+		if _, err := log.Append(ctx, forged); err == nil {
+			t.Fatal("Append must refuse the reserved summary kind")
+		}
+		// A receipt that does not pin the pruned run is refused: no
+		// checkpoint, no prune.
+		good := receipt(all[:2])
+		bad := good
+		bad.Head = all[2].ID
+		if _, err := log.Compact(ctx, tn, "scope", 2, bad, "compactor"); err == nil {
+			t.Fatal("Compact must refuse a receipt whose head is not the pruned head")
+		}
+		bad = good
+		bad.To = 3
+		if _, err := log.Compact(ctx, tn, "scope", 2, bad, "compactor"); err == nil {
+			t.Fatal("Compact must refuse a receipt covering a different range")
+		}
+		// Beyond the head, in an empty scope, or in another tenant: nothing
+		// to stand for.
+		if _, err := log.Compact(ctx, tn, "scope", 9, good, "compactor"); err == nil {
+			t.Fatal("Compact past the head must be refused")
+		}
+		if _, err := log.Compact(ctx, tn, "elsewhere", 2, good, "compactor"); err == nil {
+			t.Fatal("Compact of an empty scope must be refused")
+		}
+		if _, err := log.Compact(ctx, tid(t, "other"), "scope", 2, good, "compactor"); err == nil {
+			t.Fatal("cross-tenant Compact must find nothing")
+		}
+		// Every refusal left the chain exactly as it was.
+		if err := log.Verify(ctx, tn, "scope"); err != nil {
+			t.Fatalf("chain after refusals: %v", err)
+		}
+		if head, err := log.Head(ctx, tn, "scope"); err != nil || head.ID != all[2].ID {
+			t.Fatalf("head after refusals: %+v, %v", head, err)
+		}
+		// A bare summary cannot be compacted again — there is nothing beyond
+		// it to summarize.
+		if _, err := log.Compact(ctx, tn, "scope", 2, good, "compactor"); err != nil {
+			t.Fatalf("legitimate compact: %v", err)
+		}
+		if _, err := log.Compact(ctx, tn, "scope", 2, good, "compactor"); err == nil {
+			t.Fatal("re-compacting a bare summary must be refused")
+		}
+	})
+
+	t.Run("chain/compacted-tamper-still-fails", func(t *testing.T) {
+		tn := tid(t)
+		log := s.Log()
+		var all []evidence.Record
+		for i := range 5 {
+			r, err := log.Append(ctx, rec(tn, "scope", fmt.Sprintf("sha-%d", i)))
+			if err != nil {
+				t.Fatalf("append %d: %v", i, err)
+			}
+			all = append(all, r)
+		}
+		pruned := all[:3]
+		sum, err := log.Compact(ctx, tn, "scope", 3, receipt(pruned), "compactor")
+		if err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		hot := []evidence.Record{sum, all[3], all[4]}
+		if err := evidence.VerifyRecords(hot); err != nil {
+			t.Fatalf("intact compacted chain must verify: %v", err)
+		}
+		// As before compaction, the attacks are asserted offline: the store's
+		// own API has no mutation to abuse. A tampered survivor fails.
+		tampered := append([]evidence.Record(nil), hot...)
+		tampered[1].Body = []byte("altered after the fact")
+		if err := evidence.VerifyRecords(tampered); err == nil {
+			t.Fatal("tampered survivor must fail verification")
+		}
+		// A removed survivor breaks the chain, seam or no seam.
+		if err := evidence.VerifyRecords([]evidence.Record{hot[0], hot[2]}); err == nil {
+			t.Fatal("removed survivor must break the chain")
+		}
+		// A doctored summary no longer matches its own ID.
+		doctored := append([]evidence.Record(nil), hot...)
+		doctored[0].Body = []byte(`{"from":1,"through":3}`)
+		if err := evidence.VerifyRecords(doctored); err == nil {
+			t.Fatal("doctored summary must fail verification")
+		}
+		// Re-sealing a summary aimed at a different history does not help:
+		// the survivor names the true pruned head, and the impostor names
+		// something else.
+		impostor := sum
+		impostor.Prev = all[0].ID
+		reparsed, err := evidence.ParseCompaction(sum)
+		if err != nil {
+			t.Fatalf("parse: %v", err)
+		}
+		reparsed.Export.Head = all[0].ID
+		if impostor.Body, err = json.Marshal(reparsed); err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if impostor, err = evidence.Seal(impostor); err != nil {
+			t.Fatalf("seal: %v", err)
+		}
+		if err := evidence.VerifyRecords([]evidence.Record{impostor, hot[1], hot[2]}); err == nil {
+			t.Fatal("a re-aimed summary must fail against the surviving chain")
+		}
+		// The WORM side fails the same way: a truncated or tampered export
+		// does not prove the seam.
+		if err := evidence.VerifySeam(sum, pruned[:2]); err == nil {
+			t.Fatal("truncated export must fail the seam")
+		}
+		exported := append([]evidence.Record(nil), pruned...)
+		exported[1].Body = []byte("altered after the fact")
+		if err := evidence.VerifySeam(sum, exported); err == nil {
+			t.Fatal("tampered export must fail the seam")
+		}
+	})
+
 	t.Run("chain/verify-detects-tamper-and-removal", func(t *testing.T) {
 		tn := tid(t)
 		log := s.Log()
@@ -449,6 +687,21 @@ func tid(t *testing.T, suffix ...string) tenant.ID {
 
 func req(tn tenant.ID, repo, ref, run string, ttl time.Duration) forge.LeaseRequest {
 	return forge.LeaseRequest{Tenant: tn, Repo: repo, Ref: ref, Run: run, TTL: ttl}
+}
+
+// receipt fabricates the WORM half of a compaction over rs, the in-order run
+// about to be pruned. In production a Sink exported the run and returned
+// this; the suite asserts the store's side of the bargain — that Compact
+// validates the receipt against its own rows — not the sink's.
+func receipt(rs []evidence.Record) evidence.Export {
+	last := rs[len(rs)-1]
+	return evidence.Export{
+		Tenant: last.Tenant, Scope: last.Scope,
+		From: rs[0].Seq, To: last.Seq, Head: last.ID,
+		URI:    "mem://conformance/" + string(last.Tenant),
+		Digest: "test-digest",
+		At:     last.At,
+	}
 }
 
 func rec(tn tenant.ID, scope, subject string) evidence.Record {

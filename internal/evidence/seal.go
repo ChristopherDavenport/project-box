@@ -76,12 +76,22 @@ func CheckRecord(r Record) error {
 }
 
 // CheckLink reports whether cur correctly extends prev. A zero prev admits
-// only the first record of a scope, so a removed head is caught the same way a
-// removed middle is.
+// the start of a walk: at genesis that is seq 1 with an empty Prev, and after
+// a compaction it is the summary itself, which names the pruned head it
+// stands for — so a removed head without a summary is caught the same way a
+// removed middle is. A record following a summary may name either the summary
+// (sealed after the compaction) or the pruned head the summary carries as its
+// own Prev (sealed before it) — two spellings of the same seam.
 func CheckLink(prev, cur Record) error {
+	if prev.Seq == 0 && cur.Kind == KindCompaction {
+		return nil
+	}
 	wantSeq := prev.Seq + 1
 	if cur.Seq != wantSeq {
 		return fmt.Errorf("evidence: %s/%s seq %d follows seq %d — record(s) missing", cur.Tenant, cur.Scope, cur.Seq, prev.Seq)
+	}
+	if prev.Kind == KindCompaction && cur.Prev == prev.Prev {
+		return nil
 	}
 	if cur.Prev != prev.ID {
 		return fmt.Errorf("evidence: %s/%s seq %d names prev %q, chain head is %q", cur.Tenant, cur.Scope, cur.Seq, cur.Prev, prev.ID)
@@ -89,16 +99,32 @@ func CheckLink(prev, cur Record) error {
 	return nil
 }
 
+// checkStep applies every offline check to one walked record: its ID
+// recomputes, a summary stands only at the walk's start and is internally
+// consistent, and the link from prev holds.
+func checkStep(prev, cur Record) error {
+	if err := CheckRecord(cur); err != nil {
+		return err
+	}
+	if cur.Kind == KindCompaction {
+		if prev.Seq != 0 {
+			return fmt.Errorf("evidence: %s/%s seq %d is a summary mid-chain — a summary stands only at a scope's start", cur.Tenant, cur.Scope, cur.Seq)
+		}
+		if _, err := ParseCompaction(cur); err != nil {
+			return err
+		}
+	}
+	return CheckLink(prev, cur)
+}
+
 // VerifyRecords checks an in-order slice of one scope's records: every ID
-// recomputes and every link holds. It needs no store and no context — this is
-// the offline half of Verify, and what an auditor runs against an export.
+// recomputes and every link holds, seam included. It needs no store and no
+// context — this is the offline half of Verify, and what an auditor runs
+// against an export.
 func VerifyRecords(rs []Record) error {
 	var prev Record
 	for _, r := range rs {
-		if err := CheckRecord(r); err != nil {
-			return err
-		}
-		if err := CheckLink(prev, r); err != nil {
+		if err := checkStep(prev, r); err != nil {
 			return err
 		}
 		prev = r
@@ -116,10 +142,7 @@ func VerifyScope(ctx context.Context, l Log, t tenant.ID, scope string) error {
 		if err != nil {
 			return err
 		}
-		if err := CheckRecord(r); err != nil {
-			return err
-		}
-		if err := CheckLink(prev, r); err != nil {
+		if err := checkStep(prev, r); err != nil {
 			return err
 		}
 		prev = r

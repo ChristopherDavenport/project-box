@@ -92,7 +92,11 @@ before there is anything to record.
   One implementation is a wrapper, not an abstraction — with only SQLite its
   semantics silently become the definition, and the mismatch surfaces in Phase
   7 after everything is built on them.
-- `internal/evidence` — `Append`/`Head`/`Since`/`BySubject`/`Verify`.
+- `internal/evidence` — `Append`/`Head`/`Since`/`BySubject`/`Verify`, and
+  `Compact`: volume is a schema decision, not a maintenance job, because
+  pruning a tamper-evident chain is indistinguishable from the attack `Verify`
+  exists to catch unless the seam is designed in — a summary record seated at
+  the pruned head, anchored to the WORM export, verifiable on both sides.
 - `internal/authz` wired into the store seam: principals, the action/resource
   matrix, and delegation as an intersection.
 
@@ -399,6 +403,7 @@ claim is decoration.
 | Tenant non-interference | write as A, read as B, expect nothing — **for every operation** | 0 |
 | Backend equivalence | one conformance suite, every backend, no skips in CI | 0 |
 | Chain integrity | `Verify` catches a tampered record *and* a removed one | 0 |
+| Compaction seam | a compacted scope still verifies — the hot side across the seam, the WORM side against the export — and a chopped, tampered, or re-aimed compacted chain still fails | 0 |
 | Delegation cannot escalate | an agent acting for a user is denied what that user lacks | 0 |
 | No implicit allow | a principal with an empty grant set can do nothing | 0 |
 | Human vs automation | evidence distinguishes actor from on-behalf-of | 3 |

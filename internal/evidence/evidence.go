@@ -14,6 +14,14 @@
 // its parent. This package covers what git does not record:
 // gate verdicts, lease grants, deployments, knowledge assertions, break-glass
 // invocations, and reviewer sign-off.
+//
+// Volume is handled without surrendering any of that. Compact replaces a
+// scope's oldest records with one summary record that keeps the chain
+// continuous — it takes the pruned head's seat and names its hash — while the
+// full run stays in WORM export. Pruning a tamper-evident chain is otherwise
+// indistinguishable from the attack Verify exists to catch, so the seam is
+// part of the schema: Verify proves the hot side across it, and VerifySeam
+// proves the exported side, both from bytes alone.
 package evidence
 
 import (
@@ -75,8 +83,9 @@ type Record struct {
 // Log is an append-only chained record store.
 //
 // Implementations must reject any append that would break the chain, and must
-// never expose an update or delete: a correction is a new record that supersedes
-// an earlier one, never an edit to it.
+// never expose an update or a free delete: a correction is a new record that
+// supersedes an earlier one, never an edit to it, and the only prune is
+// Compact, which leaves a verifiable seam behind.
 type Log interface {
 	// Append seals a record into its scope, assigning Seq, Prev and ID. It
 	// returns the sealed record. Concurrent appends to one scope serialize;
@@ -95,10 +104,24 @@ type Log interface {
 	// per-tenant, and so is an audit.
 	BySubject(ctx context.Context, t tenant.ID, subject string) iter.Seq2[Record, error]
 	// Verify walks a scope and reports the first record whose chain link does
-	// not hold. A nil error means the scope is intact as
+	// not hold. A compacted scope verifies across its seam: the walk may begin
+	// at a summary record, whose internal consistency is checked along with
+	// every link. A nil error means the scope is intact as
 	// stored — it says nothing about records never written, which is what
-	// export and anchoring are for.
+	// export and anchoring are for, and nothing about the pruned run, which is
+	// what VerifySeam proves against the WORM export.
 	Verify(ctx context.Context, t tenant.ID, scope string) error
+	// Compact replaces every record of the scope with sequence at most
+	// through by one summary record seated at the pruned head: same Seq, and
+	// Prev naming the head's ID — the hash the surviving successor already
+	// names, so the chain stays continuous across the seam. exp is the WORM
+	// receipt for exactly the pruned run and is validated against the store's
+	// own rows before anything is deleted: no checkpoint, no prune. A prefix
+	// that does not verify is refused rather than flattened, actor is
+	// recorded because a prune is an action like any other, and a prior
+	// summary is swallowed into the new one — a scope holds at most one, at
+	// its start.
+	Compact(ctx context.Context, t tenant.ID, scope string, through uint64, exp Export, actor string) (Record, error)
 }
 
 // Sink writes a sealed range of a chain somewhere it cannot later be altered.
@@ -114,20 +137,22 @@ type Sink interface {
 // export is verifiable offline: each record's ID is recomputable from its
 // canonical serialization and every Prev link is checkable from the bytes
 // alone, with no service running — Head ties the object to the chain, and
-// Digest ties it to itself.
+// Digest ties it to itself. The JSON form is part of the summary record's
+// body, and therefore of what Seal hashes.
 type Export struct {
-	Tenant   tenant.ID
-	Scope    string
-	From, To uint64
+	Tenant tenant.ID `json:"tenant"`
+	Scope  string    `json:"scope"`
+	From   uint64    `json:"from"`
+	To     uint64    `json:"to"`
 	// Head is the ID of the last record covered, tying the export to the chain
 	// it came from.
-	Head string
+	Head string `json:"head"`
 	// URI locates the exported object.
-	URI string
+	URI string `json:"uri"`
 	// Digest is the hash of the exported bytes.
-	Digest string
+	Digest string `json:"digest"`
 	// RetainUntil is when the object's retention lock expires. A zero value
 	// means the sink offers no retention guarantee, which is the local case.
-	RetainUntil time.Time
-	At          time.Time
+	RetainUntil time.Time `json:"retain_until"`
+	At          time.Time `json:"at"`
 }

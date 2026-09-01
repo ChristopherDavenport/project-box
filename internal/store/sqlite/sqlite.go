@@ -59,8 +59,21 @@ CREATE INDEX IF NOT EXISTS chain_by_subject ON chain (tenant, subject, at_ns);
 
 CREATE TRIGGER IF NOT EXISTS chain_no_update BEFORE UPDATE ON chain
 BEGIN SELECT RAISE(ABORT, 'evidence chain is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS chain_no_delete BEFORE DELETE ON chain
-BEGIN SELECT RAISE(ABORT, 'evidence chain is append-only'); END;
+
+-- The compaction gate: a delete on the chain is admitted only while a row
+-- sits here, and only Compact ever seats one — inside the same transaction
+-- that verifies the prefix, checks the export receipt, and inserts the
+-- summary. Stray deletes still abort, so the append-only property keeps
+-- holding in the database, with exactly one named exception. The DROP retires
+-- the unconditional trigger this one replaces on databases that predate it.
+CREATE TABLE IF NOT EXISTS compaction_gate (
+	open INTEGER NOT NULL
+) STRICT;
+
+DROP TRIGGER IF EXISTS chain_no_delete;
+CREATE TRIGGER IF NOT EXISTS chain_delete_outside_compaction BEFORE DELETE ON chain
+WHEN NOT EXISTS (SELECT 1 FROM compaction_gate)
+BEGIN SELECT RAISE(ABORT, 'evidence chain is append-only outside compaction'); END;
 `
 
 // Store is a SQLite-backed store.Store.
@@ -261,6 +274,9 @@ func (g *log) Append(ctx context.Context, r evidence.Record) (evidence.Record, e
 	if r.Scope == "" {
 		return evidence.Record{}, errors.New("sqlite: evidence record needs a scope")
 	}
+	if r.Kind == evidence.KindCompaction {
+		return evidence.Record{}, errors.New("sqlite: kind \"compaction\" is reserved — a summary enters the chain only through Compact")
+	}
 	if r.At.IsZero() {
 		r.At = g.s.now()
 	}
@@ -335,6 +351,80 @@ func (g *log) BySubject(ctx context.Context, t tenant.ID, subject string) iter.S
 
 func (g *log) Verify(ctx context.Context, t tenant.ID, scope string) error {
 	return evidence.VerifyScope(ctx, g, t, scope)
+}
+
+// Compact replaces the scope's prefix with one summary record; see
+// [evidence.Log]. The judgement — prefix verification, receipt checks,
+// summary construction — is evidence.Summarize's; this method supplies the
+// rows, the clock, and the gated delete, all in one immediate transaction.
+func (g *log) Compact(ctx context.Context, t tenant.ID, scope string, through uint64, exp evidence.Export, actor string) (evidence.Record, error) {
+	if err := t.Validate(); err != nil {
+		return evidence.Record{}, err
+	}
+	if scope == "" {
+		return evidence.Record{}, errors.New("sqlite: compaction needs a scope")
+	}
+	var out evidence.Record
+	err := g.s.write(ctx, func(tx *sql.Tx) error {
+		rows, err := tx.QueryContext(ctx,
+			`SELECT `+recordCols+` FROM chain WHERE tenant=? AND scope=? AND seq<=? ORDER BY seq`,
+			string(t), scope, int64(through))
+		if err != nil {
+			return err
+		}
+		var rs []evidence.Record
+		for rows.Next() {
+			r, err := scanRecord(rows)
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			rs = append(rs, r)
+		}
+		// Closed before the writes below: the writer pool is one connection,
+		// and an open cursor would wedge it.
+		if err := errors.Join(rows.Err(), rows.Close()); err != nil {
+			return err
+		}
+		if n := len(rs); n == 0 || rs[n-1].Seq != through {
+			return fmt.Errorf("sqlite: %s/%s has no record at seq %d to compact through", t, scope, through)
+		}
+		sum, err := evidence.Summarize(rs, exp, actor)
+		if err != nil {
+			return err
+		}
+		sum.At = g.s.now().UTC()
+		sum, err = evidence.Seal(sum)
+		if err != nil {
+			return err
+		}
+		// Seat the gate, prune, clear the gate, take the pruned head's seat —
+		// one transaction, so the delete trigger admits exactly this path.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO compaction_gate (open) VALUES (1)`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`DELETE FROM chain WHERE tenant=? AND scope=? AND seq<=?`,
+			string(t), scope, int64(through)); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM compaction_gate`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO chain (tenant, scope, seq, id, prev, kind, subject, actor, on_behalf_of, grant_id, body, at_ns, trace)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			string(sum.Tenant), sum.Scope, int64(sum.Seq), sum.ID, sum.Prev, sum.Kind, sum.Subject,
+			sum.Actor, sum.OnBehalfOf, sum.Grant, sum.Body, sum.At.UnixNano(), sum.Trace); err != nil {
+			return err
+		}
+		out = sum
+		return nil
+	})
+	if err != nil {
+		return evidence.Record{}, err
+	}
+	return out, nil
 }
 
 func (g *log) query(ctx context.Context, q string, args ...any) iter.Seq2[evidence.Record, error] {
