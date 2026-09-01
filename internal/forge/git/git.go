@@ -37,10 +37,11 @@ type Mirror struct {
 	tenant tenant.ID
 	leaser forge.Leaser
 
-	mu     sync.Mutex
-	repos  map[string]forge.Repo  // name -> repo, established by Fetch
-	leased map[string]forge.Lease // workspace dir -> lease, for Prune
-	held   map[string]bool        // workspace dir -> exempt from Prune, for Adopt
+	mu       sync.Mutex
+	repos    map[string]forge.Repo  // name -> repo, established by Fetch
+	leased   map[string]forge.Lease // workspace dir -> lease, for Prune
+	held     map[string]bool        // workspace dir -> exempt from Prune, for Adopt
+	fetching map[string]*sync.Mutex // repo name -> lock serializing mirror updates
 }
 
 // NewMirror returns the mirror set for one tenant. The handle is tenant-bound
@@ -61,7 +62,7 @@ func NewMirror(root string, tn tenant.ID, leaser forge.Leaser) (*Mirror, error) 
 	return &Mirror{
 		root: root, tenant: tn, leaser: leaser,
 		repos: map[string]forge.Repo{}, leased: map[string]forge.Lease{},
-		held: map[string]bool{},
+		held: map[string]bool{}, fetching: map[string]*sync.Mutex{},
 	}, nil
 }
 
@@ -73,9 +74,33 @@ func (m *Mirror) workDir(run, repo string) string {
 	return filepath.Join(m.root, "work", string(m.tenant), run, repo)
 }
 
+// fetchLock returns the lock that serializes updates of one repo's mirror.
+func (m *Mirror) fetchLock(repo string) *sync.Mutex {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	lk, ok := m.fetching[repo]
+	if !ok {
+		lk = &sync.Mutex{}
+		m.fetching[repo] = lk
+	}
+	return lk
+}
+
 // Fetch clones the mirror on first sight and updates it after, remembering
 // the repo so Checkout and the Lander can resolve it from a name.
+//
+// Updates of one mirror serialize. `git remote update` racing itself in the
+// same directory fails to lock the refs the other run just moved — "cannot
+// lock ref 'refs/heads/main': is at X but expected Y" — and the loser reports
+// infrastructure trouble for what is only two runs sharing a directory. This
+// used to be free: the branch lease was held across the whole run, so one run
+// touched the mirror at a time. Narrowing that lease made the sharing visible,
+// and the lock is where it belongs — a mirror root is one daemon's own working
+// area, so the contention is within this process.
 func (m *Mirror) Fetch(ctx context.Context, repo forge.Repo) error {
+	lk := m.fetchLock(repo.Name)
+	lk.Lock()
+	defer lk.Unlock()
 	dir := m.mirrorDir(repo.Name)
 	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
 		if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
@@ -396,6 +421,36 @@ func RevParse(ctx context.Context, dir, rev string) (string, error) {
 func Dirty(ctx context.Context, dir string) (bool, error) {
 	out, err := run(ctx, dir, "status", "--porcelain")
 	return strings.TrimSpace(out) != "", err
+}
+
+// ErrRebaseConflict reports that the workspace's commits do not replay onto
+// the new base without a judgement call. The rebase is aborted and the tree
+// left where it was: a conflict resolution nobody reviewed is not something
+// to land, so the caller builds again instead.
+var ErrRebaseConflict = errors.New("git: rebase conflicted")
+
+// Rebase replays the workspace's commits from oldBase onto newBase, leaving
+// the tree detached at the new head.
+//
+// This is what makes a narrow branch lease affordable. Two units that build
+// concurrently from one base cannot both land on it, and the loser would
+// otherwise have to rebuild — a whole second agent session to produce the
+// change it is already holding. Replaying costs a git operation and a gate
+// run. Without it, narrowing the lease would trade tokens for wall-clock.
+func Rebase(ctx context.Context, dir string, newBase, oldBase forge.Commit) (forge.Commit, error) {
+	// The workspace's origin is the mirror, which Fetch has already advanced;
+	// this brings the new base's objects into the tree.
+	if _, err := run(ctx, dir, "fetch", "origin"); err != nil {
+		return "", fmt.Errorf("git: fetch before rebase: %w", err)
+	}
+	if _, err := run(ctx, dir, "rebase", "--onto", string(newBase), string(oldBase)); err != nil {
+		if _, aerr := run(ctx, dir, "rebase", "--abort"); aerr != nil {
+			return "", fmt.Errorf("%w, and the abort failed too — the tree is not landable: %v", ErrRebaseConflict, aerr)
+		}
+		return "", fmt.Errorf("%w: %v", ErrRebaseConflict, err)
+	}
+	out, err := run(ctx, dir, "rev-parse", "HEAD")
+	return forge.Commit(strings.TrimSpace(out)), err
 }
 
 // CommitAll stages and commits everything in the tree.

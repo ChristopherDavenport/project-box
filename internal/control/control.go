@@ -133,6 +133,9 @@ func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry,
 		if err != nil {
 			return QueueEntry{}, err
 		}
+		// Zero first: each body is the whole item, and omitempty means a
+		// cleared field is absent rather than empty. See queue.Load.
+		w = queue.WorkItem{}
 		if err := json.Unmarshal(rec.Body, &w); err != nil {
 			return QueueEntry{}, fmt.Errorf("control: item %s record %d: %w", id, rec.Seq, err)
 		}

@@ -229,6 +229,12 @@ func (q *Queue) Load(ctx context.Context, t tenant.ID, id string) (WorkItem, err
 		if err != nil {
 			return WorkItem{}, err
 		}
+		// Start from zero for every record. Each body is the WHOLE item, and
+		// omitempty leaves a cleared field out of the JSON entirely — so
+		// unmarshalling over the previous record would carry forward exactly
+		// the values a transition meant to drop. A settled item kept the note
+		// it parked with, and would have kept its resume point too.
+		w = WorkItem{}
 		if err := json.Unmarshal(r.Body, &w); err != nil {
 			return WorkItem{}, fmt.Errorf("queue: item %s record %d: %w", id, r.Seq, err)
 		}

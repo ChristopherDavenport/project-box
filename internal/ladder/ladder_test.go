@@ -294,11 +294,12 @@ func TestFencingIsIdenticalInTheOptimisticLane(t *testing.T) {
 	ctx := context.Background()
 	before := remoteLog(t, w.app)
 
+	preempted := &forge.Lease{}
 	preempting := &loop.Loop{
 		Store: w.store, Runner: "runner-1", Mirror: w.mirror,
 		Repo: forge.Repo{Name: "app", Remote: w.app, Role: forge.RoleService, DefaultBranch: "main"}, Branch: "main",
 		Lane:    forge.LaneOptimistic,
-		Builder: preemptBuilder{store: w.store},
+		Builder: preemptBuilder{store: w.store, took: preempted},
 		Gates: func(ws forge.Workspace) []forge.Gate {
 			return []forge.Gate{gate.Command{Label: "post-land", Dir: ws.Dir, Commands: [][]string{{"true"}}}}
 		},
@@ -316,26 +317,70 @@ func TestFencingIsIdenticalInTheOptimisticLane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.State != queue.StateParked || !strings.Contains(item.Note, "fencing refused") {
-		t.Fatalf("optimistic land with a superseded token must park on the fence: %+v", item)
-	}
+	// The safety property, unchanged and the whole point: a branch that
+	// belongs to an incident does not carry this change.
 	if remoteLog(t, w.app) != before {
 		t.Fatal("a fenced optimistic land still moved the remote")
+	}
+	// The disposition changed with the narrowed lease region (issue #18).
+	// The run no longer holds the branch across its build, so it does not
+	// arrive at the land with a superseded token — it arrives to find the
+	// branch taken, which is "not our turn" rather than anyone's problem.
+	// The fence itself is unchanged and is proven where it lives, over the
+	// lander: see TestStalledRunnerIsFencedAtLand in internal/forge/git.
+	if item.State != queue.StateWaiting || !strings.Contains(item.Note, "main") {
+		t.Fatalf("a branch held by an incident should make the item wait: %+v", item)
+	}
+	if item.Built == "" {
+		t.Fatal("the change it already built was thrown away")
+	}
+
+	// When the incident lets the branch go, the item lands what it already
+	// built. Preemption now costs time, not another agent session.
+	if err := w.store.Leaser("incident-runner").Release(ctx, *preempted); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := q.Load(ctx, tn, "wi-fence")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = preempting.Run(ctx, loaded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("the item should land once the branch is free: %+v", item)
+	}
+	if remoteLog(t, w.app) == before {
+		t.Fatal("the released branch never took the change")
 	}
 }
 
 // preemptBuilder makes a change, then loses its lease mid-run: an incident
 // preempts the branch between build and land.
-type preemptBuilder struct{ store *sqlite.Store }
+// preemptBuilder builds, then has an incident responder take the branch out
+// from under the run — the takeover the fencing model exists for. It claims
+// the branch only once, so a retry after the incident releases it builds
+// nothing new and races nobody.
+type preemptBuilder struct {
+	store *sqlite.Store
+	took  *forge.Lease
+}
 
 func (b preemptBuilder) Build(ctx context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
 	head, err := builder{}.Build(ctx, ws, task)
 	if err != nil {
 		return "", err
 	}
-	_, err = b.store.Leaser("incident-runner").Preempt(ctx, forge.LeaseRequest{
+	if b.took != nil && b.took.Runner != "" {
+		return head, nil // already taken; this is a retry
+	}
+	l, err := b.store.Leaser("incident-runner").Preempt(ctx, forge.LeaseRequest{
 		Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "incident", TTL: time.Hour,
 	})
+	if b.took != nil {
+		*b.took = l
+	}
 	return head, err
 }
 

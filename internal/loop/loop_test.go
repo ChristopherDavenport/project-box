@@ -303,10 +303,26 @@ func TestWaitingOnAGateDoesNotRebuild(t *testing.T) {
 	}
 }
 
-// TestResumeRebuildsWhenTheBranchMoved: reuse is an optimization, never a
-// correctness shortcut. Once main has moved, the built commit was judged
-// against a base that no longer exists, and the cheap path gives way.
-func TestResumeRebuildsWhenTheBranchMoved(t *testing.T) {
+// interlope lands a commit on main from outside the factory: the other unit
+// of work that won the race, seen from this one's point of view.
+func interlope(t *testing.T, remote, file, body string) {
+	t.Helper()
+	other := filepath.Join(t.TempDir(), "other")
+	mustSh(t, "", "git", "clone", remote, other)
+	if err := os.WriteFile(filepath.Join(other, file), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSh(t, other, "git", "add", ".")
+	mustSh(t, other, "git", "commit", "-m", "someone else")
+	mustSh(t, other, "git", "push", "origin", "HEAD:refs/heads/main")
+}
+
+// TestMovedBranchReplaysRatherThanRebuilds is what makes a narrow branch
+// lease affordable (issue #18). Concurrency on one branch guarantees losers:
+// whoever does not land first built against a base that has moved. If the
+// loser had to rebuild, narrowing the lease would buy wall-clock with tokens
+// — an agent session per collision — which is the wrong trade. It replays.
+func TestMovedBranchReplaysRatherThanRebuilds(t *testing.T) {
 	e := setup(t, []string{"true"})
 	ctx := context.Background()
 	approved := false
@@ -330,16 +346,9 @@ func TestResumeRebuildsWhenTheBranchMoved(t *testing.T) {
 	if item.State != queue.StateWaiting || builder.n != 1 {
 		t.Fatalf("expected waiting after one build, got %s / %d builds", item.State, builder.n)
 	}
+	firstBuilt := item.Built
 
-	// Someone else lands on main while the review is outstanding.
-	other := filepath.Join(t.TempDir(), "other")
-	mustSh(t, "", "git", "clone", e.remote, other)
-	if err := os.WriteFile(filepath.Join(other, "elsewhere.txt"), []byte("moved\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	mustSh(t, other, "git", "add", ".")
-	mustSh(t, other, "git", "commit", "-m", "someone else")
-	mustSh(t, other, "git", "push", "origin", "HEAD:refs/heads/main")
+	interlope(t, e.remote, "elsewhere.txt", "moved\n")
 
 	loaded, err := q.Load(ctx, tn, "wi-moved")
 	if err != nil {
@@ -349,12 +358,125 @@ func TestResumeRebuildsWhenTheBranchMoved(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loop: %v", err)
 	}
+	if builder.n != 1 {
+		t.Fatalf("a moved base must replay, not rebuild: %d builds", builder.n)
+	}
+	if item.Built == firstBuilt {
+		t.Fatal("the resume point should be the replayed commit, not the old one")
+	}
+
+	// And the replayed commit is what lands, carrying both changes.
+	approved = true
+	loaded, _ = q.Load(ctx, tn, "wi-moved")
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 1 {
+		t.Fatalf("landing a replayed change rebuilt it: %d builds", builder.n)
+	}
+	for _, want := range []string{"elsewhere.txt", "answer.txt"} {
+		out := mustSh(t, e.remote, "git", "ls-tree", "--name-only", "refs/heads/main")
+		if !strings.Contains(out, want) {
+			t.Fatalf("main lost %s after the replay:\n%s", want, out)
+		}
+	}
+}
+
+// TestConflictingReplayFallsBackToTheAgent: replaying is an optimization and
+// stops where judgement begins. A conflict is a decision about intent, the
+// agent is who makes those, and a resolution nobody reviewed is not something
+// to land.
+func TestConflictingReplayFallsBackToTheAgent(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{holdingGate{approved: &approved}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-47"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-conflict", "add a thing"))
+
+	if item, err = e.loop.Run(ctx, item); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting, got %s", item.State)
+	}
+
+	// The interloper writes the very file the builder writes, differently.
+	interlope(t, e.remote, "answer.txt", "someone else's answer\n")
+
+	loaded, _ := q.Load(ctx, tn, "wi-conflict")
+	if _, err = e.loop.Run(ctx, loaded); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
 	if builder.n != 2 {
-		t.Fatalf("a moved base must rebuild, built %d times", builder.n)
+		t.Fatalf("a conflicting replay must fall back to the agent: %d builds", builder.n)
 	}
-	if item.Built == loaded.Built {
-		t.Fatal("the rebuild should have replaced the stale resume point")
+}
+
+// TestBranchIsFreeWhileBuilding is issue #18's property, asserted directly
+// rather than by timing: the build no longer holds the branch, so a second
+// unit could be building against the same base at the same moment. Under the
+// old shape this lease was held from before checkout until after the land.
+func TestBranchIsFreeWhileBuilding(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+
+	var heldDuringBuild error
+	e.loop.Builder = probingBuilder{probe: func() {
+		// A DIFFERENT runner asks for the branch mid-build.
+		l, err := e.store.Leaser("runner-2").Acquire(ctx, forge.LeaseRequest{
+			Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "probe", TTL: time.Minute,
+		})
+		if err != nil {
+			heldDuringBuild = err
+			return
+		}
+		e.store.Leaser("runner-2").Release(ctx, l)
+	}}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-48"})
+	if err != nil {
+		t.Fatal(err)
 	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-free", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if heldDuringBuild != nil {
+		t.Fatalf("the branch was still held across the build: %v", heldDuringBuild)
+	}
+	// And the landing still happened under the branch lease, fenced as ever.
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+}
+
+// probingBuilder runs a probe in the middle of the build, then behaves like
+// scriptedBuilder.
+type probingBuilder struct {
+	scriptedBuilder
+	probe func()
+}
+
+func (b probingBuilder) Build(ctx context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	b.probe()
+	return b.scriptedBuilder.Build(ctx, ws, task)
 }
 
 // TestRedeliveryOpensOneIngress: webhooks retry, alerts flap; the same
