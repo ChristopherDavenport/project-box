@@ -83,7 +83,7 @@ func OpenRepair(router *ingress.StoreRouter, route ingress.Route) func(context.C
 // what keeps "why does this change exist" answerable from the other end.
 func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 	return queue.WorkItem{ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID,
-		Requester: ing.Requester, Task: task}
+		Requester: ing.Requester, Repo: ing.Repo, Task: task}
 }
 
 // Run drives one item from claim to settled state. The returned item reports

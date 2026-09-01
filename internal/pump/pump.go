@@ -30,7 +30,11 @@ type Pump struct {
 	Store  store.Store
 	Tenant tenant.ID
 	Runner string
-	// Loops routes items to their Box's executor.
+	// Loops routes items to executors, most specific key first:
+	// "box/repo" for a Box with several repositories, "box" as the single-
+	// executor fallback. Repositories in ONE tenant and ONE box run side by
+	// side — their leases key on (tenant, repo, ref), so they contend for
+	// nothing.
 	Loops map[string]*loop.Loop
 	Meter *capacity.Meter
 	Queue *queue.Queue
@@ -99,9 +103,12 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 	settled := 0
 	var firstErr error
 	for _, item := range candidates {
-		lp, ok := p.Loops[item.Box]
+		lp, ok := p.Loops[item.Box+"/"+item.Repo]
 		if !ok {
-			continue // no executor configured for this Box; not this pump's work
+			lp, ok = p.Loops[item.Box]
+		}
+		if !ok {
+			continue // no executor configured for this target; not this pump's work
 		}
 		release, err := p.Meter.Acquire(ctx, item.ID)
 		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrBusy) {

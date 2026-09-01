@@ -44,6 +44,8 @@ type Ingress struct {
 	Box    string
 	// Title is what a human reads in the control room.
 	Title string
+	// Repo is the target repository, copied from the route.
+	Repo string `json:"repo,omitempty"`
 	// Note carries the delivery's payload as the ingress's own words — the
 	// task text intake hands the work item.
 	Note string `json:"note,omitempty"`
@@ -160,6 +162,11 @@ type Route struct {
 	// one kind: a scanner that sometimes files an issue and sometimes raises an
 	// incident is two routes, so that each has its own policy.
 	Opens Kind
+	// Repo names the repository this route's work targets, when the Box has
+	// more than one. Like everything else on a route it is operator
+	// configuration: a caller names a route and inherits its target, never
+	// chooses one.
+	Repo string
 	// Box scopes what this route may open work against. It is required: a
 	// route is a standing authority grant, and one that could open work in
 	// every Box would have unbounded blast radius.

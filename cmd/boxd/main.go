@@ -65,7 +65,12 @@ func run() error {
 	otlp := flag.String("otlp", "", "collector endpoint (host:port); empty = telemetry off")
 	listen := flag.String("listen", "unix:boxd.sock", "API listener: unix:/path or tcp:host:port")
 	token := flag.String("token", "", "bearer token for the API (required for tcp)")
+	cfgPath := flag.String("config", "", "box.yaml — multi-box, multi-repo configuration; overrides the single-repo flags")
 	flag.Parse()
+
+	if *cfgPath != "" {
+		return runConfigured(*cfgPath)
+	}
 
 	t := tenant.ID(*tn)
 	if err := t.Validate(); err != nil {

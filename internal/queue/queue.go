@@ -53,6 +53,9 @@ type WorkItem struct {
 	// automation made for them, and a log that never drew that line cannot
 	// have it recovered later.
 	Requester string `json:"requester,omitempty"`
+	// Repo is the target repository within the Box, empty when the Box has
+	// exactly one executor.
+	Repo string `json:"repo,omitempty"`
 	// DependsOn names items that must settle DONE before this one is
 	// claimable — the work graph. A parked or failed dependency parks its
 	// dependents with the cause named; execution order is nobody's plan,

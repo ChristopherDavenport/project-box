@@ -654,6 +654,19 @@ running boxd drove an ingress to a landed commit purely over its socket,
 and the smoke caught a real forge bug (relative mirror roots resolved from
 the mirror's cwd — NewMirror now demands absolute).
 
+box.yaml is in (internal/boxcfg + boxd -config): one daemon serves many
+boxes and many repositories in ONE tenant — the normal shape, not a special
+one. Routes carry their target repo (operator configuration, inherited by
+the caller, never chosen in the request); items carry it to the pump, which
+picks the most specific executor (box/repo, then box). Repositories share
+the tenant, store, mirror set, and budget; they share no leases and no
+workspaces. Proven by TestTwoReposOneTenantSideBySide (both repos in flight
+in one drain under MaxConcurrent 2, distinct leases) and by a live smoke:
+one box.yaml, two repos, two submits over one socket, both remotes advanced
+by the daemon's own ticks. Config validation is opinionated: unknown lanes,
+env-optimistic combinations, duplicate route names, and a repo with neither
+agent nor build command are all refused at load.
+
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
-box.yaml multi-Box config for boxd, review sampling/sign-off endpoints when
-a remote control room needs them, and OIDC at the auth seam.
+review sampling/sign-off endpoints when a remote control room needs them,
+and OIDC at the auth seam.

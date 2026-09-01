@@ -271,3 +271,94 @@ func mustSh(t *testing.T, dir, name string, args ...string) string {
 	}
 	return strings.TrimSpace(out)
 }
+
+// TestTwoReposOneTenantSideBySide is the confirmation by name: two
+// repositories, one tenant, one box, one daemon — simultaneously in flight,
+// because their leases key on (tenant, repo, ref) and contend for nothing.
+func TestTwoReposOneTenantSideBySide(t *testing.T) {
+	s, err := sqlite.Open(filepath.Join(t.TempDir(), "box.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+
+	mkRemote := func(name string) string {
+		remote := filepath.Join(t.TempDir(), name+".git")
+		mustSh(t, "", "git", "init", "--bare", remote)
+		mustSh(t, remote, "git", "symbolic-ref", "HEAD", "refs/heads/main")
+		seed := filepath.Join(t.TempDir(), name+"-seed")
+		mustSh(t, "", "git", "clone", remote, seed)
+		os.WriteFile(filepath.Join(seed, "README.md"), []byte(name+"\n"), 0o644)
+		mustSh(t, seed, "git", "add", ".")
+		mustSh(t, seed, "git", "commit", "-m", "seed")
+		mustSh(t, seed, "git", "push", "origin", "HEAD:refs/heads/main")
+		return remote
+	}
+	apiRem, webRem := mkRemote("api"), mkRemote("web")
+	m, err := gitforge.NewMirror(t.TempDir(), tn, s.Leaser("d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkLoop := func(name, remote string) *loop.Loop {
+		repo := forge.Repo{Name: name, Remote: remote, Role: forge.RoleService, DefaultBranch: "main"}
+		if err := m.Fetch(context.Background(), repo); err != nil {
+			t.Fatal(err)
+		}
+		return &loop.Loop{
+			Store: s, Runner: "d", Mirror: m, Repo: repo, Branch: "main",
+			Builder: fixer{}, Lane: forge.LaneOptimistic,
+			Gates: func(ws forge.Workspace) []forge.Gate {
+				return []forge.Gate{gate.Command{Label: "post-land", Dir: ws.Dir, Commands: [][]string{{"test", "-f", "ok.txt"}}}}
+			},
+			TTL: time.Hour,
+		}
+	}
+	q := &queue.Queue{Store: s, Runner: "d", TTL: time.Hour}
+	p := &Pump{
+		Store: s, Tenant: tn, Runner: "d", Queue: q,
+		Meter: &capacity.Meter{Store: s, Tenant: tn, Actor: "d", Budget: capacity.Budget{MaxConcurrent: 2}},
+		Loops: map[string]*loop.Loop{
+			"shop/api": mkLoop("api", apiRem),
+			"shop/web": mkLoop("web", webRem),
+		},
+	}
+	router := &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "d"}
+	open := func(route, repo, key, task string) {
+		if _, _, err := router.Open(context.Background(), ingress.Route{
+			Name: route, Kind: ingress.RouteIssue, Opens: ingress.KindIssue,
+			Box: "shop", Repo: repo, Requester: "chris",
+		}, ingress.Delivery{Key: key, Payload: []byte(task)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	open("shop-api", "api", "api-1", "fix module alpha")
+	open("shop-web", "web", "web-1", "fix module beta")
+
+	// One tick: both intaken; with MaxConcurrent 2, both run in the same
+	// drain — genuinely side by side, distinct leases, distinct workspaces.
+	ctx := context.Background()
+	for range 4 {
+		if _, err := p.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, remote := range map[string]string{"api": apiRem, "web": webRem} {
+		n := strings.TrimSpace(mustSh(t, remote, "git", "rev-list", "--count", "refs/heads/main"))
+		if n != "2" {
+			t.Fatalf("%s advanced by %s commits, want seed+1", name, n)
+		}
+	}
+	// And every item found its own executor: nothing parked, nothing lost.
+	for rec, err := range s.Log().Since(ctx, tn, "index/pending", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		item, err := q.Load(ctx, tn, rec.Subject)
+		if err != nil || item.State != queue.StateDone {
+			t.Fatalf("item %s: %+v %v", rec.Subject, item, err)
+		}
+		if item.Repo != "api" && item.Repo != "web" {
+			t.Fatalf("item lost its target repo: %+v", item)
+		}
+	}
+}

@@ -66,7 +66,7 @@ func (s *StoreRouter) Open(ctx context.Context, r Route, d Delivery) (Ingress, b
 		return ing, false, err
 	}
 
-	ing := Ingress{ID: id, Kind: r.Opens, Tenant: s.Tenant, Box: r.Box, Requester: r.Requester, Note: string(d.Payload)}
+	ing := Ingress{ID: id, Kind: r.Opens, Tenant: s.Tenant, Box: r.Box, Requester: r.Requester, Repo: r.Repo, Note: string(d.Payload)}
 	body, err := json.Marshal(ing)
 	if err != nil {
 		return Ingress{}, false, err
