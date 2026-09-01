@@ -80,9 +80,15 @@ of the agent — `{{workspace}}` becomes the run's workspace path:
             box/agent:1, claude-agent-acp]
 ```
 
-Setting `max_tokens_per_window` also arms the unmetered rule: a run that
-finishes without reporting what it cost stops new claims until the window
-turns over. A budget that reads unknown as zero is not a budget.
+A run that finishes without reporting what it cost stops new claims until the
+window turns over, whether or not a token ceiling is set — measurement is the
+precondition for a budget, not a feature of one, and a budget that reads
+unknown as zero is not a budget. `allow_unmetered: true` proceeds blind, and
+the saying so is on the record.
+
+`build_timeout` bounds one build (default 30m; a negative duration means no
+bound). Nothing else does: the lease TTL is renewed while a run holds it, so
+without this an agent that hangs runs until the daemon stops.
 
 Open work and step back — the daemon's ticks do the rest:
 

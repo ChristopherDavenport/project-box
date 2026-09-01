@@ -67,7 +67,21 @@ type Loop struct {
 	// — configure it; see OpenRepair.
 	Red func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error)
 	TTL time.Duration
+	// BuildTimeout bounds one build. Zero means [DefaultBuildTimeout]; a
+	// negative value means no bound, which an operator may choose.
+	//
+	// Nothing bounded an agent session before: the lease TTL does not, because
+	// Checkout renews it and no one kills the process when it lapses. An agent
+	// that hangs or loops ran until the daemon stopped, spending the whole
+	// time. A clock is the difference between a runaway costing a bounded
+	// amount and costing whatever it likes.
+	BuildTimeout time.Duration
 }
+
+// DefaultBuildTimeout bounds a build when the Box states none. Long enough
+// for real work, short enough that a wedged session is an incident tonight
+// rather than an invoice next month.
+const DefaultBuildTimeout = 30 * time.Minute
 
 // MaxRepairDepth bounds how far the factory will chase its own tail when no
 // depth is configured: a repair, a repair of that, a repair of that.
@@ -267,10 +281,17 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			return q.Fail(ctx, item, claim, err.Error())
 		}
 		if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
+			bctx, cancelBuild := l.buildDeadline(ctx)
+			defer cancelBuild()
 			var berr error
-			head, berr = l.Builder.Build(ctx, ws, item.Task)
+			head, berr = l.Builder.Build(bctx, ws, item.Task)
 			if berr == nil {
 				l.record(ctx, item, "built", string(head), "")
+			} else if bctx.Err() != nil && ctx.Err() == nil {
+				// The clock ran out, not the caller. Say so plainly: "context
+				// deadline exceeded" on a parked item tells nobody which
+				// deadline or how long it was.
+				berr = fmt.Errorf("build exceeded its %s budget and was stopped: %w", l.buildTimeout(), berr)
 			}
 			return berr
 		}); serr != nil {
@@ -444,6 +465,22 @@ func (l *Loop) openLandWindow(ctx context.Context, item queue.WorkItem, base for
 			l.Branch, short(base), short(now)), nil
 	}
 	return lease, "", nil
+}
+
+func (l *Loop) buildTimeout() time.Duration {
+	if l.BuildTimeout == 0 {
+		return DefaultBuildTimeout
+	}
+	return l.BuildTimeout
+}
+
+// buildDeadline bounds one build, unless the Box asked for no bound.
+func (l *Loop) buildDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	d := l.buildTimeout()
+	if d < 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, d)
 }
 
 func short(c forge.Commit) string {

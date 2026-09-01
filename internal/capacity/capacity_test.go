@@ -58,8 +58,8 @@ func TestTokenBudgetStopsTheWindow(t *testing.T) {
 	if err := take(ctx, m, "wi-3"); !errors.Is(err, ErrBudget) {
 		t.Fatalf("over budget should refuse, got %v", err)
 	}
-	if spent, unmetered := m.Spent(); spent != 11_000 || unmetered != 0 {
-		t.Fatalf("spend accounting: %d tokens, %d unmetered", spent, unmetered)
+	if r := m.Report(); r.Tokens != 11_000 || r.Unmetered != 0 {
+		t.Fatalf("spend accounting: %d tokens, %d unmetered", r.Tokens, r.Unmetered)
 	}
 }
 
@@ -85,23 +85,43 @@ func TestUnmeteredRunClosesTheWindow(t *testing.T) {
 	if errors.Is(err, ErrBudget) {
 		t.Fatal("an unmetered window reported itself as over budget")
 	}
-	if _, unmetered := m.Spent(); unmetered != 1 {
-		t.Fatalf("unmetered runs not counted: %d", unmetered)
+	if r := m.Report(); r.Unmetered != 1 {
+		t.Fatalf("unmetered runs not counted: %d", r.Unmetered)
 	}
 }
 
-// TestUnmeteredIsFreeWithoutATokenBudget: the fail-closed rule arms with the
-// budget and not before. An operator who never asked for a cost brake must not
-// have the factory stop because an agent is quiet about tokens.
-func TestUnmeteredIsFreeWithoutATokenBudget(t *testing.T) {
+// TestUnmeteredStopsEvenWithoutATokenBudget: measurement is the precondition
+// for a budget, not a feature of one. Without a token budget there is no
+// ceiling to enforce — and equally no way to notice a run costing anything at
+// all, which is the worse of the two states to be in quietly.
+func TestUnmeteredStopsEvenWithoutATokenBudget(t *testing.T) {
 	ctx := context.Background()
 	m, _ := meter(t, Budget{MaxConcurrent: 1, Window: time.Hour})
 
+	if err := take(ctx, m, "wi-1"); err != nil {
+		t.Fatalf("first run refused: %v", err)
+	}
+	m.Charge(ctx, "wi-1", 0, false)
+	if err := take(ctx, m, "wi-2"); !errors.Is(err, ErrUnmetered) {
+		t.Fatalf("an unmeasurable factory kept running: %v", err)
+	}
+}
+
+// TestAllowUnmeteredIsAnExplicitChoice: an operator may fly blind, and the
+// saying so is on the record. What must not happen is arriving there by
+// omission.
+func TestAllowUnmeteredIsAnExplicitChoice(t *testing.T) {
+	ctx := context.Background()
+	m, _ := meter(t, Budget{MaxConcurrent: 1, AllowUnmetered: true, Window: time.Hour})
+
 	for i := range 3 {
 		if err := take(ctx, m, "wi"); err != nil {
-			t.Fatalf("run %d refused with no token budget: %v", i, err)
+			t.Fatalf("run %d refused after opting in: %v", i, err)
 		}
 		m.Charge(ctx, "wi", 0, false)
+	}
+	if r := m.Report(); r.Unmetered != 3 {
+		t.Fatalf("opting in should still COUNT what it could not measure: %d", r.Unmetered)
 	}
 }
 
@@ -122,7 +142,7 @@ func TestWindowRolloverForgives(t *testing.T) {
 	if err := take(ctx, m, "wi-3"); err != nil {
 		t.Fatalf("the new window should admit work: %v", err)
 	}
-	if spent, unmetered := m.Spent(); spent != 0 || unmetered != 0 {
-		t.Fatalf("rollover kept the old window's account: %d tokens, %d unmetered", spent, unmetered)
+	if r := m.Report(); r.Tokens != 0 || r.Unmetered != 0 {
+		t.Fatalf("rollover kept the old window's account: %d tokens, %d unmetered", r.Tokens, r.Unmetered)
 	}
 }

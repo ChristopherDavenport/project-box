@@ -33,11 +33,14 @@ export function describe(r) {
       case 'agent-run':
         return `${o.seat} as ${o.role}, mode ${o.mode}`;
       case 'agent-result': {
-        const bits = [`${o.stop}`, `${o.tool_calls} tools`, `${Math.round((o.wall_ms ?? 0) / 100) / 10}s`];
+        const bits = [`${o.stop}`, `${Math.round((o.wall_ms ?? 0) / 100) / 10}s`];
         // Unmetered is the fact worth seeing: an unreported cost is not a
-        // zero cost, and under a token budget it halts the window.
+        // zero cost, and it halts the window.
         bits.push(o.metered ? `${o.tokens} tokens` : 'cost NOT reported');
-        if (o.denied) bits.push(`${o.denied} denied`);
+        // Which tools, not how many — a count cannot tell an ordinary run
+        // from a runaway, because both are a number.
+        bits.push(o.tools ? tools(o.tools) : `${o.tool_calls} tools`);
+        if (o.denied_tools) bits.push(`DENIED ${tools(o.denied_tools)}`);
         if (o.unknown_updates?.length) bits.push(`dialect drift: ${o.unknown_updates.join(', ')}`);
         return bits.join(' · ');
       }
@@ -53,6 +56,23 @@ export function describe(r) {
 function firstLine(s) {
   const i = String(s).indexOf('\n');
   return i < 0 ? String(s) : String(s).slice(0, i);
+}
+
+/** A tool tally as one line, busiest first — the runaway signature is a name
+ *  with a big number next to it. */
+function tools(t) {
+  return Object.entries(t)
+    .sort((a, b) => b[1] - a[1])
+    .map(([name, n]) => (n > 1 ? `${name}×${n}` : name))
+    .join(' ');
+}
+
+/** Tokens at a glance: an operator reads 1.2M, not 1203481. */
+export function fmtTokens(n) {
+  if (n == null) return '0';
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${Math.round(n / 100) / 10}k`;
+  return `${Math.round(n / 100_000) / 10}M`;
 }
 
 /** Where a unit came from, as one readable string. */
@@ -126,8 +146,31 @@ export class BoxDashboard extends LitElement {
               <div class="stat"><div class="n">${s.pending}</div><div class="l">pending</div></div>
               <div class="stat"><div class="n">${s.exceptions}</div><div class="l">exceptions</div></div>
               <div class="stat"><div class="n">${s.stopped ? 'stopped' : 'running'}</div><div class="l">claims</div></div>
+              ${s.spend ? html`
+                <div class="stat">
+                  <div class="n">${fmtTokens(s.spend.tokens)}</div>
+                  <div class="l">tokens${s.spend.max_tokens ? ` of ${fmtTokens(s.spend.max_tokens)}` : ''}</div>
+                </div>
+                <div class="stat">
+                  <div class="n">${s.spend.running}/${s.spend.max_concurrent}</div>
+                  <div class="l">running</div>
+                </div>` : nothing}
               <div class="stat"><div class="n">${s.routes.length}</div><div class="l">routes</div></div>
-            </div>`,
+            </div>
+            ${/* The total alone is a lie whenever this number is not zero, so
+                 it is never shown on its own. */ ''}
+            ${s.spend?.unmetered
+              ? html`<jh-notification appearance="negative" type="banner" hide-dismiss-button>
+                  ${s.spend.unmetered} run(s) this window did not report a cost — the spend above is
+                  incomplete and claims are stopped until the window turns.
+                </jh-notification>`
+              : nothing}
+            ${s.spend?.refusing && !s.spend.unmetered
+              ? html`<jh-notification appearance="neutral" type="banner" hide-dismiss-button>
+                  The meter is pacing work: the factory is idle because it is over budget, not because
+                  there is nothing to do.
+                </jh-notification>`
+              : nothing}`,
         })}
       </jh-card>
       <jh-card header-title="In flight" header-subtitle="What the factory is doing right now, unit by unit" padding="medium">

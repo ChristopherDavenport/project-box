@@ -1068,3 +1068,64 @@ func TestHeldReviewIsCheckedWithoutRecording(t *testing.T) {
 		t.Fatal("the landing left no record")
 	}
 }
+
+// hangingBuilder never returns on its own; only the clock ends it.
+type hangingBuilder struct{ started chan struct{} }
+
+func (b hangingBuilder) Build(ctx context.Context, _ forge.Workspace, _ string) (forge.Commit, error) {
+	close(b.started)
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+// TestABuildHasADeadline: nothing bounded an agent session. The lease TTL does
+// not — Checkout renews it, and no one kills the process when it lapses — so
+// an agent that hung or looped ran until the daemon stopped, spending the
+// whole time. A clock is the difference between a runaway costing a bounded
+// amount and costing whatever it likes.
+func TestABuildHasADeadline(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	e.loop.Builder = hangingBuilder{started: make(chan struct{})}
+	e.loop.BuildTimeout = 300 * time.Millisecond
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-52"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-hang", "never finish"))
+
+	done := make(chan queue.WorkItem, 1)
+	go func() {
+		out, _ := e.loop.Run(ctx, item)
+		done <- out
+	}()
+	select {
+	case out := <-done:
+		if out.State != queue.StateParked {
+			t.Fatalf("a timed-out build should park for a person, got %s", out.State)
+		}
+		// The note has to say which clock ran out; "context deadline
+		// exceeded" alone tells nobody how long it waited or why.
+		if !strings.Contains(out.Note, "300ms") {
+			t.Fatalf("the park note does not name the budget: %q", out.Note)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the build was never stopped — nothing bounds an agent session")
+	}
+}
+
+// TestNegativeBuildTimeoutMeansNoBound: an operator may choose to let a build
+// run as long as it likes, and choosing is different from defaulting.
+func TestNegativeBuildTimeoutMeansNoBound(t *testing.T) {
+	l := &Loop{BuildTimeout: -1}
+	ctx, cancel := l.buildDeadline(context.Background())
+	defer cancel()
+	if _, ok := ctx.Deadline(); ok {
+		t.Fatal("a negative timeout still set a deadline")
+	}
+	if d := (&Loop{}).buildTimeout(); d != DefaultBuildTimeout {
+		t.Fatalf("an unset timeout should default, got %v", d)
+	}
+}

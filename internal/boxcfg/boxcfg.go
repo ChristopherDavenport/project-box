@@ -31,22 +31,29 @@ type Config struct {
 	// Drain bounds the graceful-shutdown wait for in-flight runs; empty
 	// means 30s. SIGTERM stops new claims immediately; running work gets
 	// this long to settle before it is cancelled.
-	Drain  string `yaml:"drain"`
-	OTLP   string `yaml:"otlp"`
-	Budget Budget `yaml:"budget"`
-	Boxes  []Box  `yaml:"boxes"`
+	Drain string `yaml:"drain"`
+	// BuildTimeout bounds one build; empty means 30m, and "-1s" (any negative
+	// duration) means no bound. Nothing bounded an agent session before: the
+	// lease TTL does not, because Checkout renews it.
+	BuildTimeout string `yaml:"build_timeout"`
+	OTLP         string `yaml:"otlp"`
+	Budget       Budget `yaml:"budget"`
+	Boxes        []Box  `yaml:"boxes"`
 }
 
 // Budget mirrors capacity.Budget in config form.
 type Budget struct {
 	MaxConcurrent int `yaml:"max_concurrent"`
 	MaxPerWindow  int `yaml:"max_per_window"`
-	// MaxTokensPerWindow is the brake denominated the way the invoice is.
-	// Setting it also arms the unmetered rule: a run that finishes without
-	// reporting its cost stops new claims until the window turns over,
-	// because a budget that reads unknown as zero is not a budget.
-	MaxTokensPerWindow int64  `yaml:"max_tokens_per_window"`
-	Window             string `yaml:"window"`
+	// MaxTokensPerWindow is the brake denominated the way the invoice is;
+	// zero means unbounded.
+	MaxTokensPerWindow int64 `yaml:"max_tokens_per_window"`
+	// AllowUnmetered keeps the factory working after a run that would not say
+	// what it cost. Off by default: measurement is the precondition for a
+	// budget, not a feature of one, and an agent whose spend is invisible is
+	// a position nobody chooses on purpose.
+	AllowUnmetered bool   `yaml:"allow_unmetered"`
+	Window         string `yaml:"window"`
 }
 
 // Argv is a command, written in YAML either as one string for the common
@@ -159,6 +166,11 @@ func (c *Config) validate() error {
 	if _, err := time.ParseDuration(c.Drain); err != nil {
 		return fmt.Errorf("boxcfg: drain: %w", err)
 	}
+	if c.BuildTimeout != "" {
+		if _, err := time.ParseDuration(c.BuildTimeout); err != nil {
+			return fmt.Errorf("boxcfg: build_timeout: %w", err)
+		}
+	}
 	if c.Budget.Window != "" {
 		if _, err := time.ParseDuration(c.Budget.Window); err != nil {
 			return fmt.Errorf("boxcfg: budget.window: %w", err)
@@ -223,6 +235,16 @@ func (c Config) EveryDuration() time.Duration {
 // DrainDuration returns the parsed graceful-shutdown window.
 func (c Config) DrainDuration() time.Duration {
 	d, _ := time.ParseDuration(c.Drain)
+	return d
+}
+
+// BuildTimeoutDuration returns the parsed build bound; zero means the loop's
+// own default applies.
+func (c Config) BuildTimeoutDuration() time.Duration {
+	if c.BuildTimeout == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(c.BuildTimeout)
 	return d
 }
 

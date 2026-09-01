@@ -24,14 +24,15 @@ var ErrBudget = errors.New("capacity: window budget exhausted — work waits")
 var ErrBusy = errors.New("capacity: concurrency limit reached")
 
 // ErrUnmetered reports that a run in this window finished without saying what
-// it cost, while a token budget was in force.
+// it cost, so the factory has stopped claiming.
 //
-// Fail closed. An operator who set a token budget asked to be protected from
-// spend, and the one thing a meter must never do is read unknown as zero —
-// that is how a budget stays green while the money leaves. Claiming stops
-// until the window turns over, which is loud, cheap, and recoverable; the
-// alternative is a brake that silently disengaged.
-var ErrUnmetered = errors.New("capacity: a run reported no cost while a token budget is in force")
+// Fail closed. The one thing a meter must never do is read unknown as zero —
+// that is how a budget stays green while the money leaves — and an autonomous
+// agent whose spend is invisible is not a thing to keep running because
+// nothing has visibly broken. Claiming stops until the window turns over,
+// which is loud, cheap and recoverable; the alternative is a brake that
+// silently disengaged. Set [Budget.AllowUnmetered] to proceed anyway.
+var ErrUnmetered = errors.New("capacity: a run reported no cost — claims stopped until the window turns (set allow_unmetered to proceed blind)")
 
 // Budget bounds a tenant's execution.
 type Budget struct {
@@ -50,7 +51,18 @@ type Budget struct {
 	// one and cannot stop the expensive one. This is the number an invoice
 	// is denominated in, so it is the number the brake is denominated in.
 	MaxTokensPerWindow int64
-	Window             time.Duration
+	// AllowUnmetered lets the factory keep working after a run that would not
+	// say what it cost. It defaults to false, and the default is the point:
+	// an autonomous agent whose spend is invisible is a position nobody
+	// chooses deliberately and anybody can end up in. An unset policy must
+	// never resolve to the permissive reading, here as everywhere else.
+	//
+	// This binds whether or not a token budget is set. Without measurement
+	// there is no budget to enforce, so measurement is the precondition
+	// rather than a feature of the budget. An operator who genuinely wants to
+	// fly blind can say so, and the saying is on the record.
+	AllowUnmetered bool
+	Window         time.Duration
 }
 
 // Meter enforces a budget and records what it does.
@@ -114,20 +126,20 @@ func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 		}
 		return nil, ErrBudget
 	}
-	if m.Budget.MaxTokensPerWindow > 0 {
-		// Unknown before over-budget: a window holding an unmetered run has
-		// no trustworthy total, so refusing for the total it happens to show
-		// would be reporting the wrong reason for the right answer.
-		if m.unmetered > 0 {
-			first := !m.refused
-			m.refused = true
-			m.mu.Unlock()
-			if first {
-				m.record(ctx, "budget-refused", what,
-					fmt.Sprintf(`{"reason":"unmetered","unmetered_runs":%d,"window":%q}`, m.unmetered, m.Budget.Window))
-			}
-			return nil, ErrUnmetered
+	// Unknown before over-budget: a window holding an unmetered run has no
+	// trustworthy total, so refusing for the total it happens to show would
+	// be reporting the wrong reason for the right answer.
+	if m.unmetered > 0 && !m.Budget.AllowUnmetered {
+		first := !m.refused
+		m.refused = true
+		m.mu.Unlock()
+		if first {
+			m.record(ctx, "budget-refused", what,
+				fmt.Sprintf(`{"reason":"unmetered","unmetered_runs":%d,"window":%q}`, m.unmetered, m.Budget.Window))
 		}
+		return nil, ErrUnmetered
+	}
+	if m.Budget.MaxTokensPerWindow > 0 {
 		if m.spent >= m.Budget.MaxTokensPerWindow {
 			first := !m.refused
 			m.refused = true
@@ -173,13 +185,42 @@ func (m *Meter) Charge(ctx context.Context, what string, tokens int64, metered b
 			tokens, metered, spent, unmetered))
 }
 
-// Spent reports the window's charged tokens and how many runs in it refused
-// to say what they cost — the pair a status view needs, since the total alone
-// is a lie whenever the second number is not zero.
-func (m *Meter) Spent() (tokens int64, unmetered int) {
+// Report is the window's account as an operator reads it.
+//
+// Unmetered travels beside the total on purpose: the total alone is a lie
+// whenever that number is not zero, and a spend figure shown without it would
+// be the most reassuring thing on the screen and the least true.
+type Report struct {
+	Tokens        int64         `json:"tokens"`
+	Unmetered     int           `json:"unmetered"`
+	MaxTokens     int64         `json:"max_tokens"`
+	Running       int           `json:"running"`
+	Started       int           `json:"started"`
+	MaxConcurrent int           `json:"max_concurrent"`
+	MaxPerWindow  int           `json:"max_per_window"`
+	Window        time.Duration `json:"-"`
+	WindowSec     int64         `json:"window_sec"`
+	// Refusing is true while the meter is turning work away, so a room can
+	// say the factory is paced rather than idle. An operator watching nothing
+	// happen needs those told apart.
+	Refusing bool `json:"refusing"`
+}
+
+// Report snapshots the window.
+func (m *Meter) Report() Report {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.spent, m.unmetered
+	maxC := m.Budget.MaxConcurrent
+	if maxC <= 0 {
+		maxC = 1
+	}
+	return Report{
+		Tokens: m.spent, Unmetered: m.unmetered, MaxTokens: m.Budget.MaxTokensPerWindow,
+		Running: m.running, Started: m.started,
+		MaxConcurrent: maxC, MaxPerWindow: m.Budget.MaxPerWindow,
+		Window: m.Budget.Window, WindowSec: int64(m.Budget.Window.Seconds()),
+		Refusing: m.refused,
+	}
 }
 
 // resetWindow starts a fresh accounting window. Callers hold mu.

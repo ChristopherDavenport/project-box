@@ -107,12 +107,13 @@ func New(path string) (*Daemon, error) {
 	}
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: cfg.Budget.MaxConcurrent,
 		MaxPerWindow:       cfg.Budget.MaxPerWindow,
-		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow, Window: cfg.WindowDuration()})
+		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
+		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration()})
 	d.pump = &pump.Pump{Store: s, Tenant: t, Runner: cfg.Runner, Queue: d.queue, Meter: d.meter, Loops: loops}
 	d.API = &api.Server{
 		Store: s, Tenant: t, Routes: routes,
 		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner},
-		Queue:  d.queue, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
+		Queue:  d.queue, Meter: d.meter, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
 		Started: time.Now(),
 		Reload:  d.reloadForAPI,
 	}
@@ -164,7 +165,8 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					return []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
 						Commands: [][]string{{"sh", "-c", check}}}}
 				},
-				TTL: 30 * time.Minute,
+				TTL:          30 * time.Minute,
+				BuildTimeout: cfg.BuildTimeoutDuration(),
 			}
 			if agentBuilder != nil {
 				lp.Builder, lp.Handoff = agentBuilder, agentBuilder.Handoff
@@ -210,7 +212,8 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 	d.API.SetRoutes(routes)
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
 		MaxPerWindow:       ncfg.Budget.MaxPerWindow,
-		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow, Window: ncfg.WindowDuration()})
+		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow,
+		AllowUnmetered:     ncfg.Budget.AllowUnmetered, Window: ncfg.WindowDuration()})
 	d.mu.Lock()
 	d.cfg = ncfg
 	d.every = ncfg.EveryDuration()

@@ -319,6 +319,27 @@ func fakeAgent(scenario string) {
 					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
 						"content": map[string]any{"type": "text", "text": "All done! (it was not)"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "toolsy":
+				// A day's work with a paper trail: one tool used, one asked
+				// for and refused.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call",
+						"toolCallId": "t-1", "title": "Bash", "kind": "execute"}})
+				f.request("session/request_permission", map[string]any{
+					"sessionId": sessionID,
+					"toolCall":  map[string]any{"toolCallId": "t-2", "title": "DeleteProd", "kind": "execute"},
+					"options": []map[string]any{
+						{"optionId": "yes", "name": "Allow", "kind": "allow_once"},
+						{"optionId": "no", "name": "Reject", "kind": "reject_once"},
+					},
+				})
+				os.WriteFile("widget.go", []byte("package app // built by the fake worker\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "add widget")
+				f.write(map[string]any{"id": id, "result": map[string]any{
+					"stopReason": "end_turn",
+					"usage":      map[string]any{"inputTokens": 10, "outputTokens": 5},
+				}})
 			case "metered":
 				// Cost on the turn's own result, which is where the pinned
 				// dialect looks first.
