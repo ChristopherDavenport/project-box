@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -109,6 +110,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/ingress", s.openIngress)
 	mux.HandleFunc("POST /v1/stop", s.stop)
 	mux.HandleFunc("POST /v1/resume", s.resume)
+	mux.HandleFunc("POST /v1/items/{id}/resolve", s.resolve)
+	mux.HandleFunc("POST /v1/items/{id}/retry", s.retry)
 	mux.HandleFunc("POST /v1/reload", s.reload)
 	if s.UI != nil {
 		files := http.FileServerFS(s.UI)
@@ -310,6 +313,36 @@ type ControlRequest struct {
 
 func (s *Server) stop(w http.ResponseWriter, r *http.Request)   { s.control(w, r, s.Queue.Stop) }
 func (s *Server) resume(w http.ResponseWriter, r *http.Request) { s.control(w, r, s.Queue.Resume) }
+
+// resolve and retry are the two ways off the exception queue, and the only
+// endpoints on this surface that change an item rather than record an intent
+// for the pump to act on. That is deliberate: the pump is the only thing that
+// may START work, but an exception is by definition work the pump has already
+// given up on, and asking it to also be the path back would mean an operator
+// could not clear a queue the pump had stopped draining.
+func (s *Server) resolve(w http.ResponseWriter, r *http.Request) { s.reopen(w, r, s.Queue.Resolve) }
+func (s *Server) retry(w http.ResponseWriter, r *http.Request)   { s.reopen(w, r, s.Queue.Retry) }
+
+func (s *Server) reopen(w http.ResponseWriter, r *http.Request,
+	f func(context.Context, tenant.ID, string, string, string) (queue.WorkItem, error)) {
+	var req ControlRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpErr(w, http.StatusBadRequest, "a JSON body with a reason is required")
+		return
+	}
+	item, err := f(r.Context(), s.Tenant, r.PathValue("id"), s.actor(r), req.Reason)
+	switch {
+	case errors.Is(err, queue.ErrNoItem):
+		httpErr(w, http.StatusNotFound, err.Error())
+	case err != nil:
+		// A wrong-state reopen is the caller's mistake, not the server's: the
+		// item moved under them, which is exactly what an operator racing a
+		// runner needs told rather than retried.
+		httpErr(w, http.StatusConflict, err.Error())
+	default:
+		writeJSON(w, item)
+	}
+}
 
 func (s *Server) control(w http.ResponseWriter, r *http.Request, f func(context.Context, tenant.ID, string, string) error) {
 	var req ControlRequest

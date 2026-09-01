@@ -36,6 +36,16 @@ const (
 	StateParked State = "parked"
 	StateDone   State = "done"
 	StateFailed State = "failed"
+	// StateResolved is an exception a person closed by hand: the item needed
+	// no landing, and someone said so on the record.
+	//
+	// Not StateDone, which means a commit reached the branch and feeds the
+	// landings index that review sampling draws from — an auditor pulling a
+	// sampled item expects a sha. Not StateFailed either: an agent reporting
+	// that an issue was already implemented did its job, and filing that
+	// verdict as a failure would make the one honest answer look like the
+	// crash it is meant to be distinguished from.
+	StateResolved State = "resolved"
 )
 
 // WorkItem is one claimable unit of work.
@@ -135,13 +145,15 @@ var ErrNoItem = errors.New("queue: no such item")
 // A factory stopped draining because an agent said, correctly, that it had
 // nothing to do.
 var stateKinds = map[string]bool{
-	"queued":  true,
-	"claimed": true,
-	"built":   true,
-	"waiting": true,
-	"parked":  true,
-	"done":    true,
-	"failed":  true,
+	"queued":   true,
+	"claimed":  true,
+	"built":    true,
+	"waiting":  true,
+	"parked":   true,
+	"done":     true,
+	"failed":   true,
+	"resolved": true,
+	"retried":  true,
 }
 
 // StateRecord reports whether a record kind carries the whole work item and
@@ -276,6 +288,78 @@ func (q *Queue) Fail(ctx context.Context, w WorkItem, lease forge.Lease, reason 
 	err := q.record(ctx, w, "failed", w.ID, reason)
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
+}
+
+// Resolve closes a parked item without a landing: the operator read the
+// exception, agreed there is nothing to build, and said so.
+//
+// The exception queue had no way out. StateParked was written in one place
+// and read in five, and nothing anywhere moved an item off it — so every
+// parked item was permanent, the queue only ever grew, and the verdict an
+// escalating agent had gone to the trouble of writing ("this issue is already
+// implemented, close it") was a recommendation the system could not act on.
+// An exception queue nobody can clear is a list, not a queue.
+func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id, actor, why string) (WorkItem, error) {
+	if why == "" {
+		return WorkItem{}, errors.New("queue: resolve needs a reason — closing an exception is a judgement and the record must carry whose")
+	}
+	return q.reopen(ctx, t, id, actor, StateResolved, "resolved", why)
+}
+
+// Retry returns a parked item to the queue for another attempt, with the
+// operator's note replacing the one it parked with.
+//
+// The counterpart to Resolve, and the reason parking could not simply be
+// terminal: an item parks for transient reasons too — a flaky gate, a
+// timeout, an agent that ran out of room — and without this the factory could
+// never recover work it had already been asked to do. The resume point is
+// already gone (Park drops it), so a retry builds afresh rather than
+// re-offering a commit whose verdict is on the record.
+func (q *Queue) Retry(ctx context.Context, t tenant.ID, id, actor, note string) (WorkItem, error) {
+	return q.reopen(ctx, t, id, actor, StatePending, "retried", note)
+}
+
+// reopen is the one transition off the exception queue, in both directions it
+// can go. Only a parked item may take it: an operator resolving something
+// still running would race the runner that holds its lease.
+func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to State, kind, note string) (WorkItem, error) {
+	w, err := q.Load(ctx, t, id)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if w.State != StateParked {
+		return w, fmt.Errorf("queue: item %s is %s, not parked — only an exception can be %s", id, w.State, kind)
+	}
+	w.State, w.Note = to, note
+	w.dropResume()
+	// The actor is the operator, not the runner: this is the one transition a
+	// person makes by hand, and an audit that could not tell it from the
+	// daemon's own work would be missing the only human act in the loop.
+	if _, err := q.Store.Log().Append(ctx, evidence.Record{
+		Tenant: w.Tenant, Scope: scope(w.ID), Kind: kind, Subject: w.ID,
+		Actor: actor, OnBehalfOf: w.Requester, Body: mustMarshal(w),
+	}); err != nil {
+		return w, err
+	}
+	if to == StatePending {
+		// Back into the drain's index. The drain folds it by subject and
+		// would find the original queued entry anyway, but the live event
+		// stream grows its follow set from new index/pending records alone —
+		// so without this a retried item runs unwatched until someone
+		// reconnects.
+		return w, q.index(ctx, w.Tenant, "pending", w.ID, note)
+	}
+	return w, nil
+}
+
+func mustMarshal(w WorkItem) []byte {
+	b, err := json.Marshal(w)
+	if err != nil {
+		// WorkItem is plain data; a marshal failure here is a programming
+		// error, not a runtime condition.
+		panic("queue: marshalling a work item: " + err.Error())
+	}
+	return b
 }
 
 // Load folds an item's chain back into its current state.

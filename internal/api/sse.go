@@ -146,8 +146,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 // terminalKind reports whether a record settles an item.
+//
+// "parked" settles the stream but not the item: an operator may retry it back
+// into the queue, and the retry re-enters the follow set through the
+// index/pending record [queue.Queue.Retry] writes.
 func terminalKind(k string) bool {
-	return k == "done" || k == "failed" || k == "parked"
+	return k == "done" || k == "failed" || k == "parked" || k == "resolved"
 }
 
 // inFlight names the items whose chains are worth following: everything the
@@ -164,7 +168,7 @@ func (s *Server) inFlight(ctx context.Context) map[string]bool {
 			continue
 		}
 		switch item.State {
-		case queue.StateDone, queue.StateFailed, queue.StateParked:
+		case queue.StateDone, queue.StateFailed, queue.StateParked, queue.StateResolved:
 		default:
 			out[rec.Subject] = true
 		}

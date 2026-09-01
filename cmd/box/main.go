@@ -315,8 +315,24 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 			return c.Stop(ctx, rest[0])
 		}
 		return c.Resume(ctx, rest[0])
+	case "resolve", "retry":
+		sub := flag.NewFlagSet(cmd, flag.ContinueOnError)
+		item := sub.String("item", "", "work item id, as `box queue` lists it")
+		reason := sub.String("reason", "", "why — it becomes the record")
+		if err := sub.Parse(rest); err != nil {
+			return err
+		}
+		if *item == "" {
+			return fmt.Errorf("%s needs -item", cmd)
+		}
+		out, err := c.Reopen(ctx, cmd, *item, *reason)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s %s state=%s\n%s\n", cmd, out.ID, out.State, out.Note)
+		return nil
 	default:
-		return fmt.Errorf("daemon mode supports status|exceptions|submit|item|provenance|stop|resume, got %q", cmd)
+		return fmt.Errorf("daemon mode supports status|queue|exceptions|submit|item|resolve|retry|provenance|stop|resume, got %q", cmd)
 	}
 	return nil
 }

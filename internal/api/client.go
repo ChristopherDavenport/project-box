@@ -137,6 +137,13 @@ func (c *Client) Resume(ctx context.Context, reason string) error {
 	return c.do(ctx, "POST", "/v1/resume", ControlRequest{Reason: reason}, nil)
 }
 
+// Reopen takes an item off the exception queue: verb is "resolve" (closed by
+// hand, no landing) or "retry" (back into the queue for another attempt).
+func (c *Client) Reopen(ctx context.Context, verb, id, reason string) (queue.WorkItem, error) {
+	var out queue.WorkItem
+	return out, c.do(ctx, "POST", "/v1/items/"+id+"/"+verb, ControlRequest{Reason: reason}, &out)
+}
+
 // Reload asks the daemon to re-read its configuration.
 func (c *Client) Reload(ctx context.Context) (string, error) {
 	var out map[string]string
