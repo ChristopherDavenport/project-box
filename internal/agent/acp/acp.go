@@ -46,6 +46,22 @@ var ErrPolicyViolation = errors.New("acp: denied tool appeared on the stream —
 // stream whose denied tools may never be recognised at all.
 var ErrProtocolDialect = errors.New("acp: agent speaks a protocol version this runtime does not")
 
+// ErrTokenCeiling reports that a single run spent past its per-run bound and
+// was killed at the stream.
+//
+// The window budget could not do this. [capacity.Meter.Acquire] is a gate on
+// STARTING a run: it asks whether the window has room and then has no further
+// say, so the ceiling it enforces is really "the limit, plus whatever one run
+// can spend before it stops on its own". Measured, that was not a rounding
+// error — a 6,000,000-token window was carried to 25,419,130 by one session
+// that ran 110 tool calls for 21 minutes and cost $13.60. It broke no rule;
+// there was no rule to break.
+//
+// So the bound belongs where the spend is visible as it happens, which is the
+// same place tool policy is enforced and for the same reason: the stream is
+// the only vantage point that exists while the run is still running.
+var ErrTokenCeiling = errors.New("acp: run exceeded its token ceiling — session killed")
+
 // protocolVersion is the dialect this runtime is written against, offered at
 // initialize and required back. Bump it only together with the update shapes
 // below.
@@ -121,6 +137,15 @@ type Runtime struct {
 	Dir string
 	// Env is appended to the inherited environment.
 	Env []string
+	// MaxTokens bounds what ONE run may spend before the session is killed;
+	// zero means unbounded. See [ErrTokenCeiling] for why the window budget
+	// cannot express this.
+	//
+	// Enforced against the stream's running total, so it binds only as
+	// tightly as the agent reports: an adapter that says nothing until the
+	// end cannot be stopped in the middle by anything short of a clock, which
+	// is what build_timeout is for.
+	MaxTokens int64
 }
 
 // Result is what a completed run reports.
@@ -184,9 +209,10 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	}()
 
 	var (
-		mu       sync.Mutex
-		res      Result
-		violated error
+		mu        sync.Mutex
+		res       Result
+		violated  error
+		overspent error
 		// streamed accumulates per-update usage. The prompt result wins when
 		// it carries a total of its own; summing both would double-count.
 		streamed Usage
@@ -232,7 +258,15 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			if w := u.usage(); w != nil {
 				mu.Lock()
 				streamed.add(*w)
+				over := rt.MaxTokens > 0 && overspent == nil && streamed.Total() >= rt.MaxTokens
+				if over {
+					overspent = fmt.Errorf("%w: %d tokens against a ceiling of %d",
+						ErrTokenCeiling, streamed.Total(), rt.MaxTokens)
+				}
 				mu.Unlock()
+				if over {
+					cancel() // kills the process via CommandContext
+				}
 			}
 			if c := u.Update.Cost; c != nil && c.Currency == "USD" {
 				// Cumulative for the turn, so the last word wins; summing
@@ -360,6 +394,13 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	res.Usage.CostUSD = cost
 	if violated != nil {
 		return res, violated
+	}
+	// Before the generic prompt error, which on this path is only ever the
+	// kill reporting itself. The usage rides the Result either way: a run
+	// stopped for spending too much is the last run whose cost may go
+	// unrecorded.
+	if overspent != nil {
+		return res, overspent
 	}
 	if err != nil {
 		return res, fmt.Errorf("acp: prompt: %w", err)

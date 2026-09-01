@@ -401,6 +401,18 @@ func fakeAgent(scenario string) {
 					})
 				}
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "spendy":
+				// A run that never stops spending and never settles. Nothing
+				// but the ceiling can end this: no stop reason is coming, and
+				// the only other bound is a wall clock.
+				for {
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+							"content": map[string]any{"type": "text", "text": "still going"}},
+						"_meta": map[string]any{"usage": map[string]any{"inputTokens": 1000, "outputTokens": 0}},
+					})
+					time.Sleep(2 * time.Millisecond)
+				}
 			case "drift":
 				// The dialect moved: a tool call announced only in the update
 				// spelling, and a kind this runtime has never heard of.

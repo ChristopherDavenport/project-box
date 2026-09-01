@@ -48,6 +48,15 @@ type Budget struct {
 	// MaxTokensPerWindow is the brake denominated the way the invoice is;
 	// zero means unbounded.
 	MaxTokensPerWindow int64 `yaml:"max_tokens_per_window"`
+	// MaxTokensPerRun bounds ONE run, killing the session at the stream when
+	// it spends past this; zero means unbounded.
+	//
+	// The window bound cannot do this job. It gates whether a run may START,
+	// so the ceiling it really enforces is the window plus one whole session,
+	// and one session was measured at 20,076,747 tokens against a 6,000,000
+	// window. Setting only the window is asking for a limit and getting a
+	// suggestion.
+	MaxTokensPerRun int64 `yaml:"max_tokens_per_run"`
 	// AllowUnmetered keeps the factory working after a run that would not say
 	// what it cost. Off by default: measurement is the precondition for a
 	// budget, not a feature of one, and an agent whose spend is invisible is

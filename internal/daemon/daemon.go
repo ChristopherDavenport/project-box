@@ -111,6 +111,13 @@ func New(path string) (*Daemon, error) {
 		MaxPerWindow:       cfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
 		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration()})
+	// The window's account outlives the process that spent it. Without this a
+	// restart is a fresh budget, so the brake is only ever as strong as the
+	// daemon's uptime.
+	if err := d.meter.Restore(context.Background()); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("daemon: restoring the capacity window: %w", err)
+	}
 	d.pump = &pump.Pump{Store: s, Tenant: t, Runner: cfg.Runner, Queue: d.queue, Meter: d.meter, Loops: loops}
 	// The exception queue ages whether or not anybody is looking, so the
 	// sweep is what makes "nobody is looking" audible. The log is the weakest
@@ -146,7 +153,8 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 		if len(bx.Agent) > 0 {
 			agentBuilder = &acp.Builder{
 				Store: d.store, Tenant: d.tenant, Box: bx.Name,
-				Command: bx.Agent,
+				Command:   bx.Agent,
+				MaxTokens: cfg.Budget.MaxTokensPerRun,
 				Composer: &agent.Composer{Source: agent.StaticLayers{{
 					Name: "builder", Scope: agent.ScopeRole,
 					Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},

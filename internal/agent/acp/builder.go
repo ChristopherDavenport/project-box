@@ -34,6 +34,11 @@ type Builder struct {
 	// Command is the agent argv — claude-agent-acp, or the test binary.
 	Command []string
 	Env     []string
+	// MaxTokens bounds what one run may spend; zero means unbounded. The
+	// window budget gates starts and cannot bound a run already going, so
+	// without this the effective ceiling is the window plus one whole
+	// session — see [ErrTokenCeiling].
+	MaxTokens int64
 	// Composer resolves the bundle; Role defaults to builder.
 	Composer *agent.Composer
 	Role     agent.Role
@@ -96,7 +101,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		}
 	}
 
-	rt := &Runtime{Command: b.Command, Dir: ws.Dir, Env: b.Env}
+	rt := &Runtime{Command: b.Command, Dir: ws.Dir, Env: b.Env, MaxTokens: b.MaxTokens}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, prompt(bundle, task, contextDir))
 	elapsed := time.Since(started)
