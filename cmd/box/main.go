@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"time"
 
 	"net"
@@ -260,6 +262,17 @@ func dash(s string) string {
 	return s
 }
 
+// byState renders a backlog's tally in a stable order — alphabetical, because
+// the states have no rank and a map's order would make two identical statuses
+// print differently.
+func byState(m map[queue.State]int) string {
+	var parts []string
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, m[k]))
+	}
+	return strings.Join(parts, " ")
+}
+
 func printQueue(entries []control.QueueEntry) {
 	if len(entries) == 0 {
 		fmt.Println("the queue is empty")
@@ -401,6 +414,12 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		}
 		fmt.Printf("tenant=%s box=%s runner=%s stopped=%v pending=%d exceptions=%d up=%ds routes=%v\n",
 			st.Tenant, st.Box, st.Runner, st.Stopped, st.Pending, st.Exceptions, st.UptimeSec, st.Routes)
+		// Which states that pending number is made of, and the pointer to the
+		// verb that lists them. A bare count is the whole complaint.
+		if b := st.Backlog; b.Total > 0 {
+			fmt.Printf("backlog: %d of %d still owed a run — %s (box queue lists them)\n",
+				b.Pending, b.Total, byState(b.ByState))
+		}
 		if q := st.ExceptionQueue; q.Parked > 0 {
 			met := "met"
 			if !q.Met {

@@ -428,6 +428,7 @@ claim is decoration.
 | Redaction | a planted credential does not reach the exporter | 5 |
 | Exception timeliness | the oldest parked item is measured against a recorded objective; a stale exception is told out of band, once per objective, bounded | 5 |
 | Frontier legibility | ready is distinguished from blocked and from held; a cascade leaf names its ROOT rather than its neighbour; a claimed item whose lease lapsed still names the runner that took it | 5 |
+| The count is the listing counted | `/v1/status`'s queue numbers are a tally of the rows `GET /v1/items` serves — state by state, parts summing to the total — and what the count calls pending is what the drain would claim, from one vocabulary both read | 5 |
 | A running unit is legible | a claimed unit reports its seat, its composed layers in application order, its stage and time in stage, and its agent's messages, tool calls and refusals AS THEY HAPPEN | 5 |
 | The live view is not a second account | the tool calls and denials a watcher saw are exactly the ones the settled record is charged with, and the message frames concatenate to the run's own text | 5 |
 | Fan-out stays per unit | concurrent runs produce one card each with its own timeline; no frame appears on another unit's card, and a scoped subscriber receives no other unit's stream | 5 |
@@ -505,6 +506,7 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Thunderdome adopted as a lane, not a stance | swarm-repair needs the attribution and reversibility this substrate provides |
 | A mid-run handoff is a third non-settled state, bounded by hops | not finished and not stuck is a third thing: escalating parks work needing nobody and discards what the session built, grinding on produces the commit the contract exists to prevent; the agent requests and the loop decides, which is what the bound is |
 | A new loop stage is a gate or a dependent work item; `Run`'s sequence stays Go | judgement is a `Gate`, work that makes its own change is a node in the graph, and what is left is one unit's transaction — one claim, one lease, one resume point, one meter slot — which a declared sequence would only make it possible to misconfigure |
+| A count is a projection of the listing, never a second reading of it | the counter and the rows were separate walks with separate copies of "not settled yet", agreeing only because two switches matched — and a state added to one and not the other stops the number describing the queue under it, quietly; the status fold costs more than a bare count, which is the trade the exception health metric beside it already makes |
 | The frontier is a projection over the queue, not a new state | "pending" cannot separate next from blocked, and a factory with capacity and nothing moving looks exactly like one with nothing to do; readiness stays item-local so the stop button and the budget explain the symptom instead of erasing it |
 | Graph layout is computed in Go and shipped as coordinates | `dist/` is committed and embedded, so a JS layout library is bytes in this repository forever; a Go dependency is already in CI's toolchain, and the same layout serves a static export to an auditor with no daemon |
 | The table is the representation of record; the diagram renders on top of it | a graph that is the only way to see blocked work is a barrier to a keyboard and a screen reader, and it holds the whole view hostage to a layout decision |
@@ -1152,6 +1154,31 @@ sandboxed `bind()` on a unix socket is denied and boxd cannot start at all.
 And a timeline with real agent frames in a browser needs the dogfood box with
 a live ACP session, which is the same live run #6 and #7 are already waiting
 on.
+
+Issue #20's design note had a second half, and it closed last (2026-09-01).
+The listing, the CLI verb and the room's table all shipped in the rounds above
+— #20's own, and then #14's frontier on the same rows — but the COUNTS on
+`/v1/status` stayed exactly what the issue opened by complaining about: a walk
+of `index/pending` with its own copy of the vocabulary for "not settled yet".
+Nothing held them to the listing. They agreed because two switch statements
+matched, which is agreement with no mechanism behind it, and this system's
+state vocabulary has drifted that way once already — a word some readers
+learned and others did not, where work does not disappear loudly but
+plausibly.
+
+`Room.Backlog` is that count as a tally of `Room.Queue`, and `queue.Claimable`
+is now the one place the vocabulary is written: the pump selects with it, the
+pump decides what settled with it, and the room's pending number IS it.
+`/v1/status` carries the parts beside the roll-up, so "pending: 14" says which
+fourteen states it is made of; `box status` prints the same line and the
+dashboard the same breakdown with a link to the verb that lists them, because
+a fact one reader of the queue has and another does not is worse than one
+nobody has — the argument `box queue` settled for the frontier, used a third
+time. Asserted the way it can break: state by state against the listing
+narrowed to that state, at intake, MID-DRAIN and settled, since a counter that
+matches while everything is pending and drifts once work moves is the whole
+bug. The cost is stated rather than implied: status folds the queue where it
+walked an index, which is what `ExceptionHealth` beside it already does.
 
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no

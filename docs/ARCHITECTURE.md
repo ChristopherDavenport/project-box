@@ -173,6 +173,20 @@ folded into it. Ready work that is not moving **is** the symptom, and a flag
 that went false whenever claims were stopped would erase it at the exact
 moment it fired. The cause sits beside the count, never inside it.
 
+**And the count is a projection of that listing, never a second reading of
+it.** The counter and the rows began as separate walks over the same index,
+each carrying its own copy of the vocabulary for *not settled yet*, and they
+agreed only because two switch statements happened to match. That is agreement
+with no mechanism behind it: a state added to one and not the other makes the
+number on the wall stop describing the queue underneath it, and stop quietly —
+which is the failure this system's state vocabulary has already had once, where
+work did not disappear loudly but plausibly. So the queue numbers are a tally
+of the rows the listing serves, and what the count calls pending is what the
+pump will claim, read from one function both of them call. The cost is stated
+rather than hidden: the status endpoint folds the queue where it used to walk
+an index, which is the trade the exception queue's health metric already makes
+beside it, for the same reason.
+
 **The table is the representation of record; a diagram renders on top of it.**
 A node-link view of the same edges is worth having and is not the feature: a
 graph that is the only way to see blocked work is a barrier to anyone reading

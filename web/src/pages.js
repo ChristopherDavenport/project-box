@@ -84,6 +84,22 @@ function origin(e) {
   return e.ingress ?? '';
 }
 
+/** breakdown renders which states the queue is made of, alphabetically — the
+ *  states have no rank, and an object's key order would make two identical
+ *  statuses read differently.
+ *
+ *  The parts come off the same fold as the counter above them, so a number
+ *  that cannot be expanded is the whole of what `pending=14` was. Nothing here
+ *  knows which states count as pending: that vocabulary lives in one place in
+ *  the server, and a copy of it in the browser is how the two start to
+ *  disagree. */
+function breakdown(by) {
+  return Object.keys(by ?? {})
+    .sort()
+    .map((k) => `${k} ${by[k]}`)
+    .join(' · ');
+}
+
 // The states an operator sorts work into. `live` is the default because the
 // question the room exists to answer is what is happening now, not what has
 // ever happened.
@@ -162,6 +178,7 @@ export class BoxDashboard extends LitElement {
     .feed { max-height: 420px; overflow-y: auto; }
     .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); }
     .idle { color: var(--jh-color-content-secondary-enabled); }
+    .breakdown { font-size: .8rem; color: var(--jh-color-content-secondary-enabled); margin: 12px 0 0; }
   `;
 
   _status = new Task(this, {
@@ -215,6 +232,15 @@ export class BoxDashboard extends LitElement {
                 </div>` : nothing}
               <div class="stat"><div class="n">${s.routes.length}</div><div class="l">routes</div></div>
             </div>
+            ${/* What the counter above is made of, and where the units are. A
+                 count nobody can expand was the whole visibility into a
+                 morning's work, and the number and its parts are one fold
+                 rather than a counter beside a listing. */ ''}
+            ${s.backlog?.total
+              ? html`<p class="breakdown">
+                  Queue: ${breakdown(s.backlog.by_state)} — <a href="/work">list them</a>
+                </p>`
+              : nothing}
             ${/* The total alone is a lie whenever this number is not zero, so
                  it is never shown on its own. */ ''}
             ${s.spend?.unmetered

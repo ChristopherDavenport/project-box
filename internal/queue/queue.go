@@ -63,6 +63,23 @@ const (
 	StateResolved State = "resolved"
 )
 
+// Claimable names the states a drain may take work in — equivalently, the
+// states that are not settled, which is what an operator means by "pending".
+//
+// One list rather than several. The pump's selection, the pump's settled
+// count and the room's backlog read the same vocabulary, and when it was
+// spelled out separately in each of them a state added to one and not the
+// others had the pump running an item and then reporting it as finished. The
+// state vocabulary has already had that failure once, which is why this is a
+// function and not a switch three readers each write out.
+func Claimable(s State) bool {
+	switch s {
+	case StatePending, StateWaiting, StateHandedOff:
+		return true
+	}
+	return false
+}
+
 // Severity is how loudly a parking asks for a person, set by the stage that
 // parked it — the only place that knows whether a failing unit test and a
 // revoked credential are the same emergency.

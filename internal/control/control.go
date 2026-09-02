@@ -323,6 +323,51 @@ func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, 
 	return out, err
 }
 
+// Backlog is the work queue counted — and it is the LISTING counted, which is
+// the whole of the difference. `pending=14` was a number arrived at by its own
+// walk of the index, so the count and the listing were two accounts of one
+// queue with nothing holding them to each other: a state either could learn
+// and the other not is a count that quietly stops matching the rows under it.
+//
+// [Room.Queue] is now the single fold, and this is a tally of what it
+// returned. That costs a full listing per call where a bare count would walk
+// less — stated rather than hidden, and the same trade [ExceptionHealth]
+// already makes, because two places counting one thing is two places that can
+// disagree.
+type Backlog struct {
+	// Pending is everything still owed a run, by [queue.Claimable] — the one
+	// number an operator watches, and the one that must not drop when work
+	// merely changes which non-settled state it is in.
+	Pending int `json:"pending"`
+	// ByState is every state present with its count. It is what makes Pending
+	// a projection rather than an assertion: the roll-up and its parts arrive
+	// together, from the same rows, and an operator reading "pending: 3" can
+	// see which three states that is.
+	ByState map[queue.State]int `json:"by_state,omitempty"`
+	// Total is every item the tenant has submitted — what the listing returns
+	// unfiltered.
+	Total int `json:"total"`
+}
+
+// Backlog counts the queue from the listing itself.
+func (r *Room) Backlog(ctx context.Context) (Backlog, error) {
+	entries, err := r.Queue(ctx)
+	if err != nil {
+		return Backlog{}, err
+	}
+	b := Backlog{Total: len(entries)}
+	for _, e := range entries {
+		if b.ByState == nil {
+			b.ByState = map[queue.State]int{}
+		}
+		b.ByState[e.State]++
+		if queue.Claimable(e.State) {
+			b.Pending++
+		}
+	}
+	return b, nil
+}
+
 // fold is Queue's body, returning the frontier as well so a caller wanting
 // more than a row — [Room.Sessions] wants the composed layers — reads it from
 // the same single walk rather than opening a second one.

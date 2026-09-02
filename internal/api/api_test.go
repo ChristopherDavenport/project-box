@@ -371,6 +371,107 @@ func TestQueueOverTheWire(t *testing.T) {
 	}
 }
 
+// TestTheCountAndTheListingAreOneFold is the other half of issue #20, and the
+// half the counter itself was the complaint about: /v1/status's numbers are a
+// tally of /v1/items rather than a second walk arriving at their own.
+//
+// The two used to be separate readings of one queue — the listing folding each
+// chain, the count walking index/pending with its own copy of the
+// not-yet-settled vocabulary. They agreed because two switch statements
+// happened to match, which is agreement with nothing holding it, and the state
+// vocabulary in this system has already drifted that way once.
+func TestTheCountAndTheListingAreOneFold(t *testing.T) {
+	w := rig(t)
+	ctx := context.Background()
+	ts := httptest.NewServer(w.srv.Handler())
+	defer ts.Close()
+	c, err := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, key := range []string{"issue-20a", "issue-20b", "issue-20c"} {
+		if _, err := c.OpenIngress(ctx, "issues", key, "make pending legible for "+key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := w.pump.Intake(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// agrees holds the counter to the rows at every point the queue moves
+	// through, not only at the start: a count that matches when everything is
+	// pending and drifts once work settles is the bug this closes.
+	agrees := func(when string) Status {
+		t.Helper()
+		st, err := c.Status(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all, err := c.Items(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Backlog.Total != len(all) {
+			t.Fatalf("%s: status says %d in the queue, the listing returns %d",
+				when, st.Backlog.Total, len(all))
+		}
+		if st.Pending != st.Backlog.Pending {
+			t.Fatalf("%s: the flat count %d and the fold's %d disagree", when, st.Pending, st.Backlog.Pending)
+		}
+		// State by state, against the listing narrowed to that state — the
+		// endpoint a client would use to derive the number itself.
+		sum, owed := 0, 0
+		for state, n := range st.Backlog.ByState {
+			rows, err := c.Items(ctx, string(state))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != n {
+				t.Errorf("%s: status counts %d %s, GET /v1/items?state=%s returns %d",
+					when, n, state, state, len(rows))
+			}
+			sum += n
+			if queue.Claimable(state) {
+				owed += n
+			}
+		}
+		if sum != st.Backlog.Total {
+			t.Fatalf("%s: the parts sum to %d, the total says %d", when, sum, st.Backlog.Total)
+		}
+		// One vocabulary: what the counter calls pending is what the drain
+		// will take, read from the same function the pump selects with.
+		if st.Pending != owed {
+			t.Fatalf("%s: pending=%d, but %d rows are in states the drain would claim: %+v",
+				when, st.Pending, owed, st.Backlog.ByState)
+		}
+		return st
+	}
+
+	st := agrees("after intake")
+	if st.Pending != 3 || st.Backlog.ByState[queue.StatePending] != 3 {
+		t.Fatalf("three submitted, status says %d: %+v", st.Pending, st.Backlog.ByState)
+	}
+
+	// Mid-flight, where the two accounts had the most room to come apart: one
+	// branch lease admits one run at a time (issue #18), so a drain leaves a
+	// mixture rather than a clean sweep.
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	agrees("mid-drain")
+
+	for range 4 {
+		if _, err := w.pump.Drain(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st = agrees("settled")
+	if st.Pending != 0 || st.Backlog.ByState[queue.StateDone] != 3 {
+		t.Fatalf("settled: pending=%d %+v", st.Pending, st.Backlog.ByState)
+	}
+}
+
 // TestRunInternalsReachTheStream: a claimed item used to be a black box. The
 // index scopes say a unit exists and later that it landed; everything between
 // — the agent starting, the commit, each gate verdict, an escalation and its

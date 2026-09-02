@@ -181,6 +181,11 @@ type Status struct {
 	// item is, and whether that clears the objective. A count alone cannot
 	// distinguish a queue being worked from one nobody has opened in a week.
 	ExceptionQueue control.ExceptionHealth `json:"exception_queue"`
+	// Backlog is where Pending comes from: the listing at GET /v1/items,
+	// counted. Both numbers are folds of the same rows rather than a counter
+	// beside a listing, so "pending=14" and the fourteen units it names cannot
+	// come apart — and the state breakdown says which fourteen.
+	Backlog control.Backlog `json:"backlog"`
 	// Spend is the capacity window's account. Nil when the server was wired
 	// without a meter; absent rather than zero, because a zero here would
 	// read as "nothing spent" when it means "nobody asked".
@@ -194,33 +199,20 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 500, err.Error())
 		return
 	}
-	pending := 0
-	seen := map[string]bool{}
-	for rec, err := range s.Store.Log().Since(ctx, s.Tenant, "index/pending", 1) {
-		if err != nil {
-			httpErr(w, 500, err.Error())
-			return
-		}
-		if seen[rec.Subject] {
-			continue
-		}
-		seen[rec.Subject] = true
-		item, err := s.Queue.Load(ctx, s.Tenant, rec.Subject)
-		if err != nil {
-			continue
-		}
-		switch item.State {
-		case queue.StatePending, queue.StateWaiting, queue.StateHandedOff:
-			// Everything still owed a run. A handed-off item is between
-			// sessions rather than finished, and leaving it out would have the
-			// count drop when an agent asked for a fresh session — work
-			// disappearing from the only number an operator watches.
-			pending++
-		}
+	// Both counts come from the room rather than a fold apiece here: two
+	// places counting the same thing is two places that can disagree, and the
+	// room is the one that also knows how old the oldest parked item is and
+	// which states its pending number is made of.
+	//
+	// Pending used to be counted here, by its own walk of index/pending with
+	// its own copy of the not-yet-settled vocabulary. It agreed with the
+	// listing by coincidence of two switches matching, which is the agreement
+	// that lasts exactly until a state is added to one of them.
+	backlog, err := s.room(r).Backlog(ctx)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
 	}
-	// The exception count comes from the room rather than a second fold here:
-	// two places counting the same thing is two places that can disagree, and
-	// the room is the one that also knows how old the oldest is.
 	health, err := s.room(r).ExceptionHealth(ctx)
 	if err != nil {
 		httpErr(w, 500, err.Error())
@@ -228,7 +220,8 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	st := Status{
 		Tenant: s.Tenant, Box: s.Box, Runner: s.Runner, Stopped: stopped,
-		Pending: pending, Exceptions: health.Parked, ExceptionQueue: health,
+		Pending: backlog.Pending, Backlog: backlog,
+		Exceptions: health.Parked, ExceptionQueue: health,
 		UptimeSec: int64(time.Since(s.Started).Seconds()), Routes: s.routeNames(),
 		Version: version.String(),
 	}
