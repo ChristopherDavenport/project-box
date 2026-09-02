@@ -529,6 +529,88 @@ invocation inherits a why, a timeline, and a postmortem obligation, and
 "show me every break-glass invocation" resolves to a list of incidents. A
 campaign can never reach for elevated authority, however urgent it feels.
 
+### And a data envelope: what the work may touch, and which endpoints see it
+
+The authority envelope says what work may **do**. It says nothing about what
+work may **touch**, and those are different questions of the same shape
+(decided 2026-09-01).
+
+Vulnerability remediation across a regulated estate is the case that makes it
+concrete. An embargoed or internally-discovered finding is material non-public
+information; a published CVE with a known upgrade path is not. Both arrive as
+"fix a security issue", both route to the same builder, and nothing here could
+tell them apart. Whether a human reviews the resulting pull request is beside
+the point — the decision that mattered was made the moment the description was
+sent to a model.
+
+So an origination also declares a **data envelope**: the class of its payload
+and of the work it opens, the endpoints that may receive it, the classes of
+context readable under it, what may appear in spans and evidence, and whether
+its own text may travel at all or only a reference to it. That last is the
+sharpest of the five and worth keeping available — the strongest handling of an
+embargoed finding is not redacting its description but opening work that says
+"this test fails, make it pass" and never telling the agent it is a security
+issue, which is a per-class judgement and therefore a declared option rather
+than something decided in prose at dispatch time. The taxonomy itself is the
+operator's; nothing here ships class names, because the same finding is
+material non-public information in one estate and an ordinary ticket in
+another.
+
+**It belongs on the origination, not on the Box and not on the bundle.**
+Sensitivity travels with the request: one repository legitimately receives a
+routine dependency bump and an embargoed fix, so scoping to the Box would force
+the restrictive envelope onto everything the Box does. And the bundle is *what
+the agent is* where the class is *what the work is* — one builder serves both,
+under different envelopes.
+
+**The envelope narrows and never widens.** It is an input to bundle resolution,
+intersected with the ceiling in force, and the resolved bundle's endpoints and
+readable context are that intersection. Delegation intersects and never unions,
+applied to data handling; an agent layer cannot widen its origination's
+envelope, and that is the property that makes the envelope worth declaring
+rather than documenting. An endpoint here is defined by where the payload
+*goes* rather than by what answers, so an MCP server is one. A tool is not:
+tool allows already intersect across layers and a narrower layer can only
+narrow, so the property the envelope would need there already holds.
+
+**Absence means minimum.** An origination whose declaration is missing is
+refused, never given a permissive default — the same rule as an empty grant set
+and an unset rollout, a third time, because unclassified is the state every
+mis-scoped request arrives in and therefore the state that has to be safe. It
+extends down every field: an unstated redaction posture is the strictest, an
+unstated payload posture sends a reference rather than text, and an endpoint
+nobody named is refused, since "whatever the runtime was configured with" is
+not an answer to which endpoint saw the data.
+
+**Refusal, not silent narrowing.** A bundle reaching past its envelope does not
+resolve to a smaller one. A narrowed run nobody was told about is worse than a
+refused one.
+
+**It is on the record almost for free.** Because the envelope constrains bundle
+resolution and the bundle is content-addressed, folding it into the digest
+makes a different envelope a different agent — exactly as continuity notes
+already are — and "this run was permitted to see class X and ran against
+endpoint Y" becomes a fact on the chain rather than an unanswerable question.
+Anthropic is already named a CC9.2 subservice organization here; this is what
+turns that from a design note into per-run evidence.
+
+This is one half of a pair, and neither substitutes for the other. The envelope
+governs what an agent may be **given**; confinement stops it **taking** more,
+and a live run already read past its workspace once.
+
+**What is declared and what is enforced are not the same set yet**, which is
+recorded rather than implied. The mechanism lives in the agent plane, where the
+intersection and the resolve-time refusal are. The redaction posture is
+declared and the telemetry path does not consult it. The second enforcement
+point — the stream, where tool policy is already enforced — has nothing
+envelope-shaped in it. And the declaration has no governed home: the ingress
+kind is a Go constant with behaviour welded to it rather than a declaration, so
+an envelope is supplied at the resolver's seam and no `box.yaml` configures
+one. It is the fifth field of the collapse the kind is waiting on, cheap there
+and archaeology afterwards — every run that executes before classification
+exists is unclassifiable retroactively, and no query recovers what class of
+data a past run was permitted to see.
+
 ### Campaigns reconcile, they do not enumerate
 
 A campaign is **a predicate over the Box's repositories, continuously
@@ -830,7 +912,8 @@ server or a raised model changes the `agentref` and shows up in the record.
 
 What an agent may read is declared, not assumed: repositories at pinned commits,
 optionally narrowed to paths, read-only unless the role grants otherwise, plus
-the knowledge scopes it may query.
+the knowledge scopes it may query — and, where a data envelope is in force, only
+material at a class that envelope reads.
 
 The runtime materializes exactly that set and nothing else. And because the
 context set is part of the recorded bundle, "which agents could have seen

@@ -13,7 +13,14 @@ import (
 // resolveDomain versions the bundle digest. Any change to merge semantics or
 // the canonical serialization MUST change it: two bundles that merged
 // differently must never share a ref.
-const resolveDomain = "project-box/agentref/v1"
+//
+// v2 folds in the data envelope and the class of each context repository. A
+// run permitted to see one class and reach one endpoint is not the same agent
+// as the same layers under a wider envelope, and the digest is where that has
+// to be true — which is also what makes "this run was permitted to see class X
+// and ran against endpoint Y" answerable from the record with no new
+// machinery.
+const resolveDomain = "project-box/agentref/v2"
 
 // LayerSource supplies the governed layers for a request, most general first:
 // base, role, box, repo. The task layer and the request's Extra layers are the
@@ -63,6 +70,12 @@ var roleDefaultMode = map[Role]string{
 // Composer is the reference [Resolver].
 type Composer struct {
 	Source LayerSource
+	// Ceiling bounds the data handling of everything this composer resolves.
+	// Nil is no classification regime at all, which is where a Box starts and
+	// what every Box is today; set, it makes classification mandatory —
+	// a request declaring no envelope is refused rather than defaulted, and
+	// every declaration is intersected with this before it is enforced.
+	Ceiling *Envelope
 }
 
 // Resolve composes the bundle for a request. It is deterministic: the same
@@ -82,13 +95,31 @@ type Composer struct {
 //     stated, the role's restrictive default applies.
 //   - Model: the most specific non-empty value wins — a preference, not a
 //     safety property, so later layers may change it freely.
+//
+// The data envelope is not a merge rule, because it is not a layer field. It
+// is a bound the merged result is checked against: see [Envelope], and
+// [Composer.envelope] for how the origination's declaration and the ceiling
+// combine.
 func (c *Composer) Resolve(ctx context.Context, req Request) (Bundle, error) {
 	layers, err := c.Source.Layers(ctx, req)
 	if err != nil {
 		return Bundle{}, fmt.Errorf("agent: loading layers: %w", err)
 	}
+	env, err := c.envelope(req)
+	if err != nil {
+		return Bundle{}, err
+	}
 	layers = append(slices.Clone(layers), req.Extra...)
 	if req.Task != "" {
+		// The origination's own words are the payload. Under a
+		// reference-only posture they may not travel at all, and refusing is
+		// the only honest answer here: the substitute — a failing test, a
+		// path, a ticket number — is a judgement about the work that a
+		// composer cannot make from the text it was handed.
+		if env != nil && !env.SendsPayload() {
+			return Bundle{}, fmt.Errorf("%w: class %q sends a reference, not its payload, and this request carries the ingress text as its task",
+				ErrEnvelope, env.Class)
+		}
 		layers = append(layers, Layer{
 			Name: "task", Scope: ScopeTask,
 			Source:       Source{Kind: SourceInline, Digest: hashText(req.Task)},
@@ -99,7 +130,7 @@ func (c *Composer) Resolve(ctx context.Context, req Request) (Bundle, error) {
 		return Bundle{}, fmt.Errorf("agent: no layers resolve for role %q in box %q", req.Role, req.Box)
 	}
 
-	b := Bundle{Tenant: req.Tenant, Role: req.Role, Box: req.Box, Layers: layers}
+	b := Bundle{Tenant: req.Tenant, Role: req.Role, Box: req.Box, Layers: layers, Envelope: env}
 	var prose []string
 	skills := map[string]SkillRef{}
 	var skillOrder []string
@@ -188,8 +219,46 @@ func (c *Composer) Resolve(ctx context.Context, req Request) (Bundle, error) {
 		}
 	}
 
+	// The envelope is checked against the COMPOSED bundle, not against the
+	// layers, because widening is what a layer would attempt and the merged
+	// result is the only place an attempt shows. A layer naming an endpoint
+	// the envelope excludes does not narrow the run; it refuses it.
+	if env != nil {
+		if err := env.Check(b); err != nil {
+			return Bundle{}, err
+		}
+	}
+
 	b.Ref = ref(b)
 	return b, nil
+}
+
+// envelope decides the data handling in force for one request: the
+// origination's declaration, intersected with the ceiling.
+//
+// Both nil is today's state everywhere — no classification is declared, and
+// the resolver imposes none. A ceiling with no declaration is the mis-scoped
+// request the whole rule exists for, and it is refused: absence means minimum,
+// the same way an empty grant set can do nothing and an unset rollout means
+// one.
+func (c *Composer) envelope(req Request) (*Envelope, error) {
+	if req.Envelope == nil {
+		if c.Ceiling == nil {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("%w: this box declares a ceiling and this work declares no envelope; unclassified is refused, never defaulted", ErrEnvelope)
+	}
+	env := *req.Envelope
+	if c.Ceiling != nil {
+		narrowed, err := env.Narrow(*c.Ceiling)
+		if err != nil {
+			return nil, err
+		}
+		env = narrowed
+	} else if !env.Declared() {
+		return nil, fmt.Errorf("%w: an envelope naming no class declares nothing; unclassified is refused, never defaulted", ErrEnvelope)
+	}
+	return &env, nil
 }
 
 // Explain renders a bundle for inspection: the layers that composed it and the
@@ -199,6 +268,11 @@ func (c *Composer) Explain(_ context.Context, b Bundle) ([]byte, error) {
 	var w strings.Builder
 	fmt.Fprintf(&w, "agentref: %s\ntenant: %s\nrole: %s\nbox: %s\nmodel: %s\npermission-mode: %s\n",
 		b.Ref, b.Tenant, b.Role, b.Box, b.Model, b.Tools.PermissionMode)
+	envelope := "(none declared)"
+	if b.Envelope != nil {
+		envelope = b.Envelope.String()
+	}
+	fmt.Fprintf(&w, "envelope: %s\n", envelope)
 	fmt.Fprintf(&w, "\nlayers (in application order):\n")
 	for _, l := range b.Layers {
 		fmt.Fprintf(&w, "  %-6s %-20s %s %s\n", l.Scope, l.Name, l.Source.Kind, l.Source.Digest)
@@ -218,7 +292,7 @@ func (c *Composer) Explain(_ context.Context, b Bundle) ([]byte, error) {
 		if r.Write {
 			mode = "rw"
 		}
-		fmt.Fprintf(&w, "  %s @ %s %s paths=%v\n", r.Repo, r.Commit, mode, r.Paths)
+		fmt.Fprintf(&w, "  %s @ %s %s class=%s paths=%v\n", r.Repo, r.Commit, mode, r.Class, r.Paths)
 	}
 	fmt.Fprintf(&w, "  knowledge: %v\n", b.Context.Knowledge)
 	fmt.Fprintf(&w, "\ninstructions:\n%s\n", b.Instructions)
@@ -255,12 +329,15 @@ func ref(b Bundle) string {
 	for _, m := range b.MCP {
 		put("mcp:" + m.Name + ":" + m.URL + ":" + strings.Join(m.Command, "\x00") + ":" + strings.Join(m.Tools, "\x00"))
 	}
+	if b.Envelope != nil {
+		put("envelope:" + b.Envelope.String())
+	}
 	for _, r := range b.Context.Repos {
 		mode := "ro"
 		if r.Write {
 			mode = "rw"
 		}
-		put("repo:" + r.Repo + "@" + r.Commit + ":" + mode + ":" + strings.Join(r.Paths, "\x00"))
+		put("repo:" + r.Repo + "@" + r.Commit + ":" + mode + ":" + string(r.Class) + ":" + strings.Join(r.Paths, "\x00"))
 	}
 	for _, k := range b.Context.Knowledge {
 		put("knowledge:" + k)

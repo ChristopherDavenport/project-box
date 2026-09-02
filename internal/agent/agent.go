@@ -119,6 +119,11 @@ type ContextRepo struct {
 	// Write is false for context. An agent writes only to the workspace its
 	// lease covers; grant this only where a role genuinely requires it.
 	Write bool
+	// Class is the data class of this repository's contents. It is checked
+	// against the envelope in force, so a run classified below its reading
+	// material is refused rather than handed it. Unclassified material is
+	// readable only by an envelope that says so.
+	Class Class
 }
 
 // ContextSet is everything an agent may read.
@@ -176,6 +181,16 @@ type Request struct {
 	// finds. This is how a definition is written directly in text, and how an
 	// exception path overrides one without a commit.
 	Extra []Layer
+	// Envelope is the data handling this origination declared — what class of
+	// data this work may touch and which endpoints may see it. It comes from
+	// the origination rather than from the target, because sensitivity travels
+	// with the request: the same repository legitimately receives a routine
+	// dependency bump and an embargoed fix.
+	//
+	// Nil means undeclared, which under a [Composer.Ceiling] is refused rather
+	// than defaulted. Where a declaration comes from is not settled here: it
+	// belongs on the governed kind declaration, which does not exist yet.
+	Envelope *Envelope
 }
 
 // Bundle is a resolved, content-addressed agent definition.
@@ -197,7 +212,13 @@ type Bundle struct {
 	Context      ContextSet
 	Tools        ToolPolicy
 	Model        string
-	ResolvedAt   time.Time
+	// Envelope is the data handling actually in force — the origination's
+	// declaration intersected with the ceiling it ran under. It is part of the
+	// digest, so a different envelope is a different agent on the record,
+	// exactly as continuity notes already are. Nil where no classification
+	// regime applies.
+	Envelope   *Envelope
+	ResolvedAt time.Time
 }
 
 // Ungoverned returns the layers that did not pass through change control, so a

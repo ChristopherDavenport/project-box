@@ -409,6 +409,9 @@ claim is decoration.
 | Human vs automation | evidence distinguishes actor from on-behalf-of | 3 |
 | Agent determinism | same request + same material → same `agentref` | 2 |
 | Tool policy | a denied tool is denied at the stream, by a test that tries it | 2 |
+| Envelope fails closed | work declaring no envelope is refused rather than defaulted, and parks before a token is spent; an unstated posture on any field is the strict end | 2 |
+| Envelope intersects | an agent layer cannot widen its origination's envelope; a bundle naming a non-permitted endpoint or MCP server is refused, and so is context material above the run's class | 2 |
+| Envelope on the record | the envelope in force is on the evidence record, and changing it changes the agentref | 2 |
 | Partial landing | forced mid-landing failure reverts forward, history intact | 4 |
 | Throttle safety | unset rollout means one, never unlimited | 4 |
 | Delivery idempotency | a redelivered webhook or re-filed issue opens one ingress; a flapping alert opens one incident, not many | 3, 5 |
@@ -500,6 +503,9 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | The frontier is a projection over the queue, not a new state | "pending" cannot separate next from blocked, and a factory with capacity and nothing moving looks exactly like one with nothing to do; readiness stays item-local so the stop button and the budget explain the symptom instead of erasing it |
 | Graph layout is computed in Go and shipped as coordinates | `dist/` is committed and embedded, so a JS layout library is bytes in this repository forever; a Go dependency is already in CI's toolchain, and the same layout serves a static export to an auditor with no daemon |
 | The table is the representation of record; the diagram renders on top of it | a graph that is the only way to see blocked work is a barrier to a keyboard and a screen reader, and it holds the whole view hostage to a layout decision |
+| An origination declares a data envelope, and it sits on the origination | sensitivity travels with the request, not the target: one repository legitimately receives a routine bump and an embargoed fix, so the Box would force the restrictive envelope onto everything it does, and the bundle is what the agent is where the class is what the work is |
+| The envelope narrows and never widens, refuses rather than narrows silently, and rides the agentref | delegation intersects applied to data handling — an envelope an agent layer could widen would be documentation; a narrowed run nobody was told about is worse than a refused one; and the bundle is already content-addressed, so a different envelope is a different agent for free |
+| Unclassified is refused, never defaulted — on every field | absence means minimum, the same rule as an empty grant set and an unset rollout, and unclassified is the state every mis-scoped request arrives in |
 
 ## 7. Deferred decisions
 
@@ -1028,6 +1034,57 @@ layout is computed in Go and shipped as coordinates, the table stays the
 representation of record, and #15 and #16 inherit both rather than each
 answering it again. Nothing here adds a Go layout dependency either — the
 decision binds the diagram, and the diagram is the next issue's.
+
+Issue #17 put a data envelope on the work (2026-09-01): what class of data an
+origination's work may touch, and which endpoints may see it. The motivating
+case is an embargoed vulnerability finding and a published CVE arriving as the
+same sentence and routing to the same builder, with nothing in the system able
+to treat them differently — and the decision that matters made the moment the
+description reaches a model, whoever reviews the pull request afterwards. The
+reasoning is in ARCHITECTURE under "And a data envelope"; the mechanism is
+`agent.Envelope`, an input to bundle resolution that can only narrow it.
+
+Five fields, and the taxonomy is deliberately not one of them: an operator
+names their own classes, because the same finding is material non-public
+information in one estate and an ordinary ticket in another. What the mechanism
+supplies is the intersection and the two refusals. Class conflict with the
+ceiling refuses; endpoints and readable classes intersect; redaction and
+payload take the stricter of the two, which is the LOWER rank because both
+orders run strictest-first so that a zero value is the strict end. `Check` runs
+against the COMPOSED bundle rather than the layers, because widening is what a
+layer attempts and the merged result is the only place an attempt shows.
+
+Absence means minimum on every field, which is PLAN §5's rule a third time. A
+composer with a ceiling and work with no declaration refuses — asserted through
+the whole loop, where it parks before a token is spent and the remote never
+moves. An unstated payload posture sends a reference and not the text, so a
+reference-only class refuses a request carrying the ingress text as its task:
+the substitute ("TestParseHeader fails, make it pass") is a judgement about the
+work that a composer cannot make from the text it was handed, so it refuses
+rather than inventing one. An unnamed model is a refusal too — "whatever the
+runtime was configured with" is not an answer to which endpoint saw the data —
+and an MCP server is an endpoint, because an endpoint here is where the payload
+goes rather than what answers. A tool is not: allows already intersect across
+layers and a narrower layer can only narrow, so that property already held.
+
+The record came almost for free, which was the argument for doing it in the
+digest rather than beside it. `resolveDomain` moves to v2 (the envelope and each
+context repo's class now serialize into the ref), so a run permitted to see one
+class and reach one endpoint is a different agent from the same layers under a
+wider envelope, and the `agent-run` record carries the envelope in force in
+full rather than a class name — otherwise answering "which endpoint" would mean
+re-resolving the bundle.
+
+Three things are NOT built and are recorded rather than implied. The redaction
+posture is declared and the telemetry path does not read it. The second
+enforcement point the issue names — the stream, where tool policy already binds
+— has nothing envelope-shaped in it. And the declaration has no governed home:
+`Builder.Envelope` is the seam, nothing in box.yaml fills it, and it belongs on
+#13's kind declaration as the fifth field. That is the whole of what #17 asked
+be captured before that declaration is designed, and the §2 argument is why it
+could not wait — a run that executed before classification existed is
+unclassifiable retroactively, and there is no query that recovers what class of
+data it was permitted to see.
 
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no

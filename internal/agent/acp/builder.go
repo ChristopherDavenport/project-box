@@ -46,6 +46,14 @@ type Builder struct {
 	// Composer resolves the bundle; Role defaults to builder.
 	Composer *agent.Composer
 	Role     agent.Role
+	// Envelope is the data handling this work's origination declared. It is
+	// the origination's, not the Box's — the Box's bound is the composer's
+	// ceiling — so nothing here supplies one: it belongs on the governed kind
+	// declaration, and until that exists this seat is empty and no box.yaml
+	// fills it. A composer with a ceiling and nothing here refuses every run,
+	// which is the correct failure and is why turning classification on is a
+	// deliberate act rather than a default.
+	Envelope *agent.Envelope
 	// Seat, when set, gives the agent continuity: its wake layer joins the
 	// bundle, and HANDOFF lines from its final message are recorded on
 	// settle via [Builder.Handoff].
@@ -74,7 +82,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	if role == "" {
 		role = agent.RoleBuilder
 	}
-	req := agent.Request{Tenant: b.Tenant, Role: role, Box: b.Box, Repo: ws.Repo, Run: ws.Run, Task: task}
+	req := agent.Request{Tenant: b.Tenant, Role: role, Box: b.Box, Repo: ws.Repo, Run: ws.Run, Task: task, Envelope: b.Envelope}
 	if b.Seat != nil {
 		wake, ok, err := b.Seat.WakeLayer(ctx, b.wakeNotes())
 		if err != nil {
@@ -99,9 +107,19 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	// The agentref on the record BEFORE the agent runs: if the run is
 	// disowned mid-flight, the evidence still says exactly which agent was
 	// operating under which instructions.
+	//
+	// The envelope rides it in full rather than as a class name. "This run was
+	// permitted to see class X and ran against endpoint Y" is the question a
+	// vendor-management or data-handling review asks, and answering it from a
+	// class alone would mean re-resolving the bundle to learn where the data
+	// actually went.
+	envelope := "(none declared)"
+	if bundle.Envelope != nil {
+		envelope = bundle.Envelope.String()
+	}
 	b.record(ctx, ws.Run, "agent-run", bundle.Ref,
-		fmt.Sprintf(`{"agentref":%q,"role":%q,"mode":%q,"seat":%q}`,
-			bundle.Ref, role, bundle.Tools.PermissionMode, b.seatName()))
+		fmt.Sprintf(`{"agentref":%q,"role":%q,"mode":%q,"seat":%q,"envelope":%q}`,
+			bundle.Ref, role, bundle.Tools.PermissionMode, b.seatName(), envelope))
 
 	// A sibling of the workspace, never inside it: granted reading material
 	// must not become part of the change.

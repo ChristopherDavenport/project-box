@@ -338,3 +338,94 @@ func TestTheRecordSaysWhichToolsRan(t *testing.T) {
 		}
 	}
 }
+
+// TestTheEnvelopeInForceIsOnTheRecord is issue #17's record property, run
+// through the whole loop rather than at the resolver.
+//
+// "This run was permitted to see class X and ran against endpoint Y" is the
+// question a vendor-management or data-handling review asks, and it is
+// unanswerable for any run that does not carry it. Both halves are here: the
+// envelope on the chain, and — the half that costs nothing because the bundle
+// is already content-addressed — a different envelope being a different agent.
+func TestTheEnvelopeInForceIsOnTheRecord(t *testing.T) {
+	// One classified run, start to landing, reporting what its agent-run
+	// record said. A fresh rig per envelope, because the same agent making the
+	// same change twice against one remote changes nothing the second time —
+	// and a run that changed nothing is an error here, correctly.
+	run := func(t *testing.T, readable []agent.Class) (ref, envelope string) {
+		t.Helper()
+		s, lp, router, _, _ := rig(t, "worker")
+		b := lp.Builder.(*Builder)
+		ls := layers()
+		ls[0].Model = "vendor-inregion"
+		b.Composer = &agent.Composer{Source: ls, Ceiling: &agent.Envelope{
+			Endpoints: []string{"vendor-inregion"},
+			Context:   readable,
+			Payload:   agent.PayloadText,
+		}}
+		// What the origination declared. Nothing in box.yaml sets this: it
+		// belongs on the governed kind declaration, which does not exist yet.
+		b.Envelope = &agent.Envelope{
+			Class: "embargoed", Endpoints: []string{"vendor-inregion", "kb"},
+			Context: readable, Payload: agent.PayloadText,
+		}
+
+		item := runItem(t, s, lp, router, "issue-class", "add the widget package")
+		if item.State != queue.StateDone {
+			t.Fatalf("classified item: %+v", item)
+		}
+		var rec struct {
+			AgentRef string `json:"agentref"`
+			Envelope string `json:"envelope"`
+		}
+		for r, err := range s.Log().Since(context.Background(), btn, "workitem/wi-issue-class", 1) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Kind == "agent-run" {
+				if err := json.Unmarshal(r.Body, &rec); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return rec.AgentRef, rec.Envelope
+	}
+
+	ref, envelope := run(t, []agent.Class{"embargoed"})
+	// The intersection is what is recorded, not the declaration: the run was
+	// permitted one endpoint, and "kb" never reached it.
+	want := "class=embargoed endpoints=[vendor-inregion] context=[embargoed] redaction=all payload=text"
+	if envelope != want {
+		t.Fatalf("envelope on the record = %q, want %q", envelope, want)
+	}
+
+	// The same work under a wider envelope is a different agent on the record.
+	widerRef, wider := run(t, []agent.Class{"embargoed", "public"})
+	if wider == envelope {
+		t.Fatalf("a widened envelope recorded identically: %q", wider)
+	}
+	if widerRef == "" || widerRef == ref {
+		t.Fatalf("a widened envelope did not change the agentref (%q)", widerRef)
+	}
+}
+
+// TestUnclassifiedWorkNeverReachesAnAgent is the fail-closed half at the
+// loop's own boundary: a Box that declares a ceiling and work that declares no
+// envelope parks before a token is spent. Unclassified is the state every
+// mis-scoped request arrives in, so it is the state that has to be safe.
+func TestUnclassifiedWorkNeverReachesAnAgent(t *testing.T) {
+	s, lp, router, _, remote := rig(t, "worker")
+	b := lp.Builder.(*Builder)
+	b.Composer = &agent.Composer{Source: layers(), Ceiling: &agent.Envelope{
+		Endpoints: []string{"vendor-inregion"}, Context: []agent.Class{"embargoed"}, Payload: agent.PayloadText,
+	}}
+	b.Envelope = nil // the mis-scoped request
+
+	item := runItem(t, s, lp, router, "issue-unclassified", "add the widget package")
+	if item.State != queue.StateParked || !strings.Contains(item.Note, "unclassified is refused") {
+		t.Fatalf("unclassified work was not refused: %+v", item)
+	}
+	if out := mustSh(t, remote, "git", "rev-list", "--count", "refs/heads/main"); strings.TrimSpace(out) != "1" {
+		t.Fatal("unclassified work moved the remote")
+	}
+}
