@@ -292,6 +292,19 @@ type Queue struct {
 
 func scope(id string) string { return "workitem/" + id }
 
+// ClaimRepo is the pseudo-repository a claim is leased under. A claim IS a
+// lease, and a lease names a (repo, ref) pair; no git repository is involved.
+const ClaimRepo = "_queue"
+
+// ClaimRef names the ref one item's claim is held on.
+//
+// Exported because the claim is not only the queue's business: the control
+// room reads the same key to say which runner holds an item and when the hold
+// lapses. A second spelling of it would have the room report "unclaimed" for
+// work a runner is holding, which is the reading an operator must never be
+// given.
+func ClaimRef(id string) string { return scope(id) }
+
 // Submit records a new pending item. An item with no ingress is refused.
 func (q *Queue) Submit(ctx context.Context, w WorkItem) (WorkItem, error) {
 	if w.Ingress == "" {
@@ -344,7 +357,7 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 		}
 	}
 	lease, err := q.Store.Leaser(q.Runner).Acquire(ctx, forge.LeaseRequest{
-		Tenant: w.Tenant, Repo: "_queue", Ref: scope(w.ID), Run: w.ID, TTL: q.TTL,
+		Tenant: w.Tenant, Repo: ClaimRepo, Ref: ClaimRef(w.ID), Run: w.ID, TTL: q.TTL,
 	})
 	if err != nil {
 		return w, forge.Lease{}, err
@@ -477,7 +490,7 @@ func (q *Queue) Recover(ctx context.Context, w WorkItem) (WorkItem, bool, error)
 	}
 	leaser := q.Store.Leaser(q.Runner)
 	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
-		Tenant: w.Tenant, Repo: "_queue", Ref: scope(w.ID), Run: w.ID, TTL: q.TTL,
+		Tenant: w.Tenant, Repo: ClaimRepo, Ref: ClaimRef(w.ID), Run: w.ID, TTL: q.TTL,
 	})
 	switch {
 	case errors.Is(err, forge.ErrHeld):

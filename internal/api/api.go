@@ -236,6 +236,14 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 // The listing verb the surface never had: `pending=14` was the whole view
 // into the queue, and /v1/items/{id} needs an id you could only know from the
 // submit response you kept.
+//
+// Every row carries the frontier as well as the state — whether the item is
+// ready to claim, which declared dependencies have not settled, which item a
+// cascade started at, and who holds the claim with how much lease left. There
+// is deliberately no `?ready=` filter beside `?state=`: the frontier is a
+// projection over the same rows, and a caller narrowing to it would lose the
+// contrast — a lane of five ready items is only alarming next to the fact
+// that nothing is claimed.
 func (s *Server) items(w http.ResponseWriter, r *http.Request) {
 	var states []queue.State
 	for _, v := range r.URL.Query()["state"] {

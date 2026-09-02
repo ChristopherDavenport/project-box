@@ -186,13 +186,20 @@ func parseStates(s string) []queue.State {
 }
 
 // printQueue renders the queue the way an operator reads it: one line per
-// unit, and the note underneath. The note is the answer to "why is it still
-// there" — which the queue has always written and a counter can never carry.
+// unit, and underneath it the note and whatever the frontier has to say. The
+// note is the answer to "why is it still there" — which the queue has always
+// written and a counter can never carry.
+//
+// The frontier lines are here and not only in the browser on purpose. A fact
+// some readers of the queue know and others do not is worse than one nobody
+// has, because work does not disappear loudly from a view — it disappears
+// plausibly, and the state vocabulary has already had that failure once.
 func printQueue(entries []control.QueueEntry) {
 	if len(entries) == 0 {
 		fmt.Println("the queue is empty")
 		return
 	}
+	ready := 0
 	for _, e := range entries {
 		origin := e.Route
 		if e.Key != "" {
@@ -201,12 +208,33 @@ func printQueue(entries []control.QueueEntry) {
 		if origin == "" {
 			origin = e.Ingress
 		}
-		fmt.Printf("%-22s %-8s %6s  %-22s %s\n", e.ID, e.State, age(e.AgeSec), origin, e.Task)
+		mark := " "
+		if e.Ready {
+			mark, ready = ">", ready+1
+		}
+		fmt.Printf("%s %-22s %-8s %6s  %-22s %s\n", mark, e.ID, e.State, age(e.AgeSec), origin, e.Task)
 		if e.Note != "" {
 			fmt.Printf("    %s [%s in state]\n", e.Note, age(e.InStateSec))
 		}
+		if len(e.BlockedBy) > 0 {
+			fmt.Printf("    blocked by %s\n", strings.Join(e.BlockedBy, ", "))
+		}
+		if e.Root != "" {
+			fmt.Printf("    cascaded from %s\n", e.Root)
+		}
+		if e.Runner != "" {
+			if e.LeaseLapsed {
+				fmt.Printf("    held by %s — LEASE LAPSED %s ago, nothing is running this\n",
+					e.Runner, age(-e.LeaseExpiresSec))
+			} else {
+				fmt.Printf("    held by %s — %s of lease left\n", e.Runner, age(e.LeaseExpiresSec))
+			}
+		}
 	}
-	fmt.Printf("\n%d item(s)\n", len(entries))
+	// Ready work with nothing moving is the first symptom of a stopped pump or
+	// a budget refusal, so the count goes next to the total rather than being
+	// left for the reader to tally off the markers.
+	fmt.Printf("\n%d item(s), %d ready to claim (>)\n", len(entries), ready)
 }
 
 // printTranscript renders a run so a person can judge it: what the agent was

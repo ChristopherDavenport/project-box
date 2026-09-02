@@ -341,6 +341,13 @@ func TestQueueOverTheWire(t *testing.T) {
 		if e.Task == "" || e.Opened.IsZero() {
 			t.Fatalf("row is missing task or clock: %+v", e)
 		}
+		// The frontier rides the same row. Nothing depends on these two, and
+		// nobody has claimed them, so both are work the factory could be doing
+		// right now — which is the fact the state "pending" cannot carry and
+		// the reason an operator can tell a stalled factory from an empty one.
+		if !e.Ready {
+			t.Fatalf("unblocked unclaimed work must read as ready over the wire: %+v", e)
+		}
 	}
 
 	// Drain until they settle — one branch lease admits one run at a time,

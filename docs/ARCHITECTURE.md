@@ -142,6 +142,51 @@ and a queue drained briskly except for the one item nobody wants looks healthy
 by every other measure. An exception queue with an unbounded oldest-item age
 is the finding written for you.
 
+### A queue that cannot say what is runnable
+
+The exception queue names work that needs a person; the landings index names
+work that finished. Everything actually in flight sits between them, and the
+state vocabulary alone cannot describe it. **Pending** says the same word for
+an item that is next and an item waiting behind something that will never
+settle — so a queue of pending work and a queue of *runnable* work look
+identical from outside, and the difference between them is the difference
+between a factory with nothing to do and a factory that has stopped.
+
+So the frontier is a projection over the same rows (decided 2026-09-01): each
+unit reports whether it is claimable now, which declared dependencies have not
+settled, which item a cascade actually started at, and which runner holds its
+claim with how much lease left.
+
+Two of those are not folds over the chain, which is why they are additions
+rather than merely a rendering. The **cascade root** exists because `Claim`
+writes its cause as prose, nesting its own dependency's note inside its own:
+the root's reason survives down the chain as the tail of a string that grows at
+every level, present but unusable as a key, so nothing can group the queue by
+what broke or answer how many items one failure is holding up. The **claim
+holder** exists because an item's chain records that a runner took it and can
+never record that the runner went away — a lapsed lease beside a still-claimed
+state is the room's only evidence that a row is work nobody is doing, and
+reading it is what put a single read on the store's lease seam.
+
+Readiness is deliberately item-local: the stop button and the budget are *not*
+folded into it. Ready work that is not moving **is** the symptom, and a flag
+that went false whenever claims were stopped would erase it at the exact
+moment it fired. The cause sits beside the count, never inside it.
+
+**The table is the representation of record; a diagram renders on top of it.**
+A node-link view of the same edges is worth having and is not the feature: a
+graph that is the only way to see blocked work is a barrier to anyone reading
+with a keyboard or a screen reader, and it holds the whole view hostage to a
+layout decision.
+
+**Where that layout is computed is settled once, for every graph view.** In Go,
+server-side, shipping coordinates; the browser renders and does not lay out.
+`dist/` is committed and `go:embed`-served so CI stays a Go toolchain, which
+makes any JavaScript layout library bytes in this repository forever — a bill
+this repo has already paid once. A Go dependency sits in a toolchain CI runs
+anyway, and the same computed layout is what lets a static export reach an
+auditor who will never be handed a running daemon.
+
 ### A session is not the unit of work
 
 A run ends in one of three ways an agent can choose, and only two of them

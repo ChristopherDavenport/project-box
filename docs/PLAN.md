@@ -424,6 +424,8 @@ claim is decoration.
 | Admission is re-checked at land | protection disabled mid-run blocks the landing | 7 |
 | Redaction | a planted credential does not reach the exporter | 5 |
 | Exception timeliness | the oldest parked item is measured against a recorded objective; a stale exception is told out of band, once per objective, bounded | 5 |
+| Frontier legibility | ready is distinguished from blocked and from held; a cascade leaf names its ROOT rather than its neighbour; a claimed item whose lease lapsed still names the runner that took it | 5 |
+| Lease readable without taking it | `Inspect` reports the holder and the deadline, does not disturb the claim, sees nothing across tenants, and still names a holder past the deadline that Acquire treats as free | 0 |
 | Preemption | incident revokes a campaign lease; preempted land is rejected | 5 |
 | Break-glass gating | refused with no open incident | 5 |
 | Stale approval | approval of a superseded revision does not count | 5 |
@@ -495,6 +497,9 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Thunderdome adopted as a lane, not a stance | swarm-repair needs the attribution and reversibility this substrate provides |
 | A mid-run handoff is a third non-settled state, bounded by hops | not finished and not stuck is a third thing: escalating parks work needing nobody and discards what the session built, grinding on produces the commit the contract exists to prevent; the agent requests and the loop decides, which is what the bound is |
 | A new loop stage is a gate or a dependent work item; `Run`'s sequence stays Go | judgement is a `Gate`, work that makes its own change is a node in the graph, and what is left is one unit's transaction — one claim, one lease, one resume point, one meter slot — which a declared sequence would only make it possible to misconfigure |
+| The frontier is a projection over the queue, not a new state | "pending" cannot separate next from blocked, and a factory with capacity and nothing moving looks exactly like one with nothing to do; readiness stays item-local so the stop button and the budget explain the symptom instead of erasing it |
+| Graph layout is computed in Go and shipped as coordinates | `dist/` is committed and embedded, so a JS layout library is bytes in this repository forever; a Go dependency is already in CI's toolchain, and the same layout serves a static export to an auditor with no daemon |
+| The table is the representation of record; the diagram renders on top of it | a graph that is the only way to see blocked work is a barrier to a keyboard and a screen reader, and it holds the whole view hostage to a layout decision |
 
 ## 7. Deferred decisions
 
@@ -986,6 +991,43 @@ is the failure mode that vocabulary has already had once: `/v1/status` counts
 it as in flight, the room derives a stage from it, and the control room's
 `live` filter lists it. A state that some readers know is worse than no state,
 because work does not disappear loudly — it disappears plausibly.
+
+Issue #14 asked for the work-graph frontier and found half of it already
+shipped: #20's `GET /v1/items` and `Room.Queue` are the collection endpoint the
+issue says does not exist, and `blocked_by` was already on every row. What was
+missing is the part a state cannot carry. A row now says whether it is READY —
+claimable now, nothing unsettled ahead of it, nobody running it — and readiness
+is item-local on purpose: the stop button and the budget stay out of it,
+because ready work that is not moving is the symptom and folding the cause in
+would erase it exactly when it fires. A cascaded row names the ROOT, which the
+note could not: `Claim` writes the cause as prose nesting its own dependency's
+prose, so three deep it reads "dependency B parked: dependency A parked: the
+credential was revoked" — the origin is in there and is not a field, and the
+graph question an operator has ("what is this one failure holding up") has no
+answer while it stays a string. And a claimed row names the RUNNER holding it
+and how much lease is left,
+negative once it has lapsed — the one row fact that is not a fold, because an
+item's chain records that a runner took it and can never record that the runner
+died. Reading it put one read on the store's lease seam: `forge.Leaser.Inspect`,
+conformance-asserted on both backends — it reports the holder, does not disturb
+the claim, leaks nothing across tenants, and deliberately still names a holder
+past the deadline that `Acquire` correctly treats as free, because "runner-3 has
+held this for forty minutes on a twenty-minute lease" is the fact and not the
+contradiction it looks like.
+
+The room's Work view is now a TABLE, with sortable headers, `aria-sort`, a
+`blocked by` column and `ready`/`blocked` lanes — no design-system table exists
+and none was added, because a semantic `<table>` on the JH tokens is also the
+zero-dependency answer. `box queue` learned the same three facts on the same
+day: a fact some readers of the queue have and others do not is worse than one
+nobody has, which is the failure the state vocabulary already had once.
+
+The diagram is deliberately NOT built, and the decision it was blocked on is
+recorded instead (ARCHITECTURE, "A queue that cannot say what is runnable"):
+layout is computed in Go and shipped as coordinates, the table stays the
+representation of record, and #15 and #16 inherit both rather than each
+answering it again. Nothing here adds a Go layout dependency either — the
+decision binds the diagram, and the diagram is the next issue's.
 
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no

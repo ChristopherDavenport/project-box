@@ -202,6 +202,59 @@ func Run(t *testing.T, open func(t *testing.T) Harness) {
 		}
 	})
 
+	t.Run("lease/inspect-reports-the-holder-without-taking-it", func(t *testing.T) {
+		tn := tid(t)
+		a, b := s.Leaser("runner-a"), s.Leaser("runner-b")
+		// A ref nobody has ever leased has no holder — and asking must not
+		// create one, which is the whole point of a read on this interface.
+		if _, ok, err := b.Inspect(ctx, tn, "repo", "refs/heads/main"); err != nil || ok {
+			t.Fatalf("unleased ref: ok=%v err=%v", ok, err)
+		}
+		if _, err := a.Acquire(ctx, req(tn, "repo", "refs/heads/main", "run-1", ttl)); err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		got, ok, err := b.Inspect(ctx, tn, "repo", "refs/heads/main")
+		if err != nil || !ok {
+			t.Fatalf("held ref: ok=%v err=%v", ok, err)
+		}
+		// The report is the grant, not the asker: b inspected, a holds.
+		if got.Runner != "runner-a" || got.Run != "run-1" || got.Token == 0 {
+			t.Fatalf("inspect must report the HOLDER's identity: %+v", got)
+		}
+		if got.Tenant != tn || got.Repo != "repo" || got.Ref != "refs/heads/main" {
+			t.Fatalf("inspect must report the ref it was asked about: %+v", got)
+		}
+		if got.Expired(got.Expires.Add(-time.Nanosecond)) {
+			t.Fatalf("a live grant must not read as expired: %+v", got)
+		}
+		// It did not take the lease: the holder is still the holder.
+		if _, err := b.Acquire(ctx, req(tn, "repo", "refs/heads/main", "run-2", ttl)); !errors.Is(err, forge.ErrHeld) {
+			t.Fatalf("inspect must not disturb the claim: got %v", err)
+		}
+		// Past the deadline with nobody superseding, the grant is still
+		// REPORTED — "runner-a has held this well past its lease" is the fact
+		// an operator needs — while Acquire correctly treats the row as free.
+		wait()
+		stalled, ok, err := b.Inspect(ctx, tn, "repo", "refs/heads/main")
+		if err != nil || !ok {
+			t.Fatalf("lapsed grant must still name its holder: ok=%v err=%v", ok, err)
+		}
+		if !stalled.Expired(stalled.Expires.Add(time.Nanosecond)) {
+			t.Fatalf("a lapsed grant must read as expired: %+v", stalled)
+		}
+		// A released ref has no holder at all.
+		fresh, err := b.Acquire(ctx, req(tn, "repo", "refs/heads/main", "run-3", ttl))
+		if err != nil {
+			t.Fatalf("acquire after lapse: %v", err)
+		}
+		if err := b.Release(ctx, fresh); err != nil {
+			t.Fatalf("release: %v", err)
+		}
+		if got, ok, err := a.Inspect(ctx, tn, "repo", "refs/heads/main"); err != nil || ok {
+			t.Fatalf("released ref must report no holder: %+v ok=%v err=%v", got, ok, err)
+		}
+	})
+
 	t.Run("lease/tenant-non-interference", func(t *testing.T) {
 		tnA, tnB := tid(t, "a"), tid(t, "b")
 		a, b := s.Leaser("runner-a"), s.Leaser("runner-b")
@@ -213,6 +266,12 @@ func Run(t *testing.T, open func(t *testing.T) Harness) {
 		lb, err := b.Acquire(ctx, req(tnB, "repo", "refs/heads/main", "run-2", ttl))
 		if err != nil {
 			t.Fatalf("tenant B acquire of same ref name: %v", err)
+		}
+		// Reading across tenants sees the reader's own lease and never the
+		// other's — the read path gets the same treatment as every write one.
+		seen, ok, err := b.Inspect(ctx, tnB, "repo", "refs/heads/main")
+		if err != nil || !ok || seen.Run != "run-2" {
+			t.Fatalf("tenant B must see its OWN lease: %+v ok=%v err=%v", seen, ok, err)
 		}
 		// A forged cross-tenant release must not free A's claim.
 		forged := la

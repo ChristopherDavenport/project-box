@@ -90,6 +90,20 @@ type Leaser interface {
 	// Acquire claims a ref, returning [ErrHeld] if a live claim already
 	// exists. It does not block.
 	Acquire(ctx context.Context, req LeaseRequest) (Lease, error)
+	// Inspect reports the outstanding grant over a ref WITHOUT taking it:
+	// which runner and run hold it, and when the hold lapses. ok is false
+	// when the ref has never been leased or the last grant was released.
+	//
+	// It is the only read on this interface, and it exists for the control
+	// room rather than for callers deciding whether they may act — those
+	// still Acquire, because between an Inspect and an action the claim can
+	// change and only the acquisition settles it. Note the deliberate
+	// asymmetry with Acquire: a grant past its deadline that nobody has
+	// superseded is reported here as an outstanding lease, because "runner-3
+	// has held this for forty minutes on a twenty-minute lease" is precisely
+	// the fact an operator needs, while Acquire correctly treats the same row
+	// as free. Judge it with [Lease.Expired].
+	Inspect(ctx context.Context, t tenant.ID, repo, ref string) (Lease, bool, error)
 	// Renew extends a claim, returning a lease bearing the same token.
 	// It reports [ErrExpired] or [ErrStaleToken] if the claim did not
 	// survive, in which case the caller must abandon its workspace rather

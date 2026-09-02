@@ -258,6 +258,38 @@ type QueueEntry struct {
 	// needs the second, and the queue has never shown either.
 	DependsOn []string `json:"depends_on,omitempty"`
 	BlockedBy []string `json:"blocked_by,omitempty"`
+	// Ready is the frontier: the drain would take this item, every dependency
+	// has settled, and nobody is running it.
+	//
+	// The state cannot carry it. "Pending" says the same word whether an item
+	// is next or blocked behind something that will never settle, so a queue
+	// of pending work is indistinguishable from a queue of RUNNABLE work —
+	// the one distinction that says whether the factory is working.
+	//
+	// Deliberately item-local: the stop button and the budget are NOT folded
+	// in, because ready work that is not moving is the symptom, and folding
+	// the cause in would erase it exactly when it fires. The cause is on
+	// /v1/status beside this. Routability is not folded in either, and for a
+	// duller reason — whether the pump has an executor for this item's box and
+	// repo is the pump's table, which the room does not hold. An item nothing
+	// is configured to run still reads ready here.
+	Ready bool `json:"ready,omitempty"`
+	// Runner holds this item's claim, and LeaseExpiresSec is how long the hold
+	// has left — negative once it has lapsed, which [QueueEntry.LeaseLapsed]
+	// says outright. Empty on anything not claimed, and empty on a CLAIMED
+	// item whose lease nobody holds: a runner died between releasing and
+	// recording, and the next drain will recover it.
+	Runner          string `json:"runner,omitempty"`
+	LeaseExpiresSec int64  `json:"lease_expires_sec,omitempty"`
+	LeaseLapsed     bool   `json:"lease_lapsed,omitempty"`
+	// Root names the item a cascade started at, empty when this item died on
+	// its own account.
+	//
+	// The note cannot serve. Claim writes the cause as prose and nests its
+	// dependency's note inside its own, so the root's reason does survive down
+	// the chain — as the tail of a string that grows at every level, which
+	// nothing can group by, sort on, or count.
+	Root string `json:"root,omitempty"`
 	// Opened is the first record in the item's chain, Changed the last.
 	Opened     time.Time `json:"opened"`
 	Changed    time.Time `json:"changed"`
@@ -272,9 +304,14 @@ type QueueEntry struct {
 // A count is not a queue. `pending=14` was the entire visibility into a
 // morning's work: no way to see what the factory was sitting on, and no way
 // to read the notes it had already written about why. Everything here is a
-// fold over records that existed the whole time.
+// fold over records that existed the whole time — except the claim holder,
+// which is a live lease and the one thing the chain cannot say, because a
+// runner does not record its own death.
 func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, error) {
-	now := r.now()
+	f := &frontier{
+		r: r, now: r.now(), items: map[string]queue.WorkItem{}, errs: map[string]error{},
+		q: &queue.Queue{Store: r.Store, Runner: r.Actor},
+	}
 	seen := map[string]bool{}
 	var out []QueueEntry
 	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/pending", 1) {
@@ -285,7 +322,7 @@ func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, 
 			continue
 		}
 		seen[rec.Subject] = true
-		e, err := r.entry(ctx, rec.Subject, now)
+		e, err := r.entry(ctx, rec.Subject, f)
 		if err != nil {
 			return nil, err
 		}
@@ -298,10 +335,83 @@ func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, 
 	return out, nil
 }
 
+// frontier is one fold's shared state: the clock every row is measured
+// against, and a memo of the items already read. A row asks after its own
+// dependencies and a cascade walk asks after theirs, so without the memo a
+// chain of n items re-reads the same chains O(n²) times.
+type frontier struct {
+	r     *Room
+	q     *queue.Queue
+	now   time.Time
+	items map[string]queue.WorkItem
+	errs  map[string]error
+}
+
+func (f *frontier) load(ctx context.Context, id string) (queue.WorkItem, error) {
+	if w, ok := f.items[id]; ok {
+		return w, f.errs[id]
+	}
+	w, err := f.q.Load(ctx, f.r.Tenant, id)
+	f.items[id], f.errs[id] = w, err
+	return w, err
+}
+
+// dead reports the states a dependency cascades from — see [queue.Queue.Claim].
+func dead(s queue.State) bool { return s == queue.StateParked || s == queue.StateFailed }
+
+// cascadeRoot walks a dead item back to the one that died on its own account,
+// returning empty when this item is not a cascade at all.
+//
+// Claim already names the cause when it parks a dependent, in prose that nests
+// its dependency's prose — three deep it reads "dependency B parked:
+// dependency A parked: the credential was revoked". The fact is in there and
+// is not a field, so the graph question an operator actually has ("what is
+// this one failure holding up") has no answer. See [QueueEntry.Root].
+func (f *frontier) cascadeRoot(ctx context.Context, w queue.WorkItem, seen map[string]bool) string {
+	if seen[w.ID] {
+		// Only reachable through a dependency cycle, which nothing creates and
+		// nothing rejects. Stop rather than recur: a room that hangs on
+		// malformed data is worse than one that declines to name a root.
+		return ""
+	}
+	seen[w.ID] = true
+	for _, dep := range w.DependsOn {
+		d, err := f.load(ctx, dep)
+		if err != nil || !dead(d.State) {
+			continue
+		}
+		if root := f.cascadeRoot(ctx, d, seen); root != "" {
+			return root
+		}
+		return d.ID
+	}
+	return ""
+}
+
+// holder reads the live claim over an item: who has it and how long the hold
+// has left. The lease is the only part of a row that is not a fold — an item's
+// chain records that a runner claimed it and can never record that the runner
+// went away, which is exactly the case an operator is looking for.
+func (f *frontier) holder(ctx context.Context, e *QueueEntry) error {
+	lease, held, err := f.r.Store.Leaser(f.r.Actor).Inspect(ctx, f.r.Tenant,
+		queue.ClaimRepo, queue.ClaimRef(e.ID))
+	if err != nil {
+		return fmt.Errorf("control: item %s claim: %w", e.ID, err)
+	}
+	if !held {
+		return nil
+	}
+	e.Runner = lease.Runner
+	e.LeaseExpiresSec = int64(lease.Expires.Sub(f.now).Seconds())
+	e.LeaseLapsed = lease.Expired(f.now)
+	return nil
+}
+
 // entry folds one item's chain into a listing row. It walks the chain once
 // for both the state and the clock: Load would give the first and throw away
 // the second.
-func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry, error) {
+func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, error) {
+	now := f.now
 	var w queue.WorkItem
 	var opened, changed time.Time
 	stage := ""
@@ -351,10 +461,24 @@ func (r *Room) entry(ctx context.Context, id string, now time.Time) (QueueEntry,
 	// Which dependencies have not settled — the answer to "why is nothing
 	// moving", which the declared list alone does not give.
 	for _, dep := range w.DependsOn {
-		d, derr := (&queue.Queue{Store: r.Store, Runner: r.Actor}).Load(ctx, r.Tenant, dep)
+		d, derr := f.load(ctx, dep)
 		if derr != nil || d.State != queue.StateDone {
 			e.BlockedBy = append(e.BlockedBy, dep)
 		}
+	}
+	switch {
+	case w.State == queue.StatePending, w.State == queue.StateHandedOff:
+		// The frontier. Waiting is deliberately not here: the drain does take
+		// a waiting item, but only to ask a gate whether its answer has
+		// arrived, so calling it runnable would report capacity spent on
+		// somebody else's decision as work the factory could be doing.
+		e.Ready = len(e.BlockedBy) == 0
+	case w.State == queue.StateClaimed:
+		if err := f.holder(ctx, &e); err != nil {
+			return QueueEntry{}, err
+		}
+	case dead(w.State):
+		e.Root = f.cascadeRoot(ctx, w, map[string]bool{})
 	}
 	if w.Ingress != "" {
 		// Best effort: an item whose origination cannot be read is still a

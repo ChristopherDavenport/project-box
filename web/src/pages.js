@@ -93,6 +93,8 @@ function origin(e) {
 // finished — which is the reading an operator must never be given.
 const FILTERS = {
   live: ['pending', 'claimed', 'waiting', 'handedoff'],
+  ready: ['pending', 'handedoff'],
+  blocked: ['pending', 'handedoff', 'waiting'],
   pending: ['pending'],
   claimed: ['claimed'],
   waiting: ['waiting'],
@@ -101,6 +103,45 @@ const FILTERS = {
   done: ['done'],
   all: [],
 };
+
+// The two lanes a state cannot name. Ready and blocked are both `pending` on
+// the wire — which is exactly why the frontier had to be a field: a queue of
+// pending work and a queue of runnable work look identical, and only the
+// second says whether the factory could be doing something.
+const WHERE = {
+  ready: (e) => !!e.ready,
+  blocked: (e) => (e.blocked_by?.length ?? 0) > 0,
+};
+
+/** hold renders who has an item and how much of their claim is left. */
+function hold(e) {
+  if (!e.runner) return '';
+  const left = e.lease_expires_sec ?? 0;
+  return e.lease_lapsed
+    ? `${e.runner} — lease LAPSED ${age(-left)} ago`
+    : `${e.runner} — ${age(left)} left`;
+}
+
+/** why renders the graph reason a row is not moving: its unsettled
+ *  dependencies, or the item a cascade actually started at. */
+function why(e) {
+  if (e.blocked_by?.length) return e.blocked_by.join(', ');
+  if (e.root) return `cascaded from ${e.root}`;
+  return '';
+}
+
+// The table's columns, each with the value it sorts on. A column is sortable
+// or it is not a table — an operator hunting the oldest ready item, or every
+// row one dead runner is holding, is sorting.
+const COLUMNS = [
+  { key: 'state', label: 'State', get: (e) => e.state },
+  { key: 'work', label: 'Work', get: (e) => e.task || e.id },
+  { key: 'why', label: 'Blocked by', get: (e) => why(e) },
+  { key: 'stage', label: 'Stage', get: (e) => e.stage ?? '' },
+  { key: 'holder', label: 'Held by', get: (e) => e.runner ?? '' },
+  { key: 'origin', label: 'Origin', get: (e) => origin(e) },
+  { key: 'age', label: 'Age', get: (e) => e.age_sec ?? 0 },
+];
 
 const KIND_APPEARANCE = {
   'ingress-open': 'neutral', queued: 'neutral', claimed: 'neutral',
@@ -239,11 +280,20 @@ export class BoxDashboard extends LitElement {
 customElements.define('box-dashboard', BoxDashboard);
 
 /**
- * Work: every unit and why it is where it is.
+ * Work: the frontier — what is runnable, what is blocked, on what, and who
+ * holds each claim.
+ *
+ * A table, deliberately, and not a node-link diagram. The graph is the
+ * enhancement; the table is the feature, because it is keyboard-navigable,
+ * legible to a screen reader, sortable, and shippable before any layout
+ * decision is made. A diagram that is the ONLY way to see blocked work is a
+ * barrier, so this stays the representation of record and the diagram lands
+ * on top of the same rows.
  *
  * The room could show what was stuck and what had landed, and nothing in
- * between — `pending=14` was the whole view into the queue. The notes were
- * always written ("branch main is leased", a gate's reasons) and never shown.
+ * between — `pending=14` was the whole view into the queue, and even once the
+ * listing arrived a pending row could not say whether it was next or waiting
+ * on something dead.
  */
 export class BoxWork extends LitElement {
   static styles = css`
@@ -257,16 +307,35 @@ export class BoxWork extends LitElement {
     .filters button[aria-pressed="true"] {
       background: var(--jh-color-container-secondary-enabled); font-weight: 600;
     }
+    .wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: .85rem; }
+    caption { text-align: left; padding-bottom: 8px; color: var(--jh-color-content-secondary-enabled); font-size: .8rem; }
+    th, td { text-align: left; vertical-align: top; padding: 6px 10px 6px 0;
+             border-bottom: 1px solid var(--jh-color-border-primary-enabled, #e0e0e0); }
+    th { white-space: nowrap; }
+    thead th button {
+      font: inherit; font-weight: 600; cursor: pointer; padding: 0; border: 0;
+      background: transparent; color: inherit;
+    }
+    thead th[aria-sort="ascending"] button::after { content: ' \\2191'; }
+    thead th[aria-sort="descending"] button::after { content: ' \\2193'; }
     .note { white-space: pre-wrap; font-size: .8rem; color: var(--jh-color-content-secondary-enabled); }
-    .blocked { font-size: .8rem; color: var(--jh-color-content-secondary-enabled); }
+    .muted { color: var(--jh-color-content-secondary-enabled); }
+    .ready { color: var(--jh-color-content-positive-enabled, #146c2e); font-weight: 600; }
+    .lapsed { color: var(--jh-color-content-negative-enabled, #b3261e); font-weight: 600; }
     .empty { color: var(--jh-color-content-secondary-enabled); }
     .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); margin-bottom: 8px; }
   `;
-  static properties = { _filter: { state: true } };
+  static properties = { _filter: { state: true }, _sort: { state: true }, _desc: { state: true } };
 
   constructor() {
     super();
     this._filter = 'live';
+    // No sort until asked: the server's order is oldest first, which is the
+    // order the factory would take the work in and the only one that is a
+    // fact about the queue rather than a preference of the reader.
+    this._sort = '';
+    this._desc = false;
     this._activity = new ActivityController(this, { limit: 1, onEvent: () => this._refresh() });
   }
 
@@ -286,10 +355,28 @@ export class BoxWork extends LitElement {
     clearTimeout(this._timer);
   }
 
+  _sortBy(key) {
+    if (this._sort === key) { this._desc = !this._desc; return; }
+    this._sort = key; this._desc = false;
+  }
+
+  _rows(items) {
+    const where = WHERE[this._filter];
+    const rows = (items ?? []).filter((e) => (where ? where(e) : true));
+    const col = COLUMNS.find((c) => c.key === this._sort);
+    if (!col) return rows;
+    const dir = this._desc ? -1 : 1;
+    return rows.slice().sort((a, b) => {
+      const x = col.get(a), y = col.get(b);
+      if (typeof x === 'number' && typeof y === 'number') return (x - y) * dir;
+      return String(x).localeCompare(String(y)) * dir;
+    });
+  }
+
   render() {
     return html`
-      <jh-card header-title="Work" header-subtitle="Every unit, and why it is where it is" padding="medium">
-        <div class="filters" role="group" aria-label="Filter by state">
+      <jh-card header-title="Work" header-subtitle="The frontier: what is runnable, what is blocked, and on what" padding="medium">
+        <div class="filters" role="group" aria-label="Filter work">
           ${Object.keys(FILTERS).map((f) => html`
             <button type="button" aria-pressed=${this._filter === f ? 'true' : 'false'}
               @click=${() => { this._filter = f; }}>${f}</button>`)}
@@ -298,29 +385,45 @@ export class BoxWork extends LitElement {
         ${this._task.render({
           pending: () => html`<jh-progress accessible-label="Loading work"></jh-progress>`,
           error: (e) => html`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${e.message}</jh-notification>`,
-          complete: (items) => (items?.length ?? 0) === 0
-            ? html`<p class="empty">Nothing in this state.</p>`
-            : html`<jh-list-group accessible-label="Work items">
-                ${items.map((e) => html`
-                  <jh-list-item
-                    primary-text=${e.task || e.id}
-                    secondary-text=${origin(e)}
-                    primary-metadata=${age(e.age_sec)}
-                    secondary-metadata=${e.stage ? `${e.stage} · ${age(e.in_state_sec)}` : ''}
-                    show-divider>
-                    <jh-tag slot="jh-list-item-left" size="small" label=${e.state}></jh-tag>
-                    <div slot="jh-list-item-content">
-                      ${e.note ? html`<div class="note">${e.note}</div>` : nothing}
-                      ${e.blocked_by?.length
-                        ? html`<div class="blocked">blocked by ${e.blocked_by.join(', ')}</div>`
-                        : nothing}
-                    </div>
-                    <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
-                      label="Open" href=${'/items/' + e.id}></jh-button>
-                  </jh-list-item>`)}
-              </jh-list-group>`,
+          complete: (items) => this._table(this._rows(items)),
         })}
       </jh-card>`;
+  }
+
+  _table(rows) {
+    if (rows.length === 0) return html`<p class="empty">Nothing in this lane.</p>`;
+    return html`
+      <div class="wrap">
+        <table>
+          <caption>${rows.length} item(s), ${this._sort ? `sorted by ${this._sort}` : 'oldest first'}</caption>
+          <thead>
+            <tr>${COLUMNS.map((c) => html`
+              <th scope="col" aria-sort=${this._sort === c.key ? (this._desc ? 'descending' : 'ascending') : 'none'}>
+                <button type="button" @click=${() => this._sortBy(c.key)}>${c.label}</button>
+              </th>`)}
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map((e) => html`
+              <tr>
+                <td>
+                  <jh-tag size="small" label=${e.state}></jh-tag>
+                  ${e.ready ? html`<div class="ready">ready</div>` : nothing}
+                </td>
+                <th scope="row">
+                  <a href=${'/items/' + e.id}>${e.task || e.id}</a>
+                  ${e.note ? html`<div class="note">${e.note}</div>` : nothing}
+                </th>
+                <td>${why(e) || html`<span class="muted">—</span>`}</td>
+                <td>${e.stage ?? ''}
+                  ${e.stage ? html`<div class="muted">${age(e.in_state_sec)}</div>` : nothing}</td>
+                <td class=${e.lease_lapsed ? 'lapsed' : ''}>${hold(e) || html`<span class="muted">—</span>`}</td>
+                <td class="muted">${origin(e)}</td>
+                <td>${age(e.age_sec)}</td>
+              </tr>`)}
+          </tbody>
+        </table>
+      </div>`;
   }
 }
 customElements.define('box-work', BoxWork);

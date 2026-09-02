@@ -156,6 +156,37 @@ func (l *leaser) Acquire(ctx context.Context, req forge.LeaseRequest) (forge.Lea
 	}, nil
 }
 
+// Inspect reads the outstanding grant. A single-use read-only transaction is
+// enough: this is a report, not a decision, and the caller that must act
+// acquires. A released row reports no lease; an unsuperseded row past its
+// deadline still reports one — see the interface contract.
+func (l *leaser) Inspect(ctx context.Context, t tenant.ID, repo, ref string) (forge.Lease, bool, error) {
+	if err := t.Validate(); err != nil {
+		return forge.Lease{}, false, err
+	}
+	row, err := l.s.c.Single().ReadRow(ctx, "leases", gspanner.Key{string(t), repo, ref},
+		[]string{"runner", "run", "held", "granted_at", "expires_at"})
+	if gspanner.ErrCode(err) == codes.NotFound {
+		return forge.Lease{}, false, nil
+	}
+	if err != nil {
+		return forge.Lease{}, false, err
+	}
+	var runner, run string
+	var held bool
+	var granted, expires time.Time
+	if err := row.Columns(&runner, &run, &held, &granted, &expires); err != nil {
+		return forge.Lease{}, false, err
+	}
+	if !held {
+		return forge.Lease{}, false, nil
+	}
+	return forge.Lease{
+		Tenant: t, Repo: repo, Ref: ref, Runner: runner, Run: run,
+		Token: forge.Token(granted.UnixNano()), Expires: expires,
+	}, true, nil
+}
+
 // Preempt supersedes whatever claim exists; the new grant's commit timestamp
 // is necessarily greater than the displaced one's, so the fence follows from
 // the same property Acquire relies on.
