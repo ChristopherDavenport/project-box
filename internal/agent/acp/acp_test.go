@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
+	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
 )
 
 // TestMain doubles this test binary as the fake agent: re-executed with
@@ -105,6 +107,36 @@ func TestEscalationIsARecordedAct(t *testing.T) {
 	}
 	if contains(res.Text, "refused") {
 		t.Fatal("the refusal channel was refused")
+	}
+}
+
+// TestMidRunHandoffIsARecordedAct: the agent asks for a fresh session and
+// says what its successor needs; the runtime carries both out, acknowledged.
+//
+// Acknowledged is the load-bearing half, as it is for escalate. The answer an
+// agent falls back on when a channel refuses it is the degraded commit, which
+// is the thing this verb exists to stop it producing.
+func TestMidRunHandoffIsARecordedAct(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "handoff").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.HandedOff != "context is nearly full and the migration is half applied" {
+		t.Fatalf("handoff lost: %+v", res)
+	}
+	if res.Escalated != "" {
+		t.Fatalf("a handoff read as an escalation: %+v", res)
+	}
+	// One claim per line: a wall of prose is one note nobody can supersede or
+	// mark stale on its own.
+	want := []string{"widget.go is migrated", "the tests in widget_test.go are not"}
+	if !slices.Equal(res.HandoffNotes, want) {
+		t.Fatalf("notes = %q, want %q", res.HandoffNotes, want)
+	}
+	if contains(res.Text, "refused") {
+		t.Fatal("the handoff channel was refused")
 	}
 }
 
@@ -277,8 +309,19 @@ func (f *fakeConn) notify(method string, params map[string]any) {
 
 func fakeAgent(scenario string) {
 	f := &fakeConn{enc: json.NewEncoder(os.Stdout), dec: bufio.NewScanner(os.Stdin)}
+	// The scripted scenarios below each probe one shape. "replay:<path>" is
+	// the whole dialect instead, supplied as data — see conformance_test.go.
+	if path, ok := strings.CutPrefix(scenario, "replay:"); ok {
+		replayTranscript(f, path)
+		return
+	}
 	mode := ""
 	var sessionID string
+	// newMeta is what session/new carried, kept so a scenario can hand it
+	// back. The harness surface is delivered in that one call and nowhere
+	// else, so echoing it is the only way to assert from outside that what
+	// the bundle granted is what the agent was actually offered.
+	newMeta := "null"
 	for {
 		m := f.read()
 		id := m["id"]
@@ -291,6 +334,11 @@ func fakeAgent(scenario string) {
 			f.write(map[string]any{"id": id, "result": map[string]any{"protocolVersion": v}})
 		case "session/new":
 			sessionID = "sess-1"
+			if p, ok := m["params"].(map[string]any); ok {
+				if b, err := json.Marshal(p["_meta"]); err == nil {
+					newMeta = string(b)
+				}
+			}
 			f.write(map[string]any{"id": id, "result": map[string]any{"sessionId": sessionID}})
 		case "session/set_mode":
 			if p, ok := m["params"].(map[string]any); ok {
@@ -300,6 +348,13 @@ func fakeAgent(scenario string) {
 		case "session/prompt":
 			var report string
 			switch scenario {
+			case "harness":
+				f.notify("session/update", map[string]any{
+					"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": newMeta}},
+				})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "polite":
 				report = "mode:" + mode
 				for _, tool := range []string{"Bash", "DeleteProd"} {
@@ -331,6 +386,56 @@ func fakeAgent(scenario string) {
 						"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "escalation refused?!"}}})
 				}
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "handoff":
+				resp := f.request("_box/handoff", map[string]any{
+					"reason": "context is nearly full and the migration is half applied",
+					"notes":  "widget.go is migrated\n\nthe tests in widget_test.go are not\n",
+				})
+				if res, ok := resp["result"].(map[string]any); !ok || res["acknowledged"] != true {
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "handoff refused?!"}}})
+				}
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "halfway", "halfwaytext":
+				// A session that gets part of the way and runs out of room. It
+				// commits what it has — the successor continues in this tree —
+				// and asks for a fresh session rather than degrading.
+				os.WriteFile("part.txt", []byte("half the widget\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "half the widget")
+				if scenario == "halfway" {
+					f.request("_box/handoff", map[string]any{
+						"reason": "out of room with the widget half written",
+						"notes":  "part.txt holds the first half; widget.go is what remains",
+					})
+					f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+					break
+				}
+				// The other channel, for a harness that cannot call an unknown
+				// method — which is every claude-agent-acp shipped so far.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text",
+							"text": "HANDOFF-NOW: out of room with the widget half written\nHANDOFF: part.txt holds the first half; widget.go is what remains\n"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "finisher":
+				// The fresh session. It finishes what is already in the tree,
+				// and refuses to invent it again if the tree came back empty —
+				// so a successor that had to redo the work fails the test
+				// loudly instead of landing an identical-looking commit.
+				if _, err := os.Stat("part.txt"); err != nil {
+					f.request("_box/escalate", map[string]any{
+						"reason": "the predecessor's work is not in this workspace"})
+					f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+					break
+				}
+				os.WriteFile("widget.go", []byte("package app // finished by the successor\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "finish the widget")
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "Finished what the last session started.\nHANDOFF: the widget is whole now\n"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "worker":
 				// A real day's work: edit, commit, hand off.
 				os.WriteFile("widget.go", []byte("package app // built by the fake worker\n"), 0o644)
@@ -339,6 +444,16 @@ func fakeAgent(scenario string) {
 				f.notify("session/update", map[string]any{"sessionId": sessionID,
 					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
 						"content": map[string]any{"type": "text", "text": "Added the widget and committed.\nHANDOFF: the widget package expects blue as the default\n"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "repair":
+				// The run after a red one: it fixes what is already on the
+				// branch rather than starting the work over.
+				os.WriteFile("fix.go", []byte("package app // the repair\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "fix the red")
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "Fixed the default and committed.\nHANDOFF: the red was the widget default, not the test\n"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "lazy":
 				// Declares victory, changes nothing, escalates nothing —
@@ -401,6 +516,18 @@ func fakeAgent(scenario string) {
 					})
 				}
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "spendy":
+				// A run that never stops spending and never settles. Nothing
+				// but the ceiling can end this: no stop reason is coming, and
+				// the only other bound is a wall clock.
+				for {
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+							"content": map[string]any{"type": "text", "text": "still going"}},
+						"_meta": map[string]any{"usage": map[string]any{"inputTokens": 1000, "outputTokens": 0}},
+					})
+					time.Sleep(2 * time.Millisecond)
+				}
 			case "drift":
 				// The dialect moved: a tool call announced only in the update
 				// spelling, and a kind this runtime has never heard of.
@@ -410,6 +537,42 @@ func fakeAgent(scenario string) {
 				f.notify("session/update", map[string]any{"sessionId": sessionID,
 					"update": map[string]any{"sessionUpdate": "reasoning_delta",
 						"content": map[string]any{"type": "text", "text": "hmm"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "metaname":
+				// The real dialect: tool_call_update carries no title, and
+				// names the tool only under _meta.claudeCode.toolName. The
+				// title, when there is one, is prose — for Bash it is the
+				// whole command line, which an exact-match policy can never
+				// match and a tally counts as a brand new tool every time.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-1", "status": "in_progress",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}}}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-2", "status": "in_progress",
+						"title": "cd /work && find . -name '*.go' | head -80",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "metadenied":
+				// A DENIED tool that names itself only in the metadata. This
+				// used to walk straight through: no title meant nothing to
+				// match, so the enforcement path skipped it entirely.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-1", "status": "in_progress",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "DeleteProd"}}}})
+				time.Sleep(5 * time.Second) // only the client killing us ends this
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "nameless":
+				// Neither a title nor a toolName: genuinely unmatchable, and
+				// the run must say how many times that happened.
+				for i, id2 := range []string{"t-1", "t-2", "t-3"} {
+					_ = i
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "tool_call_update",
+							"toolCallId": id2, "status": "in_progress"}})
+				}
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "rogue":
 				// Execute a denied tool without asking, then dawdle: only the
@@ -443,26 +606,45 @@ func lower(s string) string {
 	return string(b)
 }
 
-// TestConfiningWrapperGetsTheWorkspace: runner confinement is a wrapper
+// TestConfiningWrapperGetsBothGrantedPaths: runner confinement is a wrapper
 // around the agent (issue #6), and every wrapper worth having must be told
-// which directory to let through. The workspace path is chosen per run, so
-// the argv cannot name it — it names a placeholder and the runtime fills it
-// in. A live experiment already caught an agent reading the factory's mirror
-// and a sibling workspace; this is what makes putting something in front of
-// it configurable at all.
-func TestConfiningWrapperGetsTheWorkspace(t *testing.T) {
+// which directories to let through. Both are chosen per run, so the argv
+// cannot name them — it names placeholders and the runtime fills them in.
+//
+// The context directory is half of it. A wrapper handed only the workspace
+// confines the agent out of its own granted reading material, which would
+// make context sets and confinement mutually exclusive.
+func TestConfiningWrapperGetsBothGrantedPaths(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	rt := runtimeFor(t, "polite")
-	// A stand-in for the confinement: handed the workspace the way
-	// `docker run -v` or sandbox-exec would be, and unable to start if the
-	// placeholder never became a path.
-	rt.Command = []string{"/bin/sh", "-c", `cd "` + WorkspacePlaceholder + `" && exec "$0"`, os.Args[0]}
+	rt.ContextDir = t.TempDir()
+	// A stand-in for the confinement: handed both paths the way `docker run
+	// --mount` would be, and unable to start if either placeholder never
+	// became a path.
+	rt.Command = []string{"/bin/sh", "-c",
+		`test -d "` + confine.ContextPlaceholder + `" && cd "` + confine.WorkspacePlaceholder + `" && exec "$0"`,
+		os.Args[0]}
 	res, err := rt.Run(ctx, bundle(), "do the work")
 	if err != nil {
 		t.Fatalf("run through a wrapper: %v", err)
 	}
 	if res.StopReason != "end_turn" {
 		t.Fatalf("the wrapped agent did not complete: %q", res.StopReason)
+	}
+}
+
+// TestConfiningWrapperIsRefusedRatherThanEmptied: an argv that names the
+// context placeholder for a run that has no context directory must fail, not
+// quietly substitute nothing. A mount source of "" is not a narrower
+// confinement than the one that was configured.
+func TestConfiningWrapperIsRefusedRatherThanEmptied(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rt := runtimeFor(t, "polite")
+	rt.ContextDir = ""
+	rt.Command = []string{"/bin/sh", "-c", `cd "` + confine.ContextPlaceholder + `" && exec "$0"`, os.Args[0]}
+	if _, err := rt.Run(ctx, bundle(), "do the work"); err == nil {
+		t.Fatal("an unresolvable context placeholder ran anyway")
 	}
 }

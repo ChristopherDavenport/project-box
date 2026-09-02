@@ -14,6 +14,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -67,7 +68,16 @@ type Ingress struct {
 	// delivered work is depth 0 and stays there; only the factory's own
 	// routes increment it, and only so that a chain it starts can be
 	// stopped. See loop.OpenRepair.
-	Depth  int `json:"depth,omitempty"`
+	Depth int `json:"depth,omitempty"`
+	// Prior is the attempt this work follows, set only where the factory
+	// reopens its own: a repair carries the landing that went red, and the
+	// run that made it. It rides the ingress because provenance is what an
+	// ingress is for — "why does this change exist" is answered here, and
+	// for a repair the honest answer names the attempt it repairs.
+	//
+	// The successor resolves it into an agent layer at wake time rather than
+	// having it concatenated into its task text; see [agent.Prior].
+	Prior  *agent.Prior `json:"prior,omitempty"`
 	Opened time.Time
 	// Closed is zero while open.
 	Closed time.Time
@@ -208,7 +218,10 @@ type Delivery struct {
 	Payload []byte
 	// Depth is set only by the factory reopening its own work; see
 	// [Ingress.Depth]. An external delivery leaves it zero.
-	Depth    int
+	Depth int
+	// Prior is the attempt this delivery reopens, set only by the factory
+	// reopening its own work; see [Ingress.Prior].
+	Prior    *agent.Prior
 	Received time.Time
 }
 

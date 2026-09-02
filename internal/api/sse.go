@@ -65,24 +65,40 @@ func (s *Server) activity(w http.ResponseWriter, r *http.Request) {
 // events streams the same feed as server-sent events: a UX subscribes once
 // and watches the factory run. Poll-based tailing per connection — cheap at
 // this scale, replaced by a push feed when the store grows one.
+//
+// `?item=` narrows it to one unit — its chain and its agent's stream, and
+// nothing else. The room's dashboard wants the whole factory; a card
+// following one run does not, and on a busy daemon the difference is between
+// a stream a page can render and one it spends its time discarding. It is a
+// SCOPE and not a filter: the server stops reading what it would only throw
+// away.
 func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		httpErr(w, 500, "streaming unsupported")
 		return
 	}
+	only := r.URL.Query().Get("item")
+	scopes := activityScopes
+	if only != "" {
+		scopes = nil
+	}
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	last := map[string]uint64{}
 	// First pass establishes the horizon: subscribers want what happens
 	// next, not a replay (GET /v1/activity is the replay).
-	for _, scope := range activityScopes {
+	for _, scope := range scopes {
 		for rec, err := range s.Store.Log().Since(r.Context(), s.Tenant, scope, 1) {
 			if err == nil && rec.Seq > last[scope] {
 				last[scope] = rec.Seq
 			}
 		}
 	}
+	// The live bus is horizoned the same way and for the same reason: what a
+	// subscriber wants is what happens next. The snapshot it starts from is
+	// GET /v1/sessions, which carries the window it missed.
+	liveSeq := s.Live.Head()
 	// A claimed item was a black box: the index scopes say a unit exists and
 	// later that it landed, and everything between — the agent starting, the
 	// commit, each gate verdict, an escalation and its reason — lives on the
@@ -90,6 +106,9 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	// reloading a page. In-flight items are followed too, and dropped again
 	// when they settle, so the tail set is bounded by work actually moving.
 	following := s.inFlight(r.Context())
+	if only != "" {
+		following = map[string]bool{only: true}
+	}
 	for id := range following {
 		scope := "workitem/" + id
 		for rec, err := range s.Store.Log().Since(r.Context(), s.Tenant, scope, 1) {
@@ -108,7 +127,7 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 		case <-r.Context().Done():
 			return
 		case <-tick.C:
-			for _, scope := range activityScopes {
+			for _, scope := range scopes {
 				for rec, err := range s.Store.Log().Since(r.Context(), s.Tenant, scope, last[scope]+1) {
 					if err != nil {
 						return
@@ -121,6 +140,19 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 						following[rec.Subject] = true
 					}
 				}
+			}
+			// The agent's own stream, on its own event name. Separate from
+			// activity because the two are different kinds of thing and a
+			// client must be able to tell: an activity record is on the chain
+			// and will still be there tomorrow, a session frame is what a
+			// running agent is saying and is gone when the window rolls.
+			for _, f := range s.Live.Since(liveSeq) {
+				liveSeq = f.Seq
+				if only != "" && f.Item != only {
+					continue
+				}
+				b, _ := json.Marshal(f)
+				fmt.Fprintf(w, "event: session\ndata: %s\n\n", b)
 			}
 			for id := range following {
 				scope := "workitem/" + id
@@ -146,8 +178,12 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 }
 
 // terminalKind reports whether a record settles an item.
+//
+// "parked" settles the stream but not the item: an operator may retry it back
+// into the queue, and the retry re-enters the follow set through the
+// index/pending record [queue.Queue.Retry] writes.
 func terminalKind(k string) bool {
-	return k == "done" || k == "failed" || k == "parked"
+	return k == "done" || k == "failed" || k == "parked" || k == "resolved"
 }
 
 // inFlight names the items whose chains are worth following: everything the
@@ -164,7 +200,7 @@ func (s *Server) inFlight(ctx context.Context) map[string]bool {
 			continue
 		}
 		switch item.State {
-		case queue.StateDone, queue.StateFailed, queue.StateParked:
+		case queue.StateDone, queue.StateFailed, queue.StateParked, queue.StateResolved:
 		default:
 			out[rec.Subject] = true
 		}

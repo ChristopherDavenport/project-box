@@ -409,6 +409,9 @@ claim is decoration.
 | Human vs automation | evidence distinguishes actor from on-behalf-of | 3 |
 | Agent determinism | same request + same material → same `agentref` | 2 |
 | Tool policy | a denied tool is denied at the stream, by a test that tries it | 2 |
+| Envelope fails closed | work declaring no envelope is refused rather than defaulted, and parks before a token is spent; an unstated posture on any field is the strict end | 2 |
+| Envelope intersects | an agent layer cannot widen its origination's envelope; a bundle naming a non-permitted endpoint or MCP server is refused, and so is context material above the run's class | 2 |
+| Envelope on the record | the envelope in force is on the evidence record, and changing it changes the agentref | 2 |
 | Partial landing | forced mid-landing failure reverts forward, history intact | 4 |
 | Throttle safety | unset rollout means one, never unlimited | 4 |
 | Delivery idempotency | a redelivered webhook or re-filed issue opens one ingress; a flapping alert opens one incident, not many | 3, 5 |
@@ -423,16 +426,30 @@ claim is decoration.
 | App is not a bypass actor | a repository listing the app as bypass is refused | 7 |
 | Admission is re-checked at land | protection disabled mid-run blocks the landing | 7 |
 | Redaction | a planted credential does not reach the exporter | 5 |
+| Exception timeliness | the oldest parked item is measured against a recorded objective; a stale exception is told out of band, once per objective, bounded | 5 |
+| Frontier legibility | ready is distinguished from blocked and from held; a cascade leaf names its ROOT rather than its neighbour; a claimed item whose lease lapsed still names the runner that took it | 5 |
+| The count is the listing counted | `/v1/status`'s queue numbers are a tally of the rows `GET /v1/items` serves — state by state, parts summing to the total — and what the count calls pending is what the drain would claim, from one vocabulary both read | 5 |
+| A running unit is legible | a claimed unit reports its seat, its composed layers in application order, its stage and time in stage, and its agent's messages, tool calls and refusals AS THEY HAPPEN | 5 |
+| The live view is not a second account | the tool calls and denials a watcher saw are exactly the ones the settled record is charged with, and the message frames concatenate to the run's own text | 5 |
+| Fan-out stays per unit | concurrent runs produce one card each with its own timeline; no frame appears on another unit's card, and a scoped subscriber receives no other unit's stream | 5 |
+| Silence is distinguished from blindness | a claimed unit no bus is watching says so, rather than rendering as an agent that has done nothing | 5 |
+| The committed bundle is not stale | every custom element the room's source defines is present in the embedded `dist/`, since CI runs no esbuild and an unbuilt page renders as an empty box | 5 |
+| Lease readable without taking it | `Inspect` reports the holder and the deadline, does not disturb the claim, sees nothing across tenants, and still names a holder past the deadline that Acquire treats as free | 0 |
 | Preemption | incident revokes a campaign lease; preempted land is rejected | 5 |
 | Break-glass gating | refused with no open incident | 5 |
 | Stale approval | approval of a superseded revision does not count | 5 |
 | Self-approval | requester cannot approve, directly or via an agent acting for them | 5 |
 | Knowledge staleness | a record bound to a changed file is flagged without marking | 6 |
+| Runner confinement | the same probe run twice against one real layout: unconfined it reads the mirror, the store, and a sibling workspace; confined it reads only its workspace and its materialized context set | 2 |
 | Evidence completeness | 25 sampled changes, complete evidence, unaided | 8 |
 | Optimistic lane safety | red main opens repair work; promotion refuses unsoaked commits; fencing identical in both lanes | 9 |
+| Repair wakes warm | a repair run's bundle contains its predecessor's handoff, and its agentref differs from the same repair with no predecessor | 9 |
 | Graph ordering | diamond dependency runs in topo order; failed root parks leaves with cause | 10 |
+| A new stage needs no new stage | a propose/critique pair runs as two graph nodes under two roles — blocked until its dependency settles, each with its own claim, lease, evidence scope and settled record — with `Run` unchanged | 10 |
 | Budget refusal | work waits rather than overdrawing a tenant budget | 11 |
 | Seat continuity | second run receives predecessor's handoff; escalation parks with agent-attributed reason | 12 |
+| Mid-run handoff | a handed-off run resumes with its predecessor's notes and continues its committed work rather than redoing it; the item is re-dispatched without reaching the exception queue | 12 |
+| Handoff hops are bounded | each hop is an evidence record, and the limit parks with the reason named | 12 |
 
 ### CI gates
 
@@ -483,9 +500,21 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Argo CD as the reconciler | ApplicationSet fits rendered-per-service; its API reads reconcile status back as evidence |
 | TSC scope: Security + Confidentiality + Availability | redaction and retention become audited controls; incident handling gets defined objectives |
 | Campaign predicates are fact key comparisons | declarative and diffable; a campaign definition cannot run code |
+| Runner confinement is a container, not an OS sandbox | the host's filesystem is absent rather than allow-listed; an allow-list has to enumerate a runtime's needs per OS and rots |
 | Landing discipline is per-lane policy | optimistic into main where a Box chooses; env/infra and promotion always gated; fencing never optimistic |
 | A lower environment between main and prod | red main is allowed, red prod is not; promotion requires soak plus green |
 | Thunderdome adopted as a lane, not a stance | swarm-repair needs the attribution and reversibility this substrate provides |
+| A mid-run handoff is a third non-settled state, bounded by hops | not finished and not stuck is a third thing: escalating parks work needing nobody and discards what the session built, grinding on produces the commit the contract exists to prevent; the agent requests and the loop decides, which is what the bound is |
+| A new loop stage is a gate or a dependent work item; `Run`'s sequence stays Go | judgement is a `Gate`, work that makes its own change is a node in the graph, and what is left is one unit's transaction — one claim, one lease, one resume point, one meter slot — which a declared sequence would only make it possible to misconfigure |
+| A count is a projection of the listing, never a second reading of it | the counter and the rows were separate walks with separate copies of "not settled yet", agreeing only because two switches matched — and a state added to one and not the other stops the number describing the queue under it, quietly; the status fold costs more than a bare count, which is the trade the exception health metric beside it already makes |
+| The frontier is a projection over the queue, not a new state | "pending" cannot separate next from blocked, and a factory with capacity and nothing moving looks exactly like one with nothing to do; readiness stays item-local so the stop button and the budget explain the symptom instead of erasing it |
+| Graph layout is computed in Go and shipped as coordinates | `dist/` is committed and embedded, so a JS layout library is bytes in this repository forever; a Go dependency is already in CI's toolchain, and the same layout serves a static export to an auditor with no daemon |
+| The table is the representation of record; the diagram renders on top of it | a graph that is the only way to see blocked work is a barrier to a keyboard and a screen reader, and it holds the whole view hostage to a layout decision |
+| An origination declares a data envelope, and it sits on the origination | sensitivity travels with the request, not the target: one repository legitimately receives a routine bump and an embargoed fix, so the Box would force the restrictive envelope onto everything it does, and the bundle is what the agent is where the class is what the work is |
+| The envelope narrows and never widens, refuses rather than narrows silently, and rides the agentref | delegation intersects applied to data handling — an envelope an agent layer could widen would be documentation; a narrowed run nobody was told about is worse than a refused one; and the bundle is already content-addressed, so a different envelope is a different agent for free |
+| Unclassified is refused, never defaulted — on every field | absence means minimum, the same rule as an empty grant set and an unset rollout, and unclassified is the state every mis-scoped request arrives in |
+| A run's live stream is a bounded window, not evidence; what it shows, the chain records at settle | the per-call sequence is already on span events and the tally on the chain, so a hash-chained WORM-exported record per tool call buys an auditor nothing and costs the evidence plane its proportion — and the two accounts come off ONE dedup, so "the room showed forty and the record says thirty" is a test failure rather than a discrepancy somebody has to spot |
+| The composed layers ride the agent-run record | the agentref is a digest and alone answers nothing about what the agent was; recovering the composition meant re-resolving the bundle from the same material at the same commits, which is the thing a record exists so nobody has to have |
 
 ## 7. Deferred decisions
 
@@ -752,6 +781,7 @@ morning's budget almost immediately. What it found, and what was done:
   #6     Partial. `agent:` takes an argv and substitutes {{workspace}}, so
          a confining wrapper can be configured at all — the seam, not the
          confinement. The profile itself is unwritten and needs a live run.
+         (Closed below.)
 
 Two bugs surfaced underneath, both older than the changes that exposed
 them: concurrent runs racing `git remote update` on one mirror directory
@@ -759,6 +789,441 @@ them: concurrent runs racing `git remote update` on one mirror directory
 over the last, so omitempty meant a transition could never CLEAR a field —
 a settled item kept the note it parked with.
 
+The dogfood harness is on disk now (hack/dogfood), which it was not for the
+rounds that produced everything above. box.yaml, the runner, the control
+room, and the issue submitter lived in the gitignored .factory/, so the most
+consequential live leg in the project was the only one that could not be
+recreated from nothing — and it carried facts held nowhere else.
+
+The box's shape is issue #7 read literally: one repo, one seat,
+MaxConcurrent 1, the gated lane, landing on refs/heads/factory and never on
+main. TestDogfoodBoxIsNarrow holds it there, because two halves of that
+posture are DEFAULTS POINTING THE OTHER WAY — boxcfg resolves an unstated
+lane to optimistic and an unstated branch to main, so deleting two lines
+would quietly turn a gated factory into one that lands unjudged on the
+branch a human is working in. Widening the dogfood is a test failure rather
+than an omission, which is the only form in which "start narrow" survives a
+config file.
+
+The budget is 6M tokens an hour, reasoned in the file from a measured
+918,520 tokens ($1.61) for one issue, with allow_unmetered deliberately
+absent. And run.sh carries the workaround for the credential-helper hole
+recorded in a96320e: GIT_CONFIG_COUNT is the one config channel that
+survives the hermetic GIT_CONFIG_GLOBAL=/dev/null, and without it the forge
+cannot reach a private HTTPS remote on any machine. The workaround is on
+the record; the seam it works around is still missing.
+
+submit.py carries the working contract every agent run in this repository
+has executed under — read the docs, change precisely, escalate rather than
+invent. It rides the task text, so it is neither part of the agentref nor
+governed as a layer: exactly the "inline material nobody reviewed" case
+ARCHITECTURE names under "Text first, git for governance", and now at least
+visible. Promoting it to a governed base layer is the fix, not this.
+
+Issue #4 closed the other half of parking (2026-09-01). The fold that showed
+only what still needs eyes was good and was where the design stopped:
+exceptions did not age, had no severity, and never left the room, and an
+exception nobody reads is identical to no exception. Now a park states a
+severity (a Park parameter, not a field — a stage cannot forget an argument;
+unstated resolves to medium, never to the quiet end, and a cascade inherits
+its cause's), exceptions carry an age and sort loudest-then-oldest,
+`control.Escalator` tells somebody out of band once the age passes the
+objective and once per objective after that up to a bound, and the notifier
+is a seam — `LogNotice` is the daemon's default because the alternative
+default is nothing. The objective is one number doing two jobs: the age a
+queue is measured against IS the age at which it should be shouting.
+`ExceptionHealth` puts the oldest parked item on /v1/status and in the room,
+because a length says how much there is to do and only the oldest says
+whether anything is being done. Every telling is recorded before it is sent —
+the count is the bound, so an unrecordable escalation is an unsent one. The
+sweep is a standing daemon chore beside the prune.
+
+Issue #6 closed the runner-confinement half (2026-09-01). The seam had an
+argv and no profile, which is the state where a security posture is
+configurable and therefore assumed. internal/agent/confine renders the
+wrapper — the workspace mounted writable, the materialized context set
+mounted read-only, no third path — and `confine:` on a Box folds it into the
+agent argv at load, so the daemon still knows exactly one way to start an
+agent. Three details are load-bearing and each is a test: `--mount` rather
+than `-v`, because -v CREATES a missing source and turns a mistyped path
+into an empty workspace nobody can land; `--user` defaulting to the daemon's
+own, because docker's default is root and a tree of root-owned files is a
+landing that fails after the tokens are spent; and a second placeholder,
+{{context}}, because a wrapper told only about the workspace confines an
+agent out of its own granted reading material — the context directory now
+exists for every run, empty when nothing was granted, so the argv is never
+conditional on the bundle.
+
+The property is asserted the way the finding was found: the SAME probe run
+twice against one real layout. Unconfined it reads the mirror, the store,
+and a sibling run's workspace — finding 5b reproduced, not argued —
+and confined it reads its workspace and its context set and nothing else,
+cannot chmod its way past the read-only mount, and leaves work the daemon
+can still commit. Docker-gated like the collector and emulator legs: skipped
+locally, FAILING in CI, because a confinement test that skips reads as a
+confinement that holds.
+
+What is NOT closed, and is recorded rather than implied: the network (an
+agent that cannot reach a model does nothing, so egress is a separate seam),
+time (`docker run` killed by its parent leaves the container running, so
+build_timeout fires on the wrapper while the agent inside keeps spending —
+closing that wants a named container and a reaper on the prune sweep), and
+the image itself. The dogfood box is deliberately still unconfined: an image
+carrying claude-agent-acp and its credential is an operational prerequisite
+this change does not build, and turning it on is the live run #6 always
+needed.
+
+Issue #8 asked whether a new loop stage is config or code, and the answer is
+recorded in ARCHITECTURE under "A new stage is a gate, a dependent item, or a
+change to the transaction" (2026-09-01). The short of it: Gas City's lesson
+binds on the axis it was learned on, and that axis — agent roles — is already
+config here as layers. `Run` does not hold roles; it holds one unit of work's
+transaction. Judgement over a candidate is a `Gate`, work that makes its own
+change is a node in the work graph, and the sequence between them is one
+claim, one lease, one resume point and one meter slot, all of them singular
+because the unit is. TestCritiqueIsADependentItemNotANewStage is the worked
+example: a propose/critique pair as two graph nodes under two roles, the
+critic refused before it can spend while its dependency is unsettled, each
+item holding its own claim, lease, evidence scope and settled record, and
+`Run` not touched. The follow-on this names rather than closes: nothing
+outside a test CREATES a dependent item, and an item cannot name the role it
+runs under — the pump routes by box and repo, and a loop's builder carries
+one role — so the extension point is real in the queue and unreachable from
+box.yaml. A producer and a routing key, and no evidence is missing meanwhile,
+which is why it is not a §2 retrofit.
+
+Issue #9 closed the rest of the dialect problem (2026-09-01). The earlier
+round taught the runtime v0.70's shapes and made drift a recorded fact; what
+was still missing is the part that keeps it true tomorrow. The dialect is now
+PINNED as data — testdata/claude-agent-acp-0.70.jsonl is a whole session's
+frames in wire order, and conformance_test.go replays it at the runtime and
+asserts what the parser made of each one. Teaching a newer dialect is a diff
+of frames rather than an edit to a hand-written fake, which is the difference
+between a pin and a habit. The pin covers the conversation and not only the
+parsing: each client frame must be the call the client actually makes there,
+so a runtime that stopped setting the permission mode fails it. And every
+counter is asserted twice — against its exact value, and against zero with
+the shape feeding it named — because a metric that CAN silently read zero is
+the failure, not the particular wrong number. Verified by breaking it three
+ways: rename a usage field, drop the tool_call_update spelling (finding 5a
+itself, now a test failure), skip set_mode.
+
+`Runtime.Transcript` records both directions, and `Builder.Transcript`
+carries it to the only path a real agent runs through, so BOX_ACP_TRANSCRIPT
+on the live smoke re-records the pin from an actual agent — a pin nobody can
+re-record rots into fiction, which is the failure it exists to catch.
+TestTheRecorderProducesAReplayableTranscript holds the recorder to that job:
+replay the pin while recording, replay the recording, same Result.
+
+Stated rather than implied: the committed transcript is ASSEMBLED, not
+captured — every shape in it is one this repository already paid to learn
+(the usage field names from the adapter's own sessionUsage(), the untitled
+tool_call_update naming its tool under _meta.claudeCode.toolName from 232
+measured calls, no _box/escalate frame because 0.70 cannot call unknown
+methods), and testdata/README.md says so and says how to replace it. The
+thin frame is session/request_permission: its title has never been observed
+in a real recording, and if it turns out to be prose the way tool_call
+titles were, the enforcement path has the hole the update path had. Not
+built, and named here: the cross-run version of the zero smell — a counter
+that has never been non-zero in ANY run should be loud — which lives in the
+capacity and evidence planes, not in the parser.
+
+Issue #11 gave repair work the attempt it follows (2026-09-01). A red landing
+opened a fresh ingress carrying the failure reason as its payload, and the
+repair was then an ordinary work item — a task string and nothing else — so
+its agent started cold and re-derived from the diff what the run before it
+already knew. A repair now carries an `agent.Prior`: the run that made the
+attempt, the red sha, the branch that still holds the change (nothing rolled
+back), and which check said what. It rides the ingress the way the depth
+does, and `ItemFor` puts it on the item intake builds.
+
+The predecessor's handoff is deliberately NOT frozen in at that moment,
+because it does not exist yet — notes are written as a run settles, and on
+the optimistic lane the repair is summoned before the run summoning it has
+settled. They resolve at WAKE time instead, from the seat that wrote them:
+`seat.HandoffFrom` asks by run rather than by recency, which is the
+successor's question and the one the wake layer cannot answer. The whole
+thing renders as a task-scope layer beside the task text rather than being
+concatenated into it, so continuity's rule holds here too — the carried
+context is part of the agentref, and a repair woken with its predecessor's
+account is a different agent on the record from the same repair woken cold.
+Two limits, stated rather than implied. A seat's memory is its own, so a
+successor sitting in a different seat carries the facts and not the notes:
+reading another seat's scope would be exactly the cross-scope read the
+knowledge plane refuses everywhere else, and it would want a grant to be
+anything but that. And nothing in box.yaml wires `Red` at all yet — the
+red-main route is test-only configuration, so an optimistic Box today lands,
+checks, records the red, and summons nobody. That is the same unrun second
+lane #7 names, and it is what a live optimistic session would close.
+
+Issue #12 gave a session a way to end that is not finishing, parking or
+failing (2026-09-01). `HANDOFF:` lines were read off the agent's FINAL
+message, so a handoff could only ever be a parting note, and an agent out of
+context mid-change had two moves that both lied: escalate, which parks work
+needing no person and throws away what the session built, or push on. The
+third is `_box/handoff` beside `_box/escalate` — `{"reason", "notes"}`,
+acknowledged always for the reason escalate is, with a `HANDOFF-NOW:` text
+fallback because 0.70 cannot call an unknown method and a verb with no text
+channel is a verb the only real agent here cannot reach. The two spellings are
+one word apart on purpose: `HANDOFF:` is still a parting note, and the
+difference between them is whether a fresh session opens.
+
+`StateHandedOff` is the third non-settled state, and the reasoning is the
+queue's own about waiting, used a third time — a handed-off item needs nobody,
+so filing it as an exception would bury the ones that do. Not pending either:
+pending says nobody has started this, and an item three sessions deep has been
+started three times. `Drain` claims it like any other claimable state, which
+is where "re-dispatch" is actually decided; the same executor takes it, and a
+repo has one builder, which is what "the same seat" amounts to.
+
+The successor CONTINUES. The tree is held and what the session committed is
+kept as `Unfinished` — a resume point distinguished from `Built` by one
+boolean, because an ordinary resume SKIPS the builder and doing that to half a
+change would gate and land exactly the degraded commit the verb exists to
+prevent. The notes go to the seat at the hop rather than at settle, since the
+item does not settle and a note deferred to settle is one the successor wakes
+without. Asserted the way it matters: the landed history carries both
+sessions' commits, so a successor that started over fails the test rather than
+producing a plausible-looking commit; the two sessions' agentrefs differ,
+because a run woken with a different memory is a different agent on the
+record.
+
+Hops are bounded — `Loop.MaxHandoffs`, three by default, negative for none,
+the posture the repair depth already takes — and each is an evidence record
+attributed to the seat. Exhausting the limit parks with the reason named: an
+item that has taken four sessions is a sizing problem rather than a context
+problem, which is a judgement, and judgements are what the exception queue is
+for.
+
+The working contract names the verb, because a verb no agent is told about is
+a verb no agent uses. It rides the prompt rather than the bundle, so it
+inherits submit.py's problem exactly — ungoverned text that is not part of the
+agentref — and promoting the contract to a base layer remains the fix for
+both.
+
+Every reader of the state vocabulary learned the word in the same pass, which
+is the failure mode that vocabulary has already had once: `/v1/status` counts
+it as in flight, the room derives a stage from it, and the control room's
+`live` filter lists it. A state that some readers know is worse than no state,
+because work does not disappear loudly — it disappears plausibly.
+
+Issue #14 asked for the work-graph frontier and found half of it already
+shipped: #20's `GET /v1/items` and `Room.Queue` are the collection endpoint the
+issue says does not exist, and `blocked_by` was already on every row. What was
+missing is the part a state cannot carry. A row now says whether it is READY —
+claimable now, nothing unsettled ahead of it, nobody running it — and readiness
+is item-local on purpose: the stop button and the budget stay out of it,
+because ready work that is not moving is the symptom and folding the cause in
+would erase it exactly when it fires. A cascaded row names the ROOT, which the
+note could not: `Claim` writes the cause as prose nesting its own dependency's
+prose, so three deep it reads "dependency B parked: dependency A parked: the
+credential was revoked" — the origin is in there and is not a field, and the
+graph question an operator has ("what is this one failure holding up") has no
+answer while it stays a string. And a claimed row names the RUNNER holding it
+and how much lease is left,
+negative once it has lapsed — the one row fact that is not a fold, because an
+item's chain records that a runner took it and can never record that the runner
+died. Reading it put one read on the store's lease seam: `forge.Leaser.Inspect`,
+conformance-asserted on both backends — it reports the holder, does not disturb
+the claim, leaks nothing across tenants, and deliberately still names a holder
+past the deadline that `Acquire` correctly treats as free, because "runner-3 has
+held this for forty minutes on a twenty-minute lease" is the fact and not the
+contradiction it looks like.
+
+The room's Work view is now a TABLE, with sortable headers, `aria-sort`, a
+`blocked by` column and `ready`/`blocked` lanes — no design-system table exists
+and none was added, because a semantic `<table>` on the JH tokens is also the
+zero-dependency answer. `box queue` learned the same three facts on the same
+day: a fact some readers of the queue have and others do not is worse than one
+nobody has, which is the failure the state vocabulary already had once.
+
+The diagram is deliberately NOT built, and the decision it was blocked on is
+recorded instead (ARCHITECTURE, "A queue that cannot say what is runnable"):
+layout is computed in Go and shipped as coordinates, the table stays the
+representation of record, and #15 and #16 inherit both rather than each
+answering it again. Nothing here adds a Go layout dependency either — the
+decision binds the diagram, and the diagram is the next issue's.
+
+Issue #17 put a data envelope on the work (2026-09-01): what class of data an
+origination's work may touch, and which endpoints may see it. The motivating
+case is an embargoed vulnerability finding and a published CVE arriving as the
+same sentence and routing to the same builder, with nothing in the system able
+to treat them differently — and the decision that matters made the moment the
+description reaches a model, whoever reviews the pull request afterwards. The
+reasoning is in ARCHITECTURE under "And a data envelope"; the mechanism is
+`agent.Envelope`, an input to bundle resolution that can only narrow it.
+
+Five fields, and the taxonomy is deliberately not one of them: an operator
+names their own classes, because the same finding is material non-public
+information in one estate and an ordinary ticket in another. What the mechanism
+supplies is the intersection and the two refusals. Class conflict with the
+ceiling refuses; endpoints and readable classes intersect; redaction and
+payload take the stricter of the two, which is the LOWER rank because both
+orders run strictest-first so that a zero value is the strict end. `Check` runs
+against the COMPOSED bundle rather than the layers, because widening is what a
+layer attempts and the merged result is the only place an attempt shows.
+
+Absence means minimum on every field, which is PLAN §5's rule a third time. A
+composer with a ceiling and work with no declaration refuses — asserted through
+the whole loop, where it parks before a token is spent and the remote never
+moves. An unstated payload posture sends a reference and not the text, so a
+reference-only class refuses a request carrying the ingress text as its task:
+the substitute ("TestParseHeader fails, make it pass") is a judgement about the
+work that a composer cannot make from the text it was handed, so it refuses
+rather than inventing one. An unnamed model is a refusal too — "whatever the
+runtime was configured with" is not an answer to which endpoint saw the data —
+and an MCP server is an endpoint, because an endpoint here is where the payload
+goes rather than what answers. A tool is not: allows already intersect across
+layers and a narrower layer can only narrow, so that property already held.
+
+The record came almost for free, which was the argument for doing it in the
+digest rather than beside it. `resolveDomain` moves to v2 (the envelope and each
+context repo's class now serialize into the ref), so a run permitted to see one
+class and reach one endpoint is a different agent from the same layers under a
+wider envelope, and the `agent-run` record carries the envelope in force in
+full rather than a class name — otherwise answering "which endpoint" would mean
+re-resolving the bundle.
+
+Three things are NOT built and are recorded rather than implied. The redaction
+posture is declared and the telemetry path does not read it. The second
+enforcement point the issue names — the stream, where tool policy already binds
+— has nothing envelope-shaped in it. And the declaration has no governed home:
+`Builder.Envelope` is the seam, nothing in box.yaml fills it, and it belongs on
+#13's kind declaration as the fifth field. That is the whole of what #17 asked
+be captured before that declaration is designed, and the §2 argument is why it
+could not wait — a run that executed before classification existed is
+unclassifiable retroactively, and there is no query that recovers what class of
+data it was permitted to see.
+
+Issue #19 opened the claimed item (2026-09-01). #14 answered which work COULD
+be moving; a claimed unit still said `state=claimed head=` for the length of a
+run, and the reason was never a shortage of facts — the stage bracket, the
+composed layers, the seat, and every word the agent said were all inside the
+daemon and none of them left it. Three things closed that, and only the middle
+one is new machinery.
+
+The FAN-IN: `acp.Runtime.Progress` reports the stream as it arrives —
+messages coalesced at the agent's actions (a frame per chunk is a log dump, a
+frame at the end is no live view), each distinct tool call, each refusal, and
+both box verbs with their reasons. `Builder.Progress` tags them with the work
+item. It comes off the SAME dedup the settled tally does, which is the
+property that makes it worth trusting: the tool calls a watcher saw are
+exactly the ones the run is charged with, and the message frames concatenate
+to `res.Text` — asserted against the PINNED dialect, so a shape that moves
+breaks the live view here rather than quietly emptying it in production.
+
+The BUS: `control.Live`, in memory, bounded, one global cursor. The decision
+and its reasoning are in ARCHITECTURE under "A claimed item is a black box
+until it settles" — the live stream is a window and not a record, because the
+per-call sequence is already on span events, the tally is already on the
+chain, and a WORM-exported record per tool call buys an auditor nothing. What
+that costs is stated: a restart loses the window, which is survivable exactly
+because the run it was watching was that daemon's child.
+
+The VIEW: `Room.Sessions` folds identity, progress and timeline into one card
+per RUNNING unit — claimed and nothing else, because a live view that quietly
+includes work nobody is doing is the stale-stage bug in a bigger frame. `GET
+/v1/sessions`, `GET /v1/items/{id}/session`, and `GET /v1/events?item=` as the
+per-item scope (a scope and not a filter: the server stops reading what the
+subscriber would only discard). The room grows a Sessions page of cards side
+by side; `box item` prints the same card, because a fact one reader of the
+queue has and another does not is worse than one nobody has — the argument
+`box queue` settled for the frontier, used again.
+
+Two smaller things the view forced. The composed LAYERS now ride the
+`agent-run` record in application order: the room wanted to show what the
+agent was and the agentref is a digest, so the alternative was re-resolving
+the bundle from the same material at the same commits. And an empty timeline
+now reports WHICH kind of empty it is — a run announces itself to the bus at
+its first instant, so silence from a unit this daemon is running is an idle
+agent and silence from one it is not is blindness, and a reader left to infer
+infers the alarming one.
+
+The issue also names the v0.70 tool-call dialect as undercounted; that half
+was closed by #9 and this change inherits the pin rather than re-fixing it —
+the new assertions replay the same transcript.
+
+NOT done, recorded rather than implied. The post-land check is bracketed by
+`telemetry.Stage` and reaches the item's chain as an ordinary `gate` record,
+so the room's stage column reads "gating" for it and there is no "landing"
+stage at all — the Lander writes to its own scope. Closing that is a chain
+vocabulary change with every reader of `stageOf` on the other end, and it is
+the next thing this view will ask for. The browser pass is owed: the room
+smoke grows a Sessions step, and it is UNRUN in this workspace because a
+sandboxed `bind()` on a unix socket is denied and boxd cannot start at all.
+And a timeline with real agent frames in a browser needs the dogfood box with
+a live ACP session, which is the same live run #6 and #7 are already waiting
+on.
+
+Issue #20's design note had a second half, and it closed last (2026-09-01).
+The listing, the CLI verb and the room's table all shipped in the rounds above
+— #20's own, and then #14's frontier on the same rows — but the COUNTS on
+`/v1/status` stayed exactly what the issue opened by complaining about: a walk
+of `index/pending` with its own copy of the vocabulary for "not settled yet".
+Nothing held them to the listing. They agreed because two switch statements
+matched, which is agreement with no mechanism behind it, and this system's
+state vocabulary has drifted that way once already — a word some readers
+learned and others did not, where work does not disappear loudly but
+plausibly.
+
+`Room.Backlog` is that count as a tally of `Room.Queue`, and `queue.Claimable`
+is now the one place the vocabulary is written: the pump selects with it, the
+pump decides what settled with it, and the room's pending number IS it.
+`/v1/status` carries the parts beside the roll-up, so "pending: 14" says which
+fourteen states it is made of; `box status` prints the same line and the
+dashboard the same breakdown with a link to the verb that lists them, because
+a fact one reader of the queue has and another does not is worse than one
+nobody has — the argument `box queue` settled for the frontier, used a third
+time. Asserted the way it can break: state by state against the listing
+narrowed to that state, at intake, MID-DRAIN and settled, since a counter that
+matches while everything is pending and drifts once work moves is the whole
+bug. The cost is stated rather than implied: status folds the queue where it
+walked an index, which is what `ExceptionHealth` beside it already does.
+
+Still unrun from #7: the second lane. Everything above is the gated lane
+against the real remote; the optimistic lane on a scratch mirror needs no
+code (Phase 9 shipped it, and boxcfg's default IS optimistic) — it needs a
+scratch remote and a deliberate session.
+
+The harness surface is DECLARED and delivered (2026-09-01). Phase 2 resolved
+`Bundle.Skills` and `Bundle.MCP`, merged them, hashed them into the agentref
+and rendered them in Explain — and delivered them nowhere: `session/new` went
+out with an empty `mcpServers` and no options at all. A bundle could grant a
+skill and the agent would never see it. Meanwhile the adapter's own default
+loaded the machine's ENTIRE harness configuration, so the factory recorded a
+set it did not deliver and delivered a set it did not record. Probed on this
+box: 44 plugins, 79 skills, three hook sets firing on every tool call, and
+every MCP server the machine holds — Slack, Jira, GitHub, Datadog, Honeycomb,
+Wrike — reaching an unattended builder that no box had granted anything.
+
+What closes it:
+
+  - `boxcfg.Harness` — `plugins: user|none`, `plugin_mcp`, skill refs, MCP
+    grants. The inheritance is now a decision instead of an accident.
+  - `internal/harness` — discovery reads the same two files the harness reads
+    (`settings.json`, `installed_plugins.json`), user scope only, PER RUN. A
+    plugin enabled in the harness reaches the next build with no reload, and
+    the set is in the bundle either way: inheriting is not not knowing. Its
+    `Source` is the `LayerSource` the daemon composes with.
+  - Skills by ref — repo, commit, path, resolved through the mirror to the
+    TREE object at that path, which is why a sibling skill's revision does
+    not churn this one's digest. A full 40-char commit is required at load.
+    Materialized as a generated plugin beside the workspace, read-only.
+  - `strictMcpConfig` unconditional at `session/new`, `skipMcpDiscovery` on
+    every plugin. Two levers, not one: what the loader reads, and what the
+    session may connect to.
+  - `git.RemoveTree` — Prune could never reclaim a materialized tree.
+    `makeReadOnly` seals it 0555 and `os.RemoveAll` cannot unlink inside
+    that, so `.context` siblings had been accumulating one per dead run
+    since Phase 2, invisibly, because nothing ever failed. Found by a test's
+    own TempDir cleanup.
+
+`TestLiveHarnessResolves` (BOX_HARNESS_LIVE=<box.yaml>) resolves a shipped
+config against the real network and materializes it, which is the failure a
+fixture cannot catch: a force-pushed commit, a path that moved between
+releases, a private remote the credential channel cannot reach.
+
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
-the confinement profile behind the #6 seam, review sampling/sign-off
-endpoints for the control room, and OIDC as a boxgate variant.
+an agent image and the live run that turns confinement on for the dogfood,
+review sampling/sign-off endpoints for the control room, and OIDC as a
+boxgate variant.

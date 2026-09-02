@@ -128,7 +128,7 @@ func TestFailedRootParksTheLeaves(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := qu.Park(ctx, w, lease, "gate failed hard"); err != nil {
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "gate failed hard"); err != nil {
 		t.Fatal(err)
 	}
 

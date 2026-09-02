@@ -74,7 +74,7 @@ func TestExceptionsListsOnlyWhatStillNeedsEyes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := q.Park(ctx, w, lease, "gate failed"); err != nil {
+		if _, err := q.Park(ctx, w, lease, queue.SeverityMedium, "gate failed"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -174,7 +174,7 @@ func TestQueueListsWhatACountCannot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.Park(ctx, parked, claim2, "check: fail (go vet)"); err != nil {
+	if _, err := q.Park(ctx, parked, claim2, queue.SeverityMedium, "check: fail (go vet)"); err != nil {
 		t.Fatal(err)
 	}
 	submit(t, q, "wi-fresh")

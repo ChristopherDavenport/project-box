@@ -15,6 +15,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/authz"
 	"github.com/ChristopherDavenport/project-box/internal/checks"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
@@ -62,11 +63,19 @@ type Loop struct {
 	Handoff func(ctx context.Context, item queue.WorkItem) error
 	// Red opens repair work when an optimistic landing goes red and the red
 	// survives one re-run — a red that does not reproduce is recorded as a
-	// flaky check, and nobody is summoned for it. Returns the repair ingress
-	// id. Nil means even a confirmed red is recorded but nobody is summoned
-	// — configure it; see OpenRepair.
-	Red func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error)
+	// flaky check, and nobody is summoned for it. It is handed the attempt
+	// the repair follows, so the summons is worth answering: the sha, the
+	// branch that still carries it, and which check said what. Returns the
+	// repair ingress id. Nil means even a confirmed red is recorded but
+	// nobody is summoned — configure it; see OpenRepair.
+	Red func(ctx context.Context, item queue.WorkItem, prior agent.Prior) (string, error)
 	TTL time.Duration
+	// MaxHandoffs bounds how many fresh sessions one item may ask for before
+	// it parks instead. Zero means [DefaultMaxHandoffs]; negative means no bound,
+	// which is a decision an operator can make and the factory will not make
+	// for them — the same posture OpenRepair's depth takes, and for the same
+	// reason: both are the factory summoning itself.
+	MaxHandoffs int
 	// BuildTimeout bounds one build. Zero means [DefaultBuildTimeout]; a
 	// negative value means no bound, which an operator may choose.
 	//
@@ -87,9 +96,26 @@ const DefaultBuildTimeout = 30 * time.Minute
 // depth is configured: a repair, a repair of that, a repair of that.
 const MaxRepairDepth = 3
 
+// DefaultMaxHandoffs bounds how many times one item may ask for a fresh
+// session when the Box states no limit of its own.
+//
+// An item that has taken four sessions and is still not finished has stopped
+// being a context problem and become a sizing one, and that is a judgement —
+// which is what the exception queue is for. Three is the same number the
+// repair chain uses, for the same reason: it is enough to be worth having and
+// few enough that nobody discovers the bill afterwards.
+const DefaultMaxHandoffs = 3
+
 // OpenRepair wires Red to an ingress route: the red commit's sha is the
 // delivery key, so however many post-land checks report the same red, one
 // repair item exists.
+//
+// The attempt travels with the delivery rather than being flattened into the
+// payload the repair reads as its task. A repair opened as new work is a task
+// string and nothing else, and its agent then re-derives from the diff what
+// the previous run already knew; carried as [agent.Prior] it resolves into a
+// layer at wake time, which keeps the merge semantics explicit and puts the
+// carried context in the agentref.
 //
 // maxDepth bounds the CHAIN, which sha-keyed idempotency cannot. One repair
 // per red sha is not a bound when each repair produces a new sha that can
@@ -98,20 +124,21 @@ const MaxRepairDepth = 3
 // standing in front of that is the budget. Zero uses [MaxRepairDepth];
 // negative means no bound, which is a decision an operator can make and the
 // factory will not make for them.
-func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) func(context.Context, queue.WorkItem, forge.Commit, string) (string, error) {
+func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) func(context.Context, queue.WorkItem, agent.Prior) (string, error) {
 	if maxDepth == 0 {
 		maxDepth = MaxRepairDepth
 	}
-	return func(ctx context.Context, item queue.WorkItem, head forge.Commit, reason string) (string, error) {
+	return func(ctx context.Context, item queue.WorkItem, prior agent.Prior) (string, error) {
 		if maxDepth > 0 && item.Depth >= maxDepth {
 			// Deep enough. The red is on the check chain either way, so
 			// promotion will not take the commit; what stops here is the
 			// factory summoning itself again.
 			return "", fmt.Errorf("repair chain reached depth %d without going green — stopping rather than opening another: %s",
-				item.Depth, reason)
+				item.Depth, prior.Reason)
 		}
 		ing, _, err := router.Open(ctx, route, ingress.Delivery{
-			Key: "red-" + string(head), Payload: []byte(reason), Depth: item.Depth + 1,
+			Key: "red-" + prior.Sha, Payload: []byte(prior.Reason), Depth: item.Depth + 1,
+			Prior: &prior,
 		})
 		if err != nil {
 			return "", err
@@ -124,7 +151,10 @@ func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) 
 // what keeps "why does this change exist" answerable from the other end.
 func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 	return queue.WorkItem{ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID,
-		Requester: ing.Requester, Repo: ing.Repo, Task: task, Depth: ing.Depth}
+		Requester: ing.Requester, Repo: ing.Repo, Task: task, Depth: ing.Depth,
+		// Repair work wakes with the attempt it follows rather than cold; the
+		// ingress is where that travels, the same way the depth does.
+		Prior: ing.Prior}
 }
 
 // Poll asks whether a held item's outstanding gate has answered yet, and
@@ -184,12 +214,16 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		return item, err
 	}
 	// The workspace outlives the lease for exactly as long as the resume point
-	// does: held while the item waits with a commit to come back to, handed
-	// back to Prune the moment it settles or gives that commit up.
+	// does: held while the item waits with a commit to come back to or has
+	// handed off with a change its successor continues, handed back to Prune
+	// the moment it settles or gives that commit up.
 	defer func() {
-		if out.State == queue.StateWaiting && out.Built != "" {
-			l.Mirror.Hold(item.ID, l.Repo.Name)
-			return
+		switch out.State {
+		case queue.StateWaiting, queue.StateHandedOff:
+			if out.Built != "" {
+				l.Mirror.Hold(item.ID, l.Repo.Name)
+				return
+			}
 		}
 		l.Mirror.Discard(item.ID, l.Repo.Name)
 	}()
@@ -202,7 +236,9 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	if deny, err := l.authorize(ctx, item, authz.ActionPropose); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	} else if deny != "" {
-		return q.Park(ctx, item, claim, deny)
+		// A grant the factory does not hold. The control worked, and it will
+		// keep working on every retry until a person changes something.
+		return q.Park(ctx, item, claim, queue.SeverityHigh, deny)
 	}
 
 	leaser := l.Store.Leaser(l.Runner)
@@ -252,9 +288,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		case item.BuiltBase == string(base):
 			ws, head, resumed = adopted, forge.Commit(item.Built), true
 			// On the record, so the chain shows one commit judged twice rather
-			// than two builds that happened to agree.
+			// than two builds that happened to agree — or, when the resume is
+			// unfinished, one change continued rather than two attempts at it.
 			l.record(ctx, item, "build-resumed", string(head),
-				fmt.Sprintf(`{"base":%q,"waiting_on":%q}`, base, item.Note))
+				fmt.Sprintf(`{"base":%q,"waiting_on":%q,"unfinished":%v}`, base, item.Note, item.Unfinished))
 		default:
 			// The branch moved while this change waited or lost its turn to
 			// land. Replay rather than rebuild: the commit already exists, and
@@ -266,7 +303,8 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			if rerr == nil {
 				ws, head, resumed = adopted, replayed, true
 				l.record(ctx, item, "build-rebased", string(replayed),
-					fmt.Sprintf(`{"was":%q,"from":%q,"onto":%q}`, item.Built, item.BuiltBase, base))
+					fmt.Sprintf(`{"was":%q,"from":%q,"onto":%q,"unfinished":%v}`,
+						item.Built, item.BuiltBase, base, item.Unfinished))
 			} else {
 				// A conflict is a judgement call, and the agent is the one
 				// who makes those. Recorded, then built afresh.
@@ -280,6 +318,14 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		if err != nil {
 			return q.Fail(ctx, item, claim, err.Error())
 		}
+	}
+	// The builder runs unless a FINISHED change was resumed. An unfinished
+	// resume is the mid-run handoff: the successor takes the same tree at the
+	// same partial commit and goes on from there, which is the difference
+	// between handing off and parking. Skipping the builder on half a change
+	// would gate and land it, which is the degraded commit the verb exists to
+	// avoid producing.
+	if !resumed || item.Unfinished {
 		if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
 			bctx, cancelBuild := l.buildDeadline(ctx)
 			defer cancelBuild()
@@ -295,6 +341,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			}
 			return berr
 		}); serr != nil {
+			var ho *Handoff
+			if errors.As(serr, &ho) {
+				return l.handOff(ctx, q, item, claim, base, ho)
+			}
 			var esc *Escalation
 			if errors.As(serr, &esc) {
 				// The agent's own act, attributed to the agent: actor is the
@@ -305,10 +355,12 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 					OnBehalfOf: item.Requester, Body: []byte(esc.Reason),
 					Trace: telemetry.TraceID(ctx),
 				})
-				item, _ = q.Park(ctx, item, claim, esc.Error())
+				// An agent declining is a considered act, not an emergency:
+				// somebody has to read it, and it can wait for the morning.
+				item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, esc.Error())
 				return l.settle(ctx, item), nil
 			}
-			item, _ = q.Park(ctx, item, claim, "build: "+serr.Error())
+			item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, "build: "+serr.Error())
 			return l.settle(ctx, item), nil
 		}
 	}
@@ -379,21 +431,23 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	_ = gerr
 	switch forge.Resolve(verdicts) {
 	case forge.DecisionFail:
-		return q.Park(ctx, item, claim, reasons(verdicts))
+		// A change judged and refused: nothing landed, nothing is broken, and
+		// the queue is the right place for it to wait.
+		return q.Park(ctx, item, claim, queue.SeverityMedium, reasons(verdicts))
 	case forge.DecisionPending:
 		// Carry the commit forward so the next tick re-enters at the gate
 		// rather than at the builder, and the satisfied gates with it so it
 		// re-enters at the ONE gate that has not answered. Waiting on a
 		// person is routine and can last days; it must cost neither an agent
 		// run nor a test suite per tick to do it.
-		item.Built, item.BuiltBase, item.PassedGates = string(head), string(base), passedNow
+		item.KeepCandidate(head, base, passedNow)
 		return q.Wait(ctx, item, claim, reasons(verdicts))
 	}
 
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	} else if deny != "" {
-		return q.Park(ctx, item, claim, deny)
+		return q.Park(ctx, item, claim, queue.SeverityHigh, deny)
 	}
 	landLease, notOurTurn, err := l.openLandWindow(ctx, item, base)
 	if err != nil {
@@ -403,7 +457,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		// The gates passed on this head; if the branch was merely busy, next
 		// tick lands without re-running them. If it moved, the replay changes
 		// the head and the carry drops itself.
-		item.Built, item.BuiltBase, item.PassedGates = string(head), string(base), passedNow
+		item.KeepCandidate(head, base, passedNow)
 		return q.Wait(ctx, item, claim, notOurTurn)
 	}
 	defer leaser.Release(ctx, landLease)
@@ -415,7 +469,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		}
 		return err
 	}); lerr != nil {
-		return q.Park(ctx, item, claim, "land: "+lerr.Error())
+		return q.Park(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
 	}
 	// Green by construction: the gates passed before the land. Recorded all
 	// the same, because the promotion predicate reads only the check chain.
@@ -499,14 +553,14 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	} else if deny != "" {
-		return q.Park(ctx, item, claim, deny)
+		return q.Park(ctx, item, claim, queue.SeverityHigh, deny)
 	}
 	landLease, notOurTurn, err := l.openLandWindow(ctx, item, base)
 	if err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	}
 	if notOurTurn != "" {
-		item.Built, item.BuiltBase = string(head), string(base)
+		item.KeepCandidate(head, base, nil)
 		return q.Wait(ctx, item, claim, notOurTurn)
 	}
 	defer l.Store.Leaser(l.Runner).Release(ctx, landLease)
@@ -517,7 +571,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 	}); lerr != nil {
 		// The landing itself was refused — a superseded token or a moved
 		// branch. Nothing reached main, so there is nothing to repair.
-		return q.Park(ctx, item, claim, "land: "+lerr.Error())
+		return q.Park(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
 	}
 
 	var verdicts []forge.Verdict
@@ -544,7 +598,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		// the item for a person.
 		checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
 			checks.Status{Green: false, Lane: string(forge.LaneOptimistic), Note: infra.Error()}, l.Runner)
-		return q.Park(ctx, item, claim, infra.Error())
+		return q.Park(ctx, item, claim, queue.SeverityHigh, infra.Error())
 	}
 
 	switch forge.Resolve(verdicts) {
@@ -565,7 +619,8 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 			// One red observed and no second judgement. The red record
 			// stands — promotion never takes the commit — and the rest is a
 			// person's call.
-			return q.Park(ctx, item, claim, "landed red, unconfirmed: "+reason+"; "+cerr.Error())
+			return q.Park(ctx, item, claim, queue.SeverityHigh,
+				"landed red, unconfirmed: "+reason+"; "+cerr.Error())
 		}
 		if !confirmed {
 			// The red did not reproduce: the flaky record is the fact, the
@@ -576,9 +631,24 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		}
 		note := "landed red: " + reason
 		if l.Red != nil {
-			repair, rerr := l.Red(ctx, item, head, reason)
+			// What the repair wakes knowing. The branch is named because
+			// nothing rolled back — the change is still there, and a repair
+			// that starts by making it again is the waste this carries
+			// against. The notes are deliberately absent: this run has not
+			// settled yet, so its handoff is not written, and the successor
+			// resolves it at wake time from the seat that wrote it.
+			prior := agent.Prior{
+				Run: item.ID, Repo: l.Repo.Name, Branch: l.Branch, Sha: string(head),
+				Checks: failing(verdicts), Reason: reason,
+			}
+			repair, rerr := l.Red(ctx, item, prior)
 			if rerr != nil {
-				return q.Park(ctx, item, claim, note+" — AND opening repair failed: "+rerr.Error())
+				// The lane's whole safety argument is that a red main
+				// summons a repair swarm. Main is red and the summons
+				// failed, so the mechanism this lane rests on is the
+				// thing that broke.
+				return q.Park(ctx, item, claim, queue.SeverityCritical,
+					note+" — AND opening repair failed: "+rerr.Error())
 			}
 			l.record(ctx, item, "repair-opened", string(head), fmt.Sprintf(`{"ingress":%q}`, repair))
 			note += "; repair opened: " + repair
@@ -672,6 +742,75 @@ func (e *Escalation) Error() string {
 	return fmt.Sprintf("escalated by %s: %s", e.Seat, e.Reason)
 }
 
+// Handoff is an agent asking mid-run for a fresh session: not finished, and
+// not stuck.
+//
+// That is the case neither of the other two answers tells the truth about. An
+// escalation parks work nobody needs to look at and throws away what the
+// session built; grinding on produces the degraded commit the working
+// contract exists to prevent. "I am not finished, I am not stuck, and here is
+// where I am" is a third thing, so it gets a third transition.
+//
+// The agent requests and the loop decides — the split worth taking from Gas
+// City's request-restart, where the controller and not the agent ends the
+// session. Here the deciding is [Loop.MaxHandoffs]: past it the item parks
+// with the reason named, because a session able to summon its own successor
+// forever is an unbounded spend with no landing.
+type Handoff struct {
+	Seat   string
+	Reason string
+	// Commit is what the session left, already committed in its workspace;
+	// empty when it committed nothing. The tree is held and the successor
+	// adopts it, so the next session continues the change rather than paying
+	// an agent to make it again.
+	Commit forge.Commit
+}
+
+// Error satisfies error.
+func (h *Handoff) Error() string {
+	return fmt.Sprintf("handed off by %s: %s", h.Seat, h.Reason)
+}
+
+// handOff ends the session and returns the item to the queue for a fresh one,
+// unless the hops are spent.
+func (l *Loop) handOff(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, base forge.Commit, h *Handoff) (queue.WorkItem, error) {
+	// The agent's own act, attributed to the agent: actor is the seat, not the
+	// runner that hosted it, exactly as an escalation is. Every hop is a
+	// record, so "how many sessions did this change take" is answered from the
+	// chain rather than estimated from it.
+	l.Store.Log().Append(ctx, evidence.Record{
+		Tenant: item.Tenant, Scope: "workitem/" + item.ID,
+		Kind: "handoff-requested", Subject: item.ID, Actor: h.Seat,
+		OnBehalfOf: item.Requester, Body: []byte(h.Reason),
+		Trace: telemetry.TraceID(ctx),
+	})
+	if limit := l.maxHandoffs(); limit > 0 && item.Hops >= limit {
+		// Spent. An item that has taken the limit and is still not finished
+		// has stopped being a context problem and become a sizing one, which
+		// is a judgement — and judgements are what the exception queue is for.
+		// The reason is named rather than summarised: "handed off too often"
+		// tells nobody what the sessions were trying to do.
+		item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+			"handed off %d times without finishing, and the limit is %d — parking rather than opening another session: %s",
+			item.Hops, limit, h.Reason))
+		return l.settle(ctx, item), nil
+	}
+	if h.Commit != "" && h.Commit != base {
+		// What the session got to, kept for its successor. Nothing landed and
+		// no gate has judged it, so this is a tree to continue in rather than
+		// a candidate to re-offer — see [queue.WorkItem.Unfinished].
+		item.KeepUnfinished(h.Commit, base)
+	}
+	return q.HandOff(ctx, item, claim, h.Reason)
+}
+
+func (l *Loop) maxHandoffs() int {
+	if l.MaxHandoffs == 0 {
+		return DefaultMaxHandoffs
+	}
+	return l.MaxHandoffs
+}
+
 // settle runs the handoff hook after any settle; closure over termination.
 func (l *Loop) settle(ctx context.Context, item queue.WorkItem) queue.WorkItem {
 	if l.Handoff == nil {
@@ -693,6 +832,19 @@ func (l *Loop) record(ctx context.Context, item queue.WorkItem, kind, subject, b
 		Kind: kind, Subject: subject, Actor: l.Runner, OnBehalfOf: item.Requester,
 		Body: []byte(body), Trace: telemetry.TraceID(ctx),
 	})
+}
+
+// failing names the gates that did not pass, in the order they answered.
+// "main is red" is a fact nobody can act on; "the test gate is red" is a
+// place to start, and it is the half of the reason a successor can search on.
+func failing(vs []forge.Verdict) []string {
+	var out []string
+	for _, v := range vs {
+		if v.Decision != forge.DecisionPass {
+			out = append(out, v.Gate)
+		}
+	}
+	return out
 }
 
 func reasons(vs []forge.Verdict) string {

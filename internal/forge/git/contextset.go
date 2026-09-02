@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -21,7 +22,20 @@ import (
 // Least privilege holds by construction: repos outside the set are simply
 // never written here, and the runtime points the agent at this directory and
 // its workspace, nowhere else.
+//
+// A second materialization replaces the first rather than extracting over it.
+// Two reasons, and the second is the one that matters: tar cannot overwrite a
+// tree the previous pass made read-only — the 0555 directories deny the
+// unlink — so a re-claimed run would fail here rather than build; and what
+// survived would be material the agent can read and was not granted this
+// time, which is exactly the property the set exists to state.
 func (m *Mirror) MaterializeContext(ctx context.Context, dir string, set agent.ContextSet) error {
+	if err := RemoveContext(dir); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
 	for _, cr := range set.Repos {
 		if cr.Commit == "" {
 			return fmt.Errorf("git: context repo %q is unpinned — a context whose content can change mid-run is an injection surface", cr.Repo)
@@ -59,6 +73,30 @@ func (m *Mirror) MaterializeContext(ctx context.Context, dir string, set agent.C
 		}
 	}
 	return nil
+}
+
+// RemoveContext deletes a materialized tree, restoring write permission on
+// the way down. Named for its first caller; it reclaims anything this package
+// sealed, which now also means a run's generated skill plugin.
+//
+// Plain [os.RemoveAll] cannot do it. Removing an entry needs write permission
+// on its DIRECTORY, and [makeReadOnly] leaves every directory at 0555, so the
+// reclaim fails on the first one — silently, from Prune's point of view,
+// which is how a factory accumulates every context set it has ever
+// materialized.
+func RemoveContext(dir string) error {
+	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	// Best-effort: a path that cannot be chmodded is reported by the removal
+	// below, where the error means something.
+	filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err == nil && d.IsDir() {
+			os.Chmod(path, 0o755)
+		}
+		return nil
+	})
+	return os.RemoveAll(dir)
 }
 
 func makeReadOnly(root string) error {

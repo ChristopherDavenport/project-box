@@ -19,6 +19,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"net"
@@ -59,10 +60,21 @@ type Server struct {
 	Meter *capacity.Meter
 	// Box and Runner identify this daemon in /v1/status.
 	Box, Runner string
-	Started     time.Time
+	// Objective is the exception queue's response-time objective, reported
+	// on /v1/status beside the measurement so a reader never has to look up
+	// what the number is being judged against. Zero means
+	// [control.DefaultObjective].
+	Objective time.Duration
+	Started   time.Time
 	// Reload, when set, re-reads the daemon's configuration; wired by the
 	// daemon, exposed as POST /v1/reload.
 	Reload func(ctx context.Context, actor string) (string, error)
+	// Live, when set, is the window into runs still going: the ACP stream
+	// fanned in from every agent this daemon is running. It is what turns a
+	// claimed item from `state=claimed head=` into a unit somebody can watch.
+	// Nil leaves every session's timeline empty and `watching` false, which is
+	// the truthful answer for a daemon nothing reports to.
+	Live *control.Live
 	// UI, when set, is served at / with SPA fallback: a path that is not a
 	// file gets index.html, so the router's deep links work on refresh.
 	UI fs.FS
@@ -103,12 +115,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/items", s.items)
 	mux.HandleFunc("GET /v1/items/{id}", s.item)
 	mux.HandleFunc("GET /v1/items/{id}/evidence", s.itemEvidence)
+	mux.HandleFunc("GET /v1/items/{id}/session", s.session)
+	mux.HandleFunc("GET /v1/sessions", s.sessions)
 	mux.HandleFunc("GET /v1/provenance/{sha}", s.provenance)
 	mux.HandleFunc("GET /v1/activity", s.activity)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/ingress", s.openIngress)
 	mux.HandleFunc("POST /v1/stop", s.stop)
 	mux.HandleFunc("POST /v1/resume", s.resume)
+	mux.HandleFunc("POST /v1/items/{id}/resolve", s.resolve)
+	mux.HandleFunc("POST /v1/items/{id}/retry", s.retry)
 	mux.HandleFunc("POST /v1/reload", s.reload)
 	if s.UI != nil {
 		files := http.FileServerFS(s.UI)
@@ -143,6 +159,13 @@ func (s *Server) actor(r *http.Request) string {
 	return "local-operator"
 }
 
+// room is this request's control surface, carrying the server's objective so
+// every reader measures the queue against the same number.
+func (s *Server) room(r *http.Request) *control.Room {
+	return &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r),
+		Objective: s.Objective, Live: s.Live}
+}
+
 // Status is /v1/status.
 type Status struct {
 	Tenant     tenant.ID `json:"tenant"`
@@ -154,6 +177,15 @@ type Status struct {
 	UptimeSec  int64     `json:"uptime_sec"`
 	Routes     []string  `json:"routes"`
 	Version    string    `json:"version"`
+	// ExceptionQueue is the count's missing half: how old the oldest parked
+	// item is, and whether that clears the objective. A count alone cannot
+	// distinguish a queue being worked from one nobody has opened in a week.
+	ExceptionQueue control.ExceptionHealth `json:"exception_queue"`
+	// Backlog is where Pending comes from: the listing at GET /v1/items,
+	// counted. Both numbers are folds of the same rows rather than a counter
+	// beside a listing, so "pending=14" and the fourteen units it names cannot
+	// come apart — and the state breakdown says which fourteen.
+	Backlog control.Backlog `json:"backlog"`
 	// Spend is the capacity window's account. Nil when the server was wired
 	// without a meter; absent rather than zero, because a zero here would
 	// read as "nothing spent" when it means "nobody asked".
@@ -167,31 +199,29 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 500, err.Error())
 		return
 	}
-	pending, exceptions := 0, 0
-	seen := map[string]bool{}
-	for rec, err := range s.Store.Log().Since(ctx, s.Tenant, "index/pending", 1) {
-		if err != nil {
-			httpErr(w, 500, err.Error())
-			return
-		}
-		if seen[rec.Subject] {
-			continue
-		}
-		seen[rec.Subject] = true
-		item, err := s.Queue.Load(ctx, s.Tenant, rec.Subject)
-		if err != nil {
-			continue
-		}
-		switch item.State {
-		case queue.StatePending, queue.StateWaiting:
-			pending++
-		case queue.StateParked:
-			exceptions++
-		}
+	// Both counts come from the room rather than a fold apiece here: two
+	// places counting the same thing is two places that can disagree, and the
+	// room is the one that also knows how old the oldest parked item is and
+	// which states its pending number is made of.
+	//
+	// Pending used to be counted here, by its own walk of index/pending with
+	// its own copy of the not-yet-settled vocabulary. It agreed with the
+	// listing by coincidence of two switches matching, which is the agreement
+	// that lasts exactly until a state is added to one of them.
+	backlog, err := s.room(r).Backlog(ctx)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	health, err := s.room(r).ExceptionHealth(ctx)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
 	}
 	st := Status{
 		Tenant: s.Tenant, Box: s.Box, Runner: s.Runner, Stopped: stopped,
-		Pending: pending, Exceptions: exceptions,
+		Pending: backlog.Pending, Backlog: backlog,
+		Exceptions: health.Parked, ExceptionQueue: health,
 		UptimeSec: int64(time.Since(s.Started).Seconds()), Routes: s.routeNames(),
 		Version: version.String(),
 	}
@@ -208,6 +238,14 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 // The listing verb the surface never had: `pending=14` was the whole view
 // into the queue, and /v1/items/{id} needs an id you could only know from the
 // submit response you kept.
+//
+// Every row carries the frontier as well as the state — whether the item is
+// ready to claim, which declared dependencies have not settled, which item a
+// cascade started at, and who holds the claim with how much lease left. There
+// is deliberately no `?ready=` filter beside `?state=`: the frontier is a
+// projection over the same rows, and a caller narrowing to it would lose the
+// contrast — a lane of five ready items is only alarming next to the fact
+// that nothing is claimed.
 func (s *Server) items(w http.ResponseWriter, r *http.Request) {
 	var states []queue.State
 	for _, v := range r.URL.Query()["state"] {
@@ -217,8 +255,7 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	room := &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r)}
-	out, err := room.Queue(r.Context(), states...)
+	out, err := s.room(r).Queue(r.Context(), states...)
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
@@ -229,14 +266,48 @@ func (s *Server) items(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+// exceptions lists what still needs a person, loudest and oldest first, each
+// row carrying its age and how many times somebody has already been told.
 func (s *Server) exceptions(w http.ResponseWriter, r *http.Request) {
-	room := &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r)}
-	items, err := room.Exceptions(r.Context())
+	items, err := s.room(r).Exceptions(r.Context())
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
 	}
+	if items == nil {
+		items = []control.Exception{}
+	}
 	writeJSON(w, items)
+}
+
+// sessions is the per-unit live view: one entry per RUNNING unit, each with
+// its own identity, its own progress, and its own timeline.
+//
+// A collection rather than a merged feed, because fan-out is the case that
+// breaks a feed. Several units in flight interleave into one stream that
+// reads as noise, and the question an operator has — is THIS unit moving —
+// cannot be answered by scrolling. One entry per unit answers it per unit.
+func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
+	out, err := s.room(r).Sessions(r.Context())
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if out == nil {
+		out = []control.Session{}
+	}
+	writeJSON(w, out)
+}
+
+// session is one unit's card, whatever its state: an operator following a
+// link wants to be told the run settled, not shown an empty page.
+func (s *Server) session(w http.ResponseWriter, r *http.Request) {
+	out, err := s.room(r).Session(r.Context(), r.PathValue("id"))
+	if err != nil {
+		httpErr(w, 404, err.Error())
+		return
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) item(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +381,36 @@ type ControlRequest struct {
 
 func (s *Server) stop(w http.ResponseWriter, r *http.Request)   { s.control(w, r, s.Queue.Stop) }
 func (s *Server) resume(w http.ResponseWriter, r *http.Request) { s.control(w, r, s.Queue.Resume) }
+
+// resolve and retry are the two ways off the exception queue, and the only
+// endpoints on this surface that change an item rather than record an intent
+// for the pump to act on. That is deliberate: the pump is the only thing that
+// may START work, but an exception is by definition work the pump has already
+// given up on, and asking it to also be the path back would mean an operator
+// could not clear a queue the pump had stopped draining.
+func (s *Server) resolve(w http.ResponseWriter, r *http.Request) { s.reopen(w, r, s.Queue.Resolve) }
+func (s *Server) retry(w http.ResponseWriter, r *http.Request)   { s.reopen(w, r, s.Queue.Retry) }
+
+func (s *Server) reopen(w http.ResponseWriter, r *http.Request,
+	f func(context.Context, tenant.ID, string, string, string) (queue.WorkItem, error)) {
+	var req ControlRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		httpErr(w, http.StatusBadRequest, "a JSON body with a reason is required")
+		return
+	}
+	item, err := f(r.Context(), s.Tenant, r.PathValue("id"), s.actor(r), req.Reason)
+	switch {
+	case errors.Is(err, queue.ErrNoItem):
+		httpErr(w, http.StatusNotFound, err.Error())
+	case err != nil:
+		// A wrong-state reopen is the caller's mistake, not the server's: the
+		// item moved under them, which is exactly what an operator racing a
+		// runner needs told rather than retried.
+		httpErr(w, http.StatusConflict, err.Error())
+	default:
+		writeJSON(w, item)
+	}
+}
 
 func (s *Server) control(w http.ResponseWriter, r *http.Request, f func(context.Context, tenant.ID, string, string) error) {
 	var req ControlRequest

@@ -184,6 +184,33 @@ func (l *leaser) Acquire(ctx context.Context, req forge.LeaseRequest) (forge.Lea
 	return out, err
 }
 
+// Inspect reads the outstanding grant. A released row (held=0) reports no
+// lease; an unsuperseded row past its deadline still reports one, because the
+// caller asked who holds it and not whether it could take it — see the
+// interface contract.
+func (l *leaser) Inspect(ctx context.Context, t tenant.ID, repo, ref string) (forge.Lease, bool, error) {
+	if err := t.Validate(); err != nil {
+		return forge.Lease{}, false, err
+	}
+	var runner, run string
+	var token, held, expNS int64
+	err := l.s.r.QueryRowContext(ctx,
+		`SELECT runner, run, token, held, expires_ns FROM leases WHERE tenant=? AND repo=? AND ref=?`,
+		string(t), repo, ref).Scan(&runner, &run, &token, &held, &expNS)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return forge.Lease{}, false, nil
+	case err != nil:
+		return forge.Lease{}, false, err
+	case held == 0:
+		return forge.Lease{}, false, nil
+	}
+	return forge.Lease{
+		Tenant: t, Repo: repo, Ref: ref, Runner: runner, Run: run,
+		Token: forge.Token(token), Expires: time.Unix(0, expNS).UTC(),
+	}, true, nil
+}
+
 // Preempt supersedes whatever claim exists; see the interface contract for
 // why no authority check lives here.
 func (l *leaser) Preempt(ctx context.Context, req forge.LeaseRequest) (forge.Lease, error) {

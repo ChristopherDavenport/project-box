@@ -2,6 +2,8 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -52,10 +54,25 @@ func rig(t *testing.T, scenario string) (*sqlite.Store, *loop.Loop, *ingress.Sto
 	mustSh(t, seedDir, "git", "push", "origin", "HEAD:refs/heads/main")
 
 	repo := forge.Repo{Name: "app", Remote: remote, Role: forge.RoleService, DefaultBranch: "main"}
-	m, err := gitforge.NewMirror(t.TempDir(), btn, s.Leaser("runner-1"))
+	mirrorRoot := t.TempDir()
+	m, err := gitforge.NewMirror(mirrorRoot, btn, s.Leaser("runner-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A materialized context set is 0555 all the way down, and a 0555 directory
+	// denies the unlink — so t.TempDir's own cleanup fails on it and reports a
+	// permission error that has nothing to do with the test. Production reclaims
+	// these through RemoveContext, which restores write on the way down for
+	// exactly this reason; cleanups run last-registered-first, so this one runs
+	// before the removal it is clearing the way for.
+	t.Cleanup(func() {
+		filepath.WalkDir(mirrorRoot, func(p string, d fs.DirEntry, err error) error {
+			if err == nil && d.IsDir() {
+				os.Chmod(p, 0o755)
+			}
+			return nil
+		})
+	})
 	if err := m.Fetch(context.Background(), repo); err != nil {
 		t.Fatal(err)
 	}
@@ -176,6 +193,107 @@ func TestAgentEscalationParksAttributed(t *testing.T) {
 	}
 }
 
+// TestRepairWakesWithTheAttemptBeforeIt is issue #11's property: a repair
+// run's bundle carries its predecessor's handoff, and its agentref differs
+// from the same repair with no predecessor.
+//
+// The second half is what makes the first auditable. Repair opens through a
+// route as new work, so without this the repair agent wakes cold and the
+// record cannot say otherwise; carried as a layer, "this run was woken
+// knowing X" is answerable from the digest afterwards, exactly the way seat
+// continuity is.
+func TestRepairWakesWithTheAttemptBeforeIt(t *testing.T) {
+	s, lp, router, st, _ := rig(t, "worker")
+	ctx := context.Background()
+
+	// The run that went red. It lands, and it hands off what it learned.
+	first := runItem(t, s, lp, router, "issue-prior", "add the widget package")
+	if first.State != queue.StateDone {
+		t.Fatalf("the predecessor did not land: %+v", first)
+	}
+
+	// What the repair would wake with if all it had were the seat: the same
+	// continuity, and no account of the attempt it follows. This is the
+	// control, captured before the repair adds its own notes to the seat.
+	wake, ok, err := st.WakeLayer(ctx, 8)
+	if err != nil || !ok {
+		t.Fatalf("wake: ok=%v err=%v", ok, err)
+	}
+	task := "fix the red on main"
+	cold, err := (&agent.Composer{Source: layers()}).Resolve(ctx, agent.Request{
+		Tenant: btn, Role: agent.RoleBuilder, Box: "shop", Repo: "app",
+		Task: task, Extra: []agent.Layer{wake},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The repair the factory opens for that red, carrying the attempt.
+	lp.Builder.(*Builder).Env = []string{"ACP_FAKE=repair"}
+	prior := &agent.Prior{
+		Run: first.ID, Repo: "app", Branch: "main", Sha: first.Head,
+		Checks: []string{"check"}, Reason: "check: fail (widget defaults to green)",
+	}
+	ing, _, err := router.Open(ctx, ingress.Route{
+		Name: "red-main", Kind: ingress.RouteRedMain, Opens: ingress.KindIssue,
+		Box: "shop", Repo: "app", Requester: "gargoyle",
+	}, ingress.Delivery{Key: "red-" + first.Head, Payload: []byte(task), Prior: prior})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: s, Runner: "runner-1", TTL: time.Hour}
+	repair, err := q.Submit(ctx, loop.ItemFor(ing, "wi-repair", task))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repair, err = lp.Run(ctx, repair); err != nil {
+		t.Fatal(err)
+	}
+	if repair.State != queue.StateDone {
+		t.Fatalf("the repair did not land: %+v", repair)
+	}
+
+	// What the repair was actually sent, from the record rather than from
+	// this test's idea of it.
+	var sent promptRecord
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-repair", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "agent-prompt" {
+			if err := json.Unmarshal(r.Body, &sent); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if sent.AgentRef == "" {
+		t.Fatal("no prompt on the repair's record")
+	}
+	if !strings.Contains(sent.Bundle, "prior-attempt") {
+		t.Fatalf("the bundle does not carry a prior-attempt layer:\n%s", sent.Bundle)
+	}
+	_, carried, found := strings.Cut(sent.Prompt, "## The attempt before this one")
+	if !found {
+		t.Fatalf("the repair woke with no account of what preceded it:\n%s", sent.Prompt)
+	}
+	for _, want := range []string{
+		first.ID,                   // whose attempt it was
+		first.Head,                 // the sha that went red
+		"main",                     // the branch that still carries it
+		"widget defaults to green", // what the check said
+		"expects blue",             // and the predecessor's own handoff
+	} {
+		if !strings.Contains(carried, want) {
+			t.Fatalf("the carried attempt lost %q:\n%s", want, carried)
+		}
+	}
+	// The same repair woken with continuity alone is a different agent, and
+	// the agentref is where that difference is legible.
+	if sent.AgentRef == cold.Ref {
+		t.Fatal("carrying the prior attempt left no trace in the agentref")
+	}
+}
+
 func mustSh(t *testing.T, dir, name string, args ...string) string {
 	t.Helper()
 	cmd := exec.Command(name, args...)
@@ -218,5 +336,96 @@ func TestTheRecordSaysWhichToolsRan(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Fatalf("agent-result missing %s:\n%s", want, body)
 		}
+	}
+}
+
+// TestTheEnvelopeInForceIsOnTheRecord is issue #17's record property, run
+// through the whole loop rather than at the resolver.
+//
+// "This run was permitted to see class X and ran against endpoint Y" is the
+// question a vendor-management or data-handling review asks, and it is
+// unanswerable for any run that does not carry it. Both halves are here: the
+// envelope on the chain, and — the half that costs nothing because the bundle
+// is already content-addressed — a different envelope being a different agent.
+func TestTheEnvelopeInForceIsOnTheRecord(t *testing.T) {
+	// One classified run, start to landing, reporting what its agent-run
+	// record said. A fresh rig per envelope, because the same agent making the
+	// same change twice against one remote changes nothing the second time —
+	// and a run that changed nothing is an error here, correctly.
+	run := func(t *testing.T, readable []agent.Class) (ref, envelope string) {
+		t.Helper()
+		s, lp, router, _, _ := rig(t, "worker")
+		b := lp.Builder.(*Builder)
+		ls := layers()
+		ls[0].Model = "vendor-inregion"
+		b.Composer = &agent.Composer{Source: ls, Ceiling: &agent.Envelope{
+			Endpoints: []string{"vendor-inregion"},
+			Context:   readable,
+			Payload:   agent.PayloadText,
+		}}
+		// What the origination declared. Nothing in box.yaml sets this: it
+		// belongs on the governed kind declaration, which does not exist yet.
+		b.Envelope = &agent.Envelope{
+			Class: "embargoed", Endpoints: []string{"vendor-inregion", "kb"},
+			Context: readable, Payload: agent.PayloadText,
+		}
+
+		item := runItem(t, s, lp, router, "issue-class", "add the widget package")
+		if item.State != queue.StateDone {
+			t.Fatalf("classified item: %+v", item)
+		}
+		var rec struct {
+			AgentRef string `json:"agentref"`
+			Envelope string `json:"envelope"`
+		}
+		for r, err := range s.Log().Since(context.Background(), btn, "workitem/wi-issue-class", 1) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Kind == "agent-run" {
+				if err := json.Unmarshal(r.Body, &rec); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		return rec.AgentRef, rec.Envelope
+	}
+
+	ref, envelope := run(t, []agent.Class{"embargoed"})
+	// The intersection is what is recorded, not the declaration: the run was
+	// permitted one endpoint, and "kb" never reached it.
+	want := "class=embargoed endpoints=[vendor-inregion] context=[embargoed] redaction=all payload=text"
+	if envelope != want {
+		t.Fatalf("envelope on the record = %q, want %q", envelope, want)
+	}
+
+	// The same work under a wider envelope is a different agent on the record.
+	widerRef, wider := run(t, []agent.Class{"embargoed", "public"})
+	if wider == envelope {
+		t.Fatalf("a widened envelope recorded identically: %q", wider)
+	}
+	if widerRef == "" || widerRef == ref {
+		t.Fatalf("a widened envelope did not change the agentref (%q)", widerRef)
+	}
+}
+
+// TestUnclassifiedWorkNeverReachesAnAgent is the fail-closed half at the
+// loop's own boundary: a Box that declares a ceiling and work that declares no
+// envelope parks before a token is spent. Unclassified is the state every
+// mis-scoped request arrives in, so it is the state that has to be safe.
+func TestUnclassifiedWorkNeverReachesAnAgent(t *testing.T) {
+	s, lp, router, _, remote := rig(t, "worker")
+	b := lp.Builder.(*Builder)
+	b.Composer = &agent.Composer{Source: layers(), Ceiling: &agent.Envelope{
+		Endpoints: []string{"vendor-inregion"}, Context: []agent.Class{"embargoed"}, Payload: agent.PayloadText,
+	}}
+	b.Envelope = nil // the mis-scoped request
+
+	item := runItem(t, s, lp, router, "issue-unclassified", "add the widget package")
+	if item.State != queue.StateParked || !strings.Contains(item.Note, "unclassified is refused") {
+		t.Fatalf("unclassified work was not refused: %+v", item)
+	}
+	if out := mustSh(t, remote, "git", "rev-list", "--count", "refs/heads/main"); strings.TrimSpace(out) != "1" {
+		t.Fatal("unclassified work moved the remote")
 	}
 }

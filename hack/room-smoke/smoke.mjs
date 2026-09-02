@@ -31,6 +31,16 @@ await page.waitForSelector('text=index/landings', { timeout: 30000 }); // the la
 await page.screenshot({ path: out('3-dashboard-after-work.png') });
 console.log('dashboard: the landed work arrived on the live feed');
 
+// 3b. Sessions: the per-unit live view. This box builds with a shell command
+// and never feeds the live bus, so the assertion worth making here is the
+// HONEST-SILENCE one — a card with no stream must say so rather than render
+// as an agent sitting idle. Seeing a timeline needs a real ACP agent, which
+// is the dogfood box's job (hack/dogfood), not this smoke's.
+await page.click('nav >> text=Sessions');
+await page.waitForSelector('text=/No unit is running|in stage|No live stream here/', { timeout: 15000 });
+await page.screenshot({ path: out('3b-sessions.png') });
+console.log('sessions: the per-unit view rendered');
+
 // 4. Hot reload: a second repo appears in the running daemon...
 const res = await page.request.post(`${BASE}/v1/reload`, { headers: { Authorization: `Bearer ${TOKEN}` } });
 if (!res.ok()) throw new Error('reload failed: ' + await res.text());

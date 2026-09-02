@@ -35,6 +35,8 @@ export const getItem = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent
 export const getItemEvidence = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/evidence`, signal);
 export const getProvenance = (sha, signal) => fetchJSON(`/v1/provenance/${encodeURIComponent(sha)}`, signal);
 export const getActivity = (signal) => fetchJSON('/v1/activity', signal);
+export const getSessions = (signal) => fetchJSON('/v1/sessions', signal);
+export const getSession = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/session`, signal);
 export const openIngress = (route, key, payload) => req('POST', '/v1/ingress', { route, key, payload });
 export const stop = (reason) => req('POST', '/v1/stop', { reason });
 export const resume = (reason) => req('POST', '/v1/resume', { reason });

@@ -32,6 +32,19 @@ func TestLiveClaudeAgentBuilds(t *testing.T) {
 	b := lp.Builder.(*Builder)
 	b.Command = []string{bin}
 	b.Env = nil // the real agent needs the real environment, auth included
+	// The only place a REAL agent's frames can be captured, which is what
+	// makes the pinned dialect refreshable rather than hand-maintained: set
+	// BOX_ACP_TRANSCRIPT and diff the result against testdata/. Off unless
+	// asked — a transcript carries the prompt and the agent's output.
+	if path := os.Getenv("BOX_ACP_TRANSCRIPT"); path != "" {
+		tape, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tape.Close()
+		b.Transcript = tape
+		t.Logf("recording the protocol transcript to %s", path)
+	}
 	// No denies for the live run: title formats differ between harnesses,
 	// and a mistaken title match would kill a paid session. The fake-agent
 	// suite owns the enforcement coverage.

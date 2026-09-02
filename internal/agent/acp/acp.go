@@ -25,6 +25,7 @@ import (
 	"sync"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
+	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
 	"github.com/ChristopherDavenport/project-box/internal/telemetry"
 )
 
@@ -46,6 +47,22 @@ var ErrPolicyViolation = errors.New("acp: denied tool appeared on the stream —
 // stream whose denied tools may never be recognised at all.
 var ErrProtocolDialect = errors.New("acp: agent speaks a protocol version this runtime does not")
 
+// ErrTokenCeiling reports that a single run spent past its per-run bound and
+// was killed at the stream.
+//
+// The window budget could not do this. [capacity.Meter.Acquire] is a gate on
+// STARTING a run: it asks whether the window has room and then has no further
+// say, so the ceiling it enforces is really "the limit, plus whatever one run
+// can spend before it stops on its own". Measured, that was not a rounding
+// error — a 6,000,000-token window was carried to 25,419,130 by one session
+// that ran 110 tool calls for 21 minutes and cost $13.60. It broke no rule;
+// there was no rule to break.
+//
+// So the bound belongs where the spend is visible as it happens, which is the
+// same place tool policy is enforced and for the same reason: the stream is
+// the only vantage point that exists while the run is still running.
+var ErrTokenCeiling = errors.New("acp: run exceeded its token ceiling — session killed")
+
 // protocolVersion is the dialect this runtime is written against, offered at
 // initialize and required back. Bump it only together with the update shapes
 // below.
@@ -58,6 +75,53 @@ var knownUpdates = []string{
 	"tool_call", "tool_call_update", "agent_message_chunk", "agent_thought_chunk",
 	"user_message_chunk", "plan", "available_commands_update", "current_mode_update",
 	"usage_update",
+}
+
+// UpdateKind names what the stream said an agent did. The set is closed and
+// small on purpose: a live view is a timeline, not a log dump, and every kind
+// here is something an operator can act on.
+type UpdateKind string
+
+const (
+	// UpdateStarted is the run beginning. Emitted by [Builder] rather than by
+	// the stream, and worth its own kind for a reason beyond tidiness: it is
+	// what makes an empty timeline mean "this agent has done nothing yet"
+	// instead of "nobody here is watching this run".
+	UpdateStarted UpdateKind = "started"
+	// UpdateMessage is what the agent said — the run of message chunks that
+	// preceded whatever it did next.
+	UpdateMessage UpdateKind = "message"
+	// UpdateTool is one distinct tool call, deduped by call id exactly as the
+	// settled tally is.
+	UpdateTool UpdateKind = "tool"
+	// UpdateDenied is a permission request policy refused at the stream.
+	UpdateDenied UpdateKind = "denied"
+	// UpdateEscalate and UpdateHandoff are the box verbs, carrying the agent's
+	// own reason.
+	UpdateEscalate UpdateKind = "escalate"
+	UpdateHandoff  UpdateKind = "handoff"
+)
+
+// Update is one thing that happened on the stream, reported WHILE it is
+// happening.
+//
+// The Result below is the same run's account, and it is only available once
+// the run is over. That is the whole gap: an agent run is minutes to tens of
+// minutes, and for all of it the only thing anybody outside could learn was
+// that the item was claimed. These are the same facts, earlier — the ones
+// carried here are carried in Result too, so a viewer that watched a run live
+// and an auditor that reads the chain afterwards are told the same story.
+type Update struct {
+	Kind UpdateKind
+	// Tool is the call's name for UpdateTool and UpdateDenied, empty exactly
+	// when the dialect gave nothing to match on — which is a fact about
+	// enforcement and must not be papered over with a placeholder here.
+	Tool string
+	// Text is the agent's message for UpdateMessage, and the handoff's notes
+	// for UpdateHandoff.
+	Text string
+	// Reason is the agent's own words for the two box verbs.
+	Reason string
 }
 
 // Usage is what a run cost, as the agent reported it.
@@ -100,27 +164,84 @@ func (u *Usage) add(w wireUsage) {
 	u.Reported = true
 }
 
-// WorkspacePlaceholder is replaced with the workspace path everywhere it
-// appears in a [Runtime.Command].
-//
-// Runner confinement is a wrapper around the agent, and every wrapper worth
-// having needs to be told which directory to let through — `docker run -v`,
-// `sandbox-exec` with a path parameter. The workspace path is chosen per run,
-// so the argv cannot name it and has to be given a place to put it.
-const WorkspacePlaceholder = "{{workspace}}"
-
 // Runtime runs one agent process per call.
 type Runtime struct {
 	// Command is the agent argv, e.g. {"claude-agent-acp"}, optionally with a
-	// confining wrapper in front of it; [WorkspacePlaceholder] is substituted
-	// throughout. The permission mode the resolver chose is applied through
-	// the protocol's session/set_mode after session/new — no flags, and
-	// fail-closed: an agent that refuses the mode does not get a prompt.
+	// confining wrapper in front of it; [confine.WorkspacePlaceholder] and
+	// [confine.ContextPlaceholder] are substituted throughout. The permission
+	// mode the resolver chose is applied through the protocol's
+	// session/set_mode after session/new — no flags, and fail-closed: an agent
+	// that refuses the mode does not get a prompt.
 	Command []string
 	// Dir is the working directory for the agent process: the workspace.
 	Dir string
+	// ContextDir is the run's materialized context set, which a confining
+	// wrapper must be told about or it confines the agent out of its own
+	// granted reading material. Empty is only valid for an argv that never
+	// names the placeholder; [confine.Substitute] refuses the other case
+	// rather than mounting nothing under a name that promised something.
+	ContextDir string
 	// Env is appended to the inherited environment.
 	Env []string
+	// MaxTokens bounds what ONE run may spend before the session is killed;
+	// zero means unbounded. See [ErrTokenCeiling] for why the window budget
+	// cannot express this.
+	//
+	// Enforced against the stream's running total, so it binds only as
+	// tightly as the agent reports: an adapter that says nothing until the
+	// end cannot be stopped in the middle by anything short of a clock, which
+	// is what build_timeout is for.
+	MaxTokens int64
+	// Transcript, when set, receives every frame that crosses the wire in
+	// either direction, one JSON object per line: {"from":…,"frame":…}.
+	//
+	// This is how the pinned dialect is refreshed. The shapes below are
+	// asserted by replaying a recorded transcript (see testdata/), and a pin
+	// nobody can re-record is one that rots into fiction — which would repeat
+	// the failure it exists to catch, since the last drift was found by a
+	// human reading a column of zeros rather than by anything in this package.
+	// Recording is off by default: a transcript carries the prompt and the
+	// agent's output, so it is run material, not a log.
+	Transcript io.Writer
+	// Progress, when set, receives the run's [Update]s as the stream produces
+	// them. Nil is the default and costs nothing.
+	//
+	// This is the fan-in a live view needs and nothing else here provides. The
+	// Transcript above is the whole wire and is off by default because it is
+	// run material; the Result is complete and arrives only at the end. In
+	// between, the stream is the only thing that knows what the agent is doing,
+	// and it knew it the whole time.
+	//
+	// Called with the runtime's lock held so that a message and the action it
+	// preceded cannot arrive out of order. It must therefore not block: hand
+	// off to a buffer, never to a network.
+	Progress func(Update)
+	// SkillsDir is where this run's skills are materialized as a generated
+	// plugin, beside the workspace. Set for every run whether or not the
+	// bundle granted any, because it is the third path a confining wrapper is
+	// told to let through — see [confine.SkillsPlaceholder].
+	SkillsDir string
+	// LoadedSkills is SkillsDir when something was actually written there, and
+	// empty otherwise.
+	//
+	// Two fields rather than one because the two questions differ: the wrapper
+	// needs a path that always exists, and the harness needs a plugin
+	// directory that actually contains a manifest. Handing it an empty
+	// directory would fail the load for a bundle that granted nothing, which
+	// is the one case where nothing is the right answer.
+	LoadedSkills string
+	// InheritSettings keeps the harness's own configuration sources in play —
+	// the machine's enabled plugins, its environment block, its permissions.
+	//
+	// True is the live-inheritance posture: whatever the operator has enabled
+	// in the harness reaches the next build with no reload, which is usually
+	// what somebody dogfooding their own factory wants. False makes the bundle
+	// the sole authority: only [agent.Bundle.Plugins] load, and the CLAUDE.md
+	// discovery that needs project scope is all that survives.
+	//
+	// Either way the plugin set is RECORDED, because the resolver reads the
+	// same files the harness will. Inheriting is not the same as not knowing.
+	InheritSettings bool
 }
 
 // Result is what a completed run reports.
@@ -128,9 +249,20 @@ type Result struct {
 	StopReason string
 	// Text accumulates the agent's message chunks.
 	Text string
-	// ToolCalls lists every tool title that appeared on the stream, permitted
-	// or not, in order — the raw material for the run's telemetry.
+	// ToolCalls names every tool call that appeared on the stream, permitted
+	// or not, in order — the harness's stable tool name where the dialect
+	// gives one, the human title otherwise. See [sessionUpdate.tool] for why
+	// that preference matters to more than tidiness.
 	ToolCalls []string
+	// Unenforced counts tool calls that arrived with no name at all, and so
+	// were never matched against policy.
+	//
+	// A number rather than a flag, because the flag was already there and
+	// said nothing useful: "some calls could not be checked" is a caveat an
+	// operator scrolls past, and "91 of 232 could not be" is the reason to
+	// stop and fix the dialect. Non-zero means enforcement had a hole of
+	// exactly this size.
+	Unenforced int
 	// Denied lists permission requests refused by policy.
 	Denied []string
 	// Escalated carries the agent's own reason for declining or escalating
@@ -138,6 +270,16 @@ type Result struct {
 	// act, not a contrived failure: the caller parks the work with this
 	// reason attributed to the agent.
 	Escalated string
+	// HandedOff carries the agent's own reason for asking mid-run for a fresh
+	// session — the "_box/handoff" extension verb. Distinct from Escalated in
+	// the way that matters to the caller: an escalation wants a person and
+	// this wants nothing but another session, so the work goes back to the
+	// queue rather than into the exception queue.
+	HandedOff string
+	// HandoffNotes are what the session wants its successor to know, from the
+	// verb's notes parameter. They reach the seat AT THE HANDOFF rather than
+	// at settle, because the item does not settle.
+	HandoffNotes []string
 	// Usage is what the run cost, when the agent said. Silence is carried as
 	// Usage.Reported false, never as a zero total.
 	Usage Usage
@@ -160,9 +302,9 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	argv := make([]string, len(rt.Command))
-	for i, a := range rt.Command {
-		argv[i] = strings.ReplaceAll(a, WorkspacePlaceholder, rt.Dir)
+	argv, err := confine.Substitute(rt.Command, rt.Dir, rt.ContextDir, rt.SkillsDir)
+	if err != nil {
+		return Result{}, err
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = rt.Dir
@@ -184,9 +326,10 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	}()
 
 	var (
-		mu       sync.Mutex
-		res      Result
-		violated error
+		mu        sync.Mutex
+		res       Result
+		violated  error
+		overspent error
 		// streamed accumulates per-update usage. The prompt result wins when
 		// it carries a total of its own; summing both would double-count.
 		streamed Usage
@@ -194,7 +337,31 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		// tool_call_update. Keying on the call id rather than the shape is
 		// what keeps the count right when a dialect prefers one spelling.
 		seenCalls = map[string]bool{}
+		// flushed is how much of res.Text has already gone out as progress. A
+		// cursor rather than a second buffer, so the live account cannot drift
+		// from the settled one.
+		flushed int
 	)
+	// flush releases the message the agent has written since its last action.
+	// Chunk-by-chunk would be a log dump — hundreds of frames a second saying
+	// nothing on their own — and waiting for the run to end would be no live
+	// view at all. What it said, then what it did, is the rhythm an operator
+	// actually reads. Callers hold mu.
+	flush := func() {
+		if rt.Progress != nil && flushed < len(res.Text) {
+			rt.Progress(Update{Kind: UpdateMessage, Text: res.Text[flushed:]})
+		}
+		flushed = len(res.Text)
+	}
+	// emit reports one action, after whatever the agent said leading up to it.
+	// Callers hold mu.
+	emit := func(u Update) {
+		if rt.Progress == nil {
+			return
+		}
+		flush()
+		rt.Progress(u)
+	}
 	conn := newConn(stdin, stdout, func(method string, params json.RawMessage) (any, error) {
 		switch method {
 		case "session/request_permission":
@@ -207,6 +374,10 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			mu.Lock()
 			if !ok {
 				res.Denied = append(res.Denied, p.ToolCall.Title)
+				// Only the refusal, so that the live account and Result agree
+				// exactly: a permitted ask announces itself as a tool_call too,
+				// and emitting here as well would count it twice.
+				emit(Update{Kind: UpdateDenied, Tool: p.ToolCall.Title})
 			}
 			mu.Unlock()
 			return permissionResponse(p, ok, reason), nil
@@ -222,6 +393,35 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			}
 			mu.Lock()
 			res.Escalated = p.Reason
+			emit(Update{Kind: UpdateEscalate, Reason: p.Reason})
+			mu.Unlock()
+			return map[string]any{"acknowledged": true}, nil
+		case "_box/handoff":
+			// Extension verb: the agent is out of room and not out of work.
+			// Acknowledged always, for the reason escalate is — a channel that
+			// can be refused is one agents learn not to use, and the answer
+			// they fall back on is the degraded commit.
+			//
+			// Acknowledged, not obeyed here. Whether a fresh session is opened
+			// at all is the caller's decision and bounded by it; this end of
+			// the wire only carries the request.
+			var p struct {
+				Reason string `json:"reason"`
+				Notes  string `json:"notes"`
+			}
+			if err := json.Unmarshal(params, &p); err != nil {
+				return nil, err
+			}
+			mu.Lock()
+			if p.Reason == "" {
+				// Asked without saying why is still asked. Refusing the verb
+				// for want of prose would teach the same lesson as refusing it
+				// outright.
+				p.Reason = "no reason given"
+			}
+			res.HandedOff = p.Reason
+			res.HandoffNotes = append(res.HandoffNotes, noteLines(p.Notes)...)
+			emit(Update{Kind: UpdateHandoff, Reason: p.Reason, Text: p.Notes})
 			mu.Unlock()
 			return map[string]any{"acknowledged": true}, nil
 		case "session/update":
@@ -232,7 +432,15 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			if w := u.usage(); w != nil {
 				mu.Lock()
 				streamed.add(*w)
+				over := rt.MaxTokens > 0 && overspent == nil && streamed.Total() >= rt.MaxTokens
+				if over {
+					overspent = fmt.Errorf("%w: %d tokens against a ceiling of %d",
+						ErrTokenCeiling, streamed.Total(), rt.MaxTokens)
+				}
 				mu.Unlock()
+				if over {
+					cancel() // kills the process via CommandContext
+				}
 			}
 			if c := u.Update.Cost; c != nil && c.Currency == "USD" {
 				// Cumulative for the turn, so the last word wins; summing
@@ -246,31 +454,35 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				// Both spellings announce the same call, so the id decides
 				// whether it is new. A dialect that only ever sends the update
 				// form still gets counted, and still gets judged.
+				name := u.tool()
 				key := u.Update.ToolCallID
 				if key == "" {
-					key = u.Update.Title
+					key = name
 				}
 				mu.Lock()
 				first := !seenCalls[key]
 				seenCalls[key] = true
 				if first {
-					res.ToolCalls = append(res.ToolCalls, u.Update.Title)
-					if u.Update.Title == "" {
-						// Policy matches on the title. Without one there is
-						// nothing to match, so enforcement did not happen here
-						// and must not be reported as if it had.
-						res.noteUnknown("tool_call:untitled")
+					res.ToolCalls = append(res.ToolCalls, name)
+					emit(Update{Kind: UpdateTool, Tool: name})
+					if name == "" {
+						// Nothing to match on, so enforcement did not happen
+						// here and must not be reported as if it had. Counted,
+						// not merely noted: "some calls were unchecked" is a
+						// caveat, "91 of 232 were" is a finding.
+						res.Unenforced++
+						res.noteUnknown("tool_call:unnamed")
 					}
 				}
 				mu.Unlock()
-				if !first || u.Update.Title == "" {
+				if !first || name == "" {
 					break
 				}
-				if ok, _ := b.Tools.Permits(u.Update.Title); !ok {
-					telemetry.ToolCall(ctx, u.Update.Title, false)
+				if ok, _ := b.Tools.Permits(name); !ok {
+					telemetry.ToolCall(ctx, name, false)
 					// The agent is executing a denied tool without asking.
 					mu.Lock()
-					violated = fmt.Errorf("%w: %q", ErrPolicyViolation, u.Update.Title)
+					violated = fmt.Errorf("%w: %q", ErrPolicyViolation, name)
 					mu.Unlock()
 					cancel() // kills the process via CommandContext
 				}
@@ -290,6 +502,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			return nil, fmt.Errorf("acp: unhandled agent request %q", method)
 		}
 	})
+	conn.tape = rt.Transcript
 	go conn.serve()
 
 	var initRes struct {
@@ -315,6 +528,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	}
 	if err := conn.call(ctx, "session/new", map[string]any{
 		"cwd": rt.Dir, "mcpServers": []any{},
+		"_meta": map[string]any{"claudeCode": map[string]any{"options": rt.harnessOptions(b)}},
 	}, &newRes); err != nil {
 		return Result{}, fmt.Errorf("acp: session/new: %w", err)
 	}
@@ -339,6 +553,11 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 
 	mu.Lock()
 	defer mu.Unlock()
+	// Whatever the agent said after its last action. Without this a run that
+	// ends on a paragraph — an escalation explaining itself, a summary of what
+	// was changed — would have its closing words appear only once the item
+	// settled, which is the moment a live view stops being read.
+	flush()
 	// The turn's own total wins when it has one; otherwise the stream's
 	// increments are the best account there is. Summing both would bill the
 	// run twice.
@@ -361,11 +580,101 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	if violated != nil {
 		return res, violated
 	}
+	// Before the generic prompt error, which on this path is only ever the
+	// kill reporting itself. The usage rides the Result either way: a run
+	// stopped for spending too much is the last run whose cost may go
+	// unrecorded.
+	if overspent != nil {
+		return res, overspent
+	}
 	if err != nil {
 		return res, fmt.Errorf("acp: prompt: %w", err)
 	}
 	res.StopReason = promptRes.StopReason
 	return res, nil
+}
+
+// noteLines splits a handoff's notes into one claim per line. The verb takes
+// prose because that is what an agent has; the seat stores claims, and a wall
+// of text is one claim nobody can supersede or mark stale independently.
+func noteLines(s string) []string {
+	var out []string
+	for line := range strings.SplitSeq(s, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			out = append(out, line)
+		}
+	}
+	return out
+}
+
+// harnessOptions is the bundle's agentic surface in the shape the adapter
+// forwards to its harness: `_meta.claudeCode.options` on session/new, which
+// claude-agent-acp passes through to the underlying SDK.
+//
+// This is the seam that was missing. Bundle.Skills and Bundle.MCP have existed
+// since Phase 2 — resolved, merged, hashed into the agentref, rendered by
+// Explain — and were delivered nowhere: session/new went out with an empty
+// mcpServers array and no options at all, so a bundle could grant a skill and
+// the agent would never see it. Meanwhile the adapter's own default loaded the
+// machine's ENTIRE harness configuration, which is the opposite failure: the
+// factory recorded a set it did not deliver, and delivered a set it did not
+// record.
+//
+// strictMcpConfig is unconditional. It is the one option here that is a
+// security property rather than a preference: without it a plugin's own
+// .mcp.json is loaded with the plugin, so inheriting a machine's knowledge
+// means inheriting its credentials — an unattended builder holding live Jira,
+// Slack and GitHub write tools that no box asked for. With it, the only MCP
+// servers that exist are the ones [agent.Bundle.MCP] names, which is a
+// decision somebody made and evidence can show.
+func (rt *Runtime) harnessOptions(b agent.Bundle) map[string]any {
+	// Every plugin is loaded with skipMcpDiscovery, belt to strictMcpConfig's
+	// braces: one bounds what the session may connect to, the other bounds
+	// what the plugin loader even reads.
+	plugins := make([]map[string]any, 0, len(b.Plugins)+1)
+	if !rt.InheritSettings {
+		for _, p := range b.Plugins {
+			plugins = append(plugins, map[string]any{
+				"type": "local", "path": p.Path, "skipMcpDiscovery": !p.MCP,
+			})
+		}
+	}
+	if rt.LoadedSkills != "" {
+		plugins = append(plugins, map[string]any{
+			"type": "local", "path": rt.LoadedSkills, "skipMcpDiscovery": true,
+		})
+	}
+
+	mcp := map[string]any{}
+	for _, m := range b.MCP {
+		switch {
+		case m.URL != "":
+			mcp[m.Name] = map[string]any{"type": "http", "url": m.URL}
+		case len(m.Command) > 0:
+			mcp[m.Name] = map[string]any{
+				"type": "stdio", "command": m.Command[0], "args": m.Command[1:],
+			}
+		}
+	}
+
+	// project scope is not optional even in the locked-down posture: the SDK
+	// loads CLAUDE.md only when project settings are in play, and a builder
+	// that cannot read the repository's own conventions is a builder that will
+	// violate them.
+	sources := []string{"project"}
+	if rt.InheritSettings {
+		sources = []string{"user", "project", "local"}
+	}
+
+	opts := map[string]any{
+		"settingSources":  sources,
+		"strictMcpConfig": true,
+		"mcpServers":      mcp,
+	}
+	if len(plugins) > 0 {
+		opts["plugins"] = plugins
+	}
+	return opts
 }
 
 // noteUnknown records a dialect surprise once. Callers hold mu.
@@ -430,6 +739,19 @@ type sessionUpdate struct {
 	Meta *wireMeta `json:"_meta,omitempty"`
 }
 
+// tool names a call the way policy and the tally both want it named: the
+// harness's stable tool name when the dialect supplies one, the human title
+// otherwise, and empty when neither — which is a fact the caller must record
+// rather than paper over, because it means nothing was matched.
+func (u sessionUpdate) tool() string {
+	for _, m := range []*wireMeta{u.Update.Meta, u.Meta} {
+		if m != nil && m.ClaudeCode != nil && m.ClaudeCode.ToolName != "" {
+			return m.ClaudeCode.ToolName
+		}
+	}
+	return u.Update.Title
+}
+
 // usage finds a cost report on an update, at either of the two places the
 // dialect may hang it. Both spellings are part of the pinned dialect: an
 // agent that reports somewhere else reads as unmetered — loudly — rather
@@ -446,6 +768,22 @@ func (u sessionUpdate) usage() *wireUsage {
 
 type wireMeta struct {
 	Usage *wireUsage `json:"usage,omitempty"`
+	// ClaudeCode carries the harness's own account of a tool call. toolName is
+	// the STABLE identifier — "Bash", "Edit", "Read" — as against title, which
+	// is prose written for a human to read and for Bash is the whole command
+	// line.
+	//
+	// That distinction turned out to be the difference between a tool policy
+	// and a decoration. Permits is an exact match, so a deny list naming
+	// "Bash" never fired against a title of `cd /Users/... && find . -name
+	// '*.go'`, and the tally keyed on the same string grew a new entry per
+	// command — 46 "distinct tools" in one run of 53 calls. Meanwhile
+	// tool_call_update carries no title at all, and the enforcement path
+	// skipped those outright: measured across four real runs, 91 of 232 calls
+	// went unmatched for want of anything to match on.
+	ClaudeCode *struct {
+		ToolName string `json:"toolName"`
+	} `json:"claudeCode,omitempty"`
 }
 
 // wireUsage is the cost report as it appears on the wire, taken from the
@@ -487,9 +825,40 @@ type conn struct {
 	r       *bufio.Scanner
 	handler func(method string, params json.RawMessage) (any, error)
 
+	tapeMu sync.Mutex
+	tape   io.Writer
+
 	mu      sync.Mutex
 	nextID  int64
 	pending map[int64]chan rpcResult
+}
+
+// record writes one frame to the transcript in the direction it crossed.
+// Nothing else may write to the tape, so its own lock is enough.
+func (c *conn) record(from string, frame []byte) {
+	c.tapeMu.Lock()
+	defer c.tapeMu.Unlock()
+	if c.tape == nil {
+		return
+	}
+	// A frame that is not JSON is kept as text rather than dropped. serve
+	// skips malformed lines, so the transcript would otherwise be the one
+	// place a dialect emitting garbage looked clean.
+	e := struct {
+		From  string          `json:"from"`
+		Frame json.RawMessage `json:"frame,omitempty"`
+		Raw   string          `json:"raw,omitempty"`
+	}{From: from}
+	if json.Valid(frame) {
+		e.Frame = frame
+	} else {
+		e.Raw = string(frame)
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		return
+	}
+	c.tape.Write(append(line, '\n'))
 }
 
 type rpcResult struct {
@@ -528,6 +897,7 @@ func (c *conn) send(m rpcMessage) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	_, err = c.w.Write(append(b, '\n'))
+	c.record("client", b)
 	return err
 }
 
@@ -565,6 +935,7 @@ func (c *conn) serve() {
 		if len(line) == 0 {
 			continue
 		}
+		c.record("agent", line)
 		var m rpcMessage
 		if err := json.Unmarshal(line, &m); err != nil {
 			continue // a malformed line is the agent's bug; keep serving

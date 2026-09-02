@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/authz"
 	"github.com/ChristopherDavenport/project-box/internal/checks"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
@@ -669,15 +670,18 @@ func (s scripted) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, err
 }
 
 // optimistic reconfigures the test loop for the land-then-check lane and
-// counts how often repair is summoned.
-func optimistic(e *env) *int {
+// counts how often repair is summoned, keeping the attempt each summons
+// carried.
+func optimistic(e *env) (*int, *[]agent.Prior) {
 	reds := new(int)
+	priors := new([]agent.Prior)
 	e.loop.Lane = forge.LaneOptimistic
-	e.loop.Red = func(context.Context, queue.WorkItem, forge.Commit, string) (string, error) {
+	e.loop.Red = func(_ context.Context, _ queue.WorkItem, p agent.Prior) (string, error) {
 		*reds++
+		*priors = append(*priors, p)
 		return "ing-repair", nil
 	}
-	return reds
+	return reds, priors
 }
 
 func chainStatuses(t *testing.T, e *env, sha string) []checks.Status {
@@ -705,7 +709,7 @@ func chainStatuses(t *testing.T, e *env, sha string) []checks.Status {
 func TestFlakyRedIsRecordedNotRepaired(t *testing.T) {
 	e := setup(t, []string{"true"})
 	ctx := context.Background()
-	reds := optimistic(e)
+	reds, _ := optimistic(e)
 	calls := new(int)
 	e.loop.Gates = func(ws forge.Workspace) []forge.Gate {
 		return []forge.Gate{scripted{label: "post-land", calls: calls, step: func(n int) (forge.Verdict, error) {
@@ -751,7 +755,7 @@ func TestFlakyRedIsRecordedNotRepaired(t *testing.T) {
 func TestConfirmedRedOpensRepair(t *testing.T) {
 	e := setup(t, []string{"false"})
 	ctx := context.Background()
-	reds := optimistic(e)
+	reds, _ := optimistic(e)
 
 	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-red"})
 	if err != nil {
@@ -778,13 +782,96 @@ func TestConfirmedRedOpensRepair(t *testing.T) {
 	}
 }
 
+// TestRepairCarriesTheAttemptItFollows is issue #11: the summons is worth
+// answering. A repair opened for a red landing used to be an ordinary work
+// item — a reason as its task string and nothing else — so its agent started
+// cold and re-derived from the diff what the run before it already knew.
+//
+// The attempt now travels with the work: the run that made it, the sha, the
+// branch that still carries it (nothing rolled back), and which check
+// reported the red. It rides the ingress like the depth does, lands on the
+// item intake builds, and stays OUT of the task text — it resolves as a layer
+// at wake time, so the merge semantics stay explicit and the agentref moves
+// with what was carried.
+func TestRepairCarriesTheAttemptItFollows(t *testing.T) {
+	e := setup(t, []string{"false"})
+	ctx := context.Background()
+	e.loop.Lane = forge.LaneOptimistic
+	e.loop.Red = OpenRepair(e.router, ingress.Route{
+		Name: "red-main", Kind: ingress.RouteRedMain, Opens: ingress.KindIssue,
+		Box: "shop", Repo: "app", Requester: "gargoyle",
+	}, 0)
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-carry"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-carry", "break the build"))
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, repairID, found := strings.Cut(item.Note, "repair opened: ")
+	if !found {
+		t.Fatalf("no repair was opened: %+v", item)
+	}
+
+	head, err := e.store.Log().Head(ctx, tn, "ingress/"+repairID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var repair ingress.Ingress
+	if err := json.Unmarshal(head.Body, &repair); err != nil {
+		t.Fatal(err)
+	}
+	if repair.Prior == nil {
+		t.Fatal("the repair opened with no account of what preceded it")
+	}
+	p := *repair.Prior
+	if p.Run != "wi-carry" || p.Sha != item.Head || p.Repo != "app" || p.Branch != "main" {
+		t.Fatalf("the carried attempt does not describe the landing: %+v (head %s)", p, item.Head)
+	}
+	if !slices.Contains(p.Checks, "build-and-test") {
+		t.Fatalf("the carried attempt does not name what reported the red: %+v", p)
+	}
+	// The notes are deliberately not here: the predecessor had not settled
+	// when this was written, so its handoff did not exist yet. The successor
+	// resolves them at wake time, which is the reason this is a layer built
+	// then rather than a paragraph frozen now.
+	if len(p.Notes) != 0 {
+		t.Fatalf("notes were frozen at open time: %v", p.Notes)
+	}
+
+	// Intake's item inherits it, and the task text stays the reason alone.
+	ritem := ItemFor(repair, "wi-repair", repair.Note)
+	if ritem.Prior == nil || ritem.Prior.Sha != item.Head {
+		t.Fatalf("the attempt stopped at the ingress: %+v", ritem)
+	}
+	if strings.Contains(ritem.Task, item.Head) || strings.Contains(ritem.Task, "wi-carry") {
+		t.Fatalf("the carried attempt was concatenated into the task: %q", ritem.Task)
+	}
+	// And it survives the item's own chain, which is where the successor's
+	// resolver reads it from: the fold is the item.
+	if _, err := q.Submit(ctx, ritem); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := q.Load(ctx, tn, "wi-repair")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Prior == nil || stored.Prior.Run != "wi-carry" {
+		t.Fatalf("the attempt did not survive the item's chain: %+v", stored)
+	}
+}
+
 // TestUnconfirmedRedParksWithoutRepair: the confirming re-run could not
 // conclude. One red observed is a third state — the red stands on the chain,
 // nobody is summoned, and the item parks for a person.
 func TestUnconfirmedRedParksWithoutRepair(t *testing.T) {
 	e := setup(t, []string{"true"})
 	ctx := context.Background()
-	reds := optimistic(e)
+	reds, _ := optimistic(e)
 	calls := new(int)
 	e.loop.Gates = func(ws forge.Workspace) []forge.Gate {
 		return []forge.Gate{scripted{label: "post-land", calls: calls, step: func(n int) (forge.Verdict, error) {
@@ -833,7 +920,7 @@ func TestRepairChainIsBounded(t *testing.T) {
 		Opens: ingress.KindIssue, Box: "shop", Requester: "gargoyle"}
 	red := OpenRepair(e.router, route, 2)
 
-	id, err := red(ctx, queue.WorkItem{ID: "wi-0"}, "sha-a", "tests fail")
+	id, err := red(ctx, queue.WorkItem{ID: "wi-0"}, agent.Prior{Sha: "sha-a", Reason: "tests fail"})
 	if err != nil || id == "" {
 		t.Fatalf("the first repair should open: %q %v", id, err)
 	}
@@ -851,12 +938,12 @@ func TestRepairChainIsBounded(t *testing.T) {
 		t.Fatalf("repair opened at depth %d, want 1", ing.Depth)
 	}
 
-	if _, err := red(ctx, queue.WorkItem{ID: "wi-1", Depth: 1}, "sha-b", "still failing"); err != nil {
+	if _, err := red(ctx, queue.WorkItem{ID: "wi-1", Depth: 1}, agent.Prior{Sha: "sha-b", Reason: "still failing"}); err != nil {
 		t.Fatalf("depth 1 is still inside the bound: %v", err)
 	}
 	// At the bound the factory stops summoning itself. The red stays on the
 	// check chain either way, so promotion still never takes the commit.
-	if _, err := red(ctx, queue.WorkItem{ID: "wi-2", Depth: 2}, "sha-c", "still failing"); err == nil {
+	if _, err := red(ctx, queue.WorkItem{ID: "wi-2", Depth: 2}, agent.Prior{Sha: "sha-c", Reason: "still failing"}); err == nil {
 		t.Fatal("the repair chain was allowed to run away")
 	}
 }

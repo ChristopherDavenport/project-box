@@ -6,6 +6,7 @@ package capacity
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -83,14 +84,79 @@ type Meter struct {
 	unmetered   int   // runs this window that finished without saying what they cost
 }
 
-// SetBudget swaps the budget (config reload). The current window restarts
-// under the new numbers — simpler to reason about than prorating, and a
-// reload is rare enough that a fresh window is the least surprising rule.
+// SetBudget swaps the budget (config reload). The window's spend is NOT
+// cleared: windows are aligned to the clock rather than to anything a process
+// or a config file did, so there is nothing to restart — and a reload that
+// zeroed the account would make the brake resettable by editing a file and
+// sending a signal, which is not a brake.
 func (m *Meter) SetBudget(b Budget) {
 	m.mu.Lock()
 	m.Budget = b
-	m.resetWindow(m.now())
 	m.mu.Unlock()
+}
+
+// Restore folds the current window's account back out of the evidence chain.
+//
+// The meter wrote every charge and every start to control/capacity and then
+// read none of them back: the window lived in memory alone. So a restart
+// cleared the brake. Measured live — the meter refused at 25,419,130 tokens
+// against a 6,000,000 ceiling, boxd was restarted, and the very next status
+// read tokens=0, refusing=false. A crash loop is an unbounded budget, and the
+// one thing that makes a token brake worth having is that it survives the
+// process it is braking.
+//
+// Call it once, at construction, before the first Acquire.
+func (m *Meter) Restore(ctx context.Context) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	start := m.windowAt(m.now())
+	m.resetWindow(start)
+	if m.Budget.Window <= 0 {
+		return nil // no window, nothing to bound, nothing to restore
+	}
+	for rec, err := range m.Store.Log().Since(ctx, m.Tenant, "control/capacity", 1) {
+		if err != nil {
+			return err
+		}
+		if rec.At.Before(start) {
+			continue
+		}
+		switch rec.Kind {
+		case "spend":
+			m.started++
+		case "charge":
+			var c struct {
+				Tokens  int64 `json:"tokens"`
+				Metered bool  `json:"metered"`
+			}
+			if json.Unmarshal(rec.Body, &c) != nil {
+				// A charge that will not parse is spend we cannot account
+				// for, which is exactly what unmetered means.
+				m.unmetered++
+				continue
+			}
+			if c.Metered {
+				m.spent += c.Tokens
+			} else {
+				m.unmetered++
+			}
+		}
+	}
+	return nil
+}
+
+// windowAt is the accounting window a moment falls in, aligned to the clock.
+//
+// Aligned rather than sliding from first use, because a persistent budget
+// needs "the current window" to be answerable by a process that has just
+// started and has no memory of when the last one began. A clock-derived
+// bucket is the same answer for every reader, needs no extra record to
+// anchor it, and gives an operator a reset time they can predict.
+func (m *Meter) windowAt(now time.Time) time.Time {
+	if m.Budget.Window <= 0 {
+		return time.Time{}
+	}
+	return now.Truncate(m.Budget.Window)
 }
 
 func (m *Meter) now() time.Time {
@@ -112,9 +178,8 @@ func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 		m.mu.Unlock()
 		return nil, ErrBusy
 	}
-	now := m.now()
-	if m.Budget.Window > 0 && now.Sub(m.windowStart) >= m.Budget.Window {
-		m.resetWindow(now)
+	if w := m.windowAt(m.now()); !w.Equal(m.windowStart) {
+		m.resetWindow(w)
 	}
 	if m.Budget.MaxPerWindow > 0 && m.started >= m.Budget.MaxPerWindow {
 		first := !m.refused
@@ -207,9 +272,17 @@ type Report struct {
 }
 
 // Report snapshots the window.
+//
+// It rolls the window forward first. Reading is not a side-effect-free act
+// here: the counters belong to whichever window the clock is in, and a report
+// that answered from a window the clock has left would show yesterday's spend
+// until something happened to claim.
 func (m *Meter) Report() Report {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if w := m.windowAt(m.now()); !w.Equal(m.windowStart) {
+		m.resetWindow(w)
+	}
 	maxC := m.Budget.MaxConcurrent
 	if maxC <= 0 {
 		maxC = 1
@@ -219,13 +292,35 @@ func (m *Meter) Report() Report {
 		Running: m.running, Started: m.started,
 		MaxConcurrent: maxC, MaxPerWindow: m.Budget.MaxPerWindow,
 		Window: m.Budget.Window, WindowSec: int64(m.Budget.Window.Seconds()),
-		Refusing: m.refused,
+		Refusing: m.wouldRefuse(),
 	}
 }
 
-// resetWindow starts a fresh accounting window. Callers hold mu.
-func (m *Meter) resetWindow(now time.Time) {
-	m.windowStart, m.started, m.refused = now, 0, false
+// wouldRefuse reports whether a claim asked for right now would be turned
+// away on budget grounds. Callers hold mu.
+//
+// Distinct from m.refused, which answers "have I already written the refusal
+// record for this window" and exists so one refusal is evidence and the next
+// thousand polls are not. Reporting that field as the room's state conflated
+// the two, and the difference showed the moment the ceiling was raised: the
+// budget was lifted, a run started, and the room went on saying "refusing"
+// with work visibly in flight, because something had refused an hour earlier.
+func (m *Meter) wouldRefuse() bool {
+	switch {
+	case m.Budget.MaxPerWindow > 0 && m.started >= m.Budget.MaxPerWindow:
+		return true
+	case m.unmetered > 0 && !m.Budget.AllowUnmetered:
+		return true
+	case m.Budget.MaxTokensPerWindow > 0 && m.spent >= m.Budget.MaxTokensPerWindow:
+		return true
+	}
+	return false
+}
+
+// resetWindow starts a fresh accounting window at its aligned boundary.
+// Callers hold mu.
+func (m *Meter) resetWindow(start time.Time) {
+	m.windowStart, m.started, m.refused = start, 0, false
 	m.spent, m.unmetered = 0, 0
 }
 

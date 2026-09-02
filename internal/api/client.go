@@ -92,9 +92,10 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return s, c.do(ctx, "GET", "/v1/status", nil, &s)
 }
 
-// Exceptions lists parked items.
-func (c *Client) Exceptions(ctx context.Context) ([]queue.WorkItem, error) {
-	var out []queue.WorkItem
+// Exceptions lists parked items, loudest and oldest first, with the age and
+// escalation count the raw work item cannot carry.
+func (c *Client) Exceptions(ctx context.Context) ([]control.Exception, error) {
+	var out []control.Exception
 	return out, c.do(ctx, "GET", "/v1/exceptions", nil, &out)
 }
 
@@ -113,6 +114,19 @@ func (c *Client) Items(ctx context.Context, states ...string) ([]control.QueueEn
 func (c *Client) Item(ctx context.Context, id string) (queue.WorkItem, error) {
 	var out queue.WorkItem
 	return out, c.do(ctx, "GET", "/v1/items/"+id, nil, &out)
+}
+
+// Sessions is the per-unit live view: one entry per running unit.
+func (c *Client) Sessions(ctx context.Context) ([]control.Session, error) {
+	var out []control.Session
+	return out, c.do(ctx, "GET", "/v1/sessions", nil, &out)
+}
+
+// Session is one unit's card — identity, progress, and what its agent is
+// saying — whatever state the unit is in.
+func (c *Client) Session(ctx context.Context, id string) (control.Session, error) {
+	var out control.Session
+	return out, c.do(ctx, "GET", "/v1/items/"+id+"/session", nil, &out)
 }
 
 // Provenance is the audit query over the wire.
@@ -135,6 +149,21 @@ func (c *Client) Stop(ctx context.Context, reason string) error {
 // Resume lifts a stop.
 func (c *Client) Resume(ctx context.Context, reason string) error {
 	return c.do(ctx, "POST", "/v1/resume", ControlRequest{Reason: reason}, nil)
+}
+
+// Evidence is an item's whole chain — the raw material behind every rendered
+// view, and the only place the agent's prompt and its own account of the run
+// can be read back.
+func (c *Client) Evidence(ctx context.Context, id string) ([]evidence.Record, error) {
+	var out []evidence.Record
+	return out, c.do(ctx, "GET", "/v1/items/"+id+"/evidence", nil, &out)
+}
+
+// Reopen takes an item off the exception queue: verb is "resolve" (closed by
+// hand, no landing) or "retry" (back into the queue for another attempt).
+func (c *Client) Reopen(ctx context.Context, verb, id, reason string) (queue.WorkItem, error) {
+	var out queue.WorkItem
+	return out, c.do(ctx, "POST", "/v1/items/"+id+"/"+verb, ControlRequest{Reason: reason}, &out)
 }
 
 // Reload asks the daemon to re-read its configuration.

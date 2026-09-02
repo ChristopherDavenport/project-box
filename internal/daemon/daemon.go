@@ -25,10 +25,12 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/boxcfg"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
+	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
+	"github.com/ChristopherDavenport/project-box/internal/harness"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
@@ -65,13 +67,19 @@ func (b ShellBuilder) Build(ctx context.Context, ws forge.Workspace, task string
 type Daemon struct {
 	ConfigPath string
 
-	store  *sqlite.Store
-	tenant tenant.ID
-	mirror *gitforge.Mirror
-	queue  *queue.Queue
-	pump   *pump.Pump
-	meter  *capacity.Meter
-	API    *api.Server
+	store     *sqlite.Store
+	tenant    tenant.ID
+	mirror    *gitforge.Mirror
+	queue     *queue.Queue
+	pump      *pump.Pump
+	meter     *capacity.Meter
+	escalator *control.Escalator
+	// live is the daemon's window into runs in flight, and belongs to the
+	// daemon rather than to an assembled executor: a reload rebuilds the
+	// builders and must not blind the room to the runs those builders are
+	// already in the middle of.
+	live *control.Live
+	API  *api.Server
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -98,6 +106,7 @@ func New(path string) (*Daemon, error) {
 		ConfigPath: path, store: s, tenant: t, mirror: m,
 		queue: &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
 		meter: &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
+		live:  &control.Live{},
 		cfg:   cfg, every: cfg.EveryDuration(),
 	}
 	loops, routes, err := d.assemble(context.Background(), cfg)
@@ -109,11 +118,27 @@ func New(path string) (*Daemon, error) {
 		MaxPerWindow:       cfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
 		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration()})
+	// The window's account outlives the process that spent it. Without this a
+	// restart is a fresh budget, so the brake is only ever as strong as the
+	// daemon's uptime.
+	if err := d.meter.Restore(context.Background()); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("daemon: restoring the capacity window: %w", err)
+	}
 	d.pump = &pump.Pump{Store: s, Tenant: t, Runner: cfg.Runner, Queue: d.queue, Meter: d.meter, Loops: loops}
+	// The exception queue ages whether or not anybody is looking, so the
+	// sweep is what makes "nobody is looking" audible. The log is the weakest
+	// sink there is and the only one that needs no configuration; a real
+	// deployment replaces it at this seam without the daemon changing.
+	d.escalator = &control.Escalator{
+		Room:   &control.Room{Store: s, Tenant: t, Actor: cfg.Runner},
+		Notify: control.NotifierFunc(control.LogNotice),
+	}
 	d.API = &api.Server{
 		Store: s, Tenant: t, Routes: routes,
 		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner},
 		Queue:  d.queue, Meter: d.meter, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
+		Live:    d.live,
 		Started: time.Now(),
 		Reload:  d.reloadForAPI,
 	}
@@ -136,19 +161,37 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 		if len(bx.Agent) > 0 {
 			agentBuilder = &acp.Builder{
 				Store: d.store, Tenant: d.tenant, Box: bx.Name,
-				Command: bx.Agent,
-				Composer: &agent.Composer{Source: agent.StaticLayers{{
-					Name: "builder", Scope: agent.ScopeRole,
-					Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},
-					Instructions: "You are a build agent in an automated factory. Make the requested change precisely and minimally.",
-					Tools:        agent.ToolPolicy{PermissionMode: "acceptEdits"},
-				}}},
-				Seat:   &seat.Seat{Name: bx.Seat, Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
-				Mirror: d.mirror,
+				Command:   bx.Agent,
+				MaxTokens: cfg.Budget.MaxTokensPerRun,
+				Composer: &agent.Composer{Source: &harness.Source{
+					Base: []agent.Layer{{
+						Name: "builder", Scope: agent.ScopeRole,
+						Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},
+						Instructions: "You are a build agent in an automated factory. Make the requested change precisely and minimally.",
+						Tools:        agent.ToolPolicy{PermissionMode: "acceptEdits"},
+					}},
+					Box:       bx.Name,
+					Inherit:   bx.Harness.Plugins == boxcfg.PluginsInherit,
+					PluginMCP: bx.Harness.PluginMCP,
+					Skills:    skillRefs(bx.Harness.Skills),
+					MCP:       mcpRefs(bx.Harness.MCP),
+					Resolver:  d.mirror,
+				}},
+				Seat:            &seat.Seat{Name: bx.Seat, Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
+				Mirror:          d.mirror,
+				InheritSettings: bx.Harness.Plugins == boxcfg.PluginsInherit,
 				// The stream is the only place the cost is visible, so it is
 				// the adapter that charges the meter.
 				Spend: func(ctx context.Context, run string, u acp.Usage) {
 					d.meter.Charge(ctx, run, u.Total(), u.Reported)
+				},
+				// And the same argument for the stream: the adapter is the
+				// only place a run is visible while it is running, so it is
+				// where the room's live view has to be fed from.
+				Progress: func(_ context.Context, run string, u acp.Update) {
+					d.live.Append(run, control.Frame{
+						Kind: string(u.Kind), Tool: u.Tool, Text: u.Text, Reason: u.Reason,
+					})
 				},
 			}
 		}
@@ -181,6 +224,28 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 		}
 	}
 	return loops, routes, nil
+}
+
+// skillRefs turns configured pins into unresolved refs. Resolution — the
+// commit-to-tree lookup that fills Digest — happens per run in the layer
+// source, not here: a digest captured at assemble time would be a digest that
+// stops matching the moment the pin is edited and reloaded.
+func skillRefs(skills []boxcfg.Skill) []agent.SkillRef {
+	out := make([]agent.SkillRef, 0, len(skills))
+	for _, s := range skills {
+		out = append(out, agent.SkillRef{Name: s.Name, Source: agent.Source{
+			Kind: agent.SourceGit, Repo: s.Repo, Commit: s.Commit, Path: s.Path,
+		}})
+	}
+	return out
+}
+
+func mcpRefs(servers []boxcfg.MCPServer) []agent.MCPRef {
+	out := make([]agent.MCPRef, 0, len(servers))
+	for _, m := range servers {
+		out = append(out, agent.MCPRef{Name: m.Name, Command: m.Command, URL: m.URL, Tools: m.Tools})
+	}
+	return out
 }
 
 // Reload re-reads the config file and swaps the daemon's shape. Identity
@@ -296,14 +361,18 @@ func (d *Daemon) Run(ctx context.Context) error {
 				if err := d.mirror.Prune(workCtx); err != nil {
 					slog.Warn("prune", "err", err)
 				}
+				if _, err := d.escalator.Sweep(workCtx); err != nil {
+					slog.Warn("escalation sweep", "err", err)
+				}
 			}
 		}
 	}
 }
 
-// housekeepingEvery spaces the prune sweep: every Nth tick, the mirror
+// housekeepingEvery spaces the standing chores: every Nth tick, the mirror
 // reaps workspaces whose leases no longer answer — the `docker system
-// prune` job as a standing task rather than a remembered chore.
+// prune` job as a standing task rather than a remembered chore — and the
+// room tells somebody about exceptions that have gone stale.
 const housekeepingEvery = 20
 
 func (d *Daemon) drain() time.Duration {

@@ -341,6 +341,13 @@ func TestQueueOverTheWire(t *testing.T) {
 		if e.Task == "" || e.Opened.IsZero() {
 			t.Fatalf("row is missing task or clock: %+v", e)
 		}
+		// The frontier rides the same row. Nothing depends on these two, and
+		// nobody has claimed them, so both are work the factory could be doing
+		// right now — which is the fact the state "pending" cannot carry and
+		// the reason an operator can tell a stalled factory from an empty one.
+		if !e.Ready {
+			t.Fatalf("unblocked unclaimed work must read as ready over the wire: %+v", e)
+		}
 	}
 
 	// Drain until they settle — one branch lease admits one run at a time,
@@ -361,6 +368,107 @@ func TestQueueOverTheWire(t *testing.T) {
 	all, err := c.Items(ctx)
 	if err != nil || len(all) != 2 {
 		t.Fatalf("unfiltered: %d %v", len(all), err)
+	}
+}
+
+// TestTheCountAndTheListingAreOneFold is the other half of issue #20, and the
+// half the counter itself was the complaint about: /v1/status's numbers are a
+// tally of /v1/items rather than a second walk arriving at their own.
+//
+// The two used to be separate readings of one queue — the listing folding each
+// chain, the count walking index/pending with its own copy of the
+// not-yet-settled vocabulary. They agreed because two switch statements
+// happened to match, which is agreement with nothing holding it, and the state
+// vocabulary in this system has already drifted that way once.
+func TestTheCountAndTheListingAreOneFold(t *testing.T) {
+	w := rig(t)
+	ctx := context.Background()
+	ts := httptest.NewServer(w.srv.Handler())
+	defer ts.Close()
+	c, err := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, key := range []string{"issue-20a", "issue-20b", "issue-20c"} {
+		if _, err := c.OpenIngress(ctx, "issues", key, "make pending legible for "+key); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := w.pump.Intake(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	// agrees holds the counter to the rows at every point the queue moves
+	// through, not only at the start: a count that matches when everything is
+	// pending and drifts once work settles is the bug this closes.
+	agrees := func(when string) Status {
+		t.Helper()
+		st, err := c.Status(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		all, err := c.Items(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if st.Backlog.Total != len(all) {
+			t.Fatalf("%s: status says %d in the queue, the listing returns %d",
+				when, st.Backlog.Total, len(all))
+		}
+		if st.Pending != st.Backlog.Pending {
+			t.Fatalf("%s: the flat count %d and the fold's %d disagree", when, st.Pending, st.Backlog.Pending)
+		}
+		// State by state, against the listing narrowed to that state — the
+		// endpoint a client would use to derive the number itself.
+		sum, owed := 0, 0
+		for state, n := range st.Backlog.ByState {
+			rows, err := c.Items(ctx, string(state))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != n {
+				t.Errorf("%s: status counts %d %s, GET /v1/items?state=%s returns %d",
+					when, n, state, state, len(rows))
+			}
+			sum += n
+			if queue.Claimable(state) {
+				owed += n
+			}
+		}
+		if sum != st.Backlog.Total {
+			t.Fatalf("%s: the parts sum to %d, the total says %d", when, sum, st.Backlog.Total)
+		}
+		// One vocabulary: what the counter calls pending is what the drain
+		// will take, read from the same function the pump selects with.
+		if st.Pending != owed {
+			t.Fatalf("%s: pending=%d, but %d rows are in states the drain would claim: %+v",
+				when, st.Pending, owed, st.Backlog.ByState)
+		}
+		return st
+	}
+
+	st := agrees("after intake")
+	if st.Pending != 3 || st.Backlog.ByState[queue.StatePending] != 3 {
+		t.Fatalf("three submitted, status says %d: %+v", st.Pending, st.Backlog.ByState)
+	}
+
+	// Mid-flight, where the two accounts had the most room to come apart: one
+	// branch lease admits one run at a time (issue #18), so a drain leaves a
+	// mixture rather than a clean sweep.
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	agrees("mid-drain")
+
+	for range 4 {
+		if _, err := w.pump.Drain(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st = agrees("settled")
+	if st.Pending != 0 || st.Backlog.ByState[queue.StateDone] != 3 {
+		t.Fatalf("settled: pending=%d %+v", st.Pending, st.Backlog.ByState)
 	}
 }
 
@@ -422,4 +530,74 @@ func TestRunInternalsReachTheStream(t *testing.T) {
 		}
 	}
 	t.Fatalf("the subscriber never saw the run's internals: %v", want)
+}
+
+// TestExceptionQueueOverTheWire: the room's Availability control, on the
+// surface a UX reads. `exceptions=2` was the whole story, and a count cannot
+// distinguish a queue being worked from one nobody has opened in a week — so
+// the age, the severity, and the objective the age is judged against all
+// ride the same JSON.
+func TestExceptionQueueOverTheWire(t *testing.T) {
+	w := rig(t)
+	ctx := context.Background()
+	w.srv.Objective = time.Hour
+	ts := httptest.NewServer(w.srv.Handler())
+	t.Cleanup(ts.Close)
+
+	q := &queue.Queue{Store: w.srv.Store, Runner: "d", TTL: time.Hour}
+	for _, p := range []struct {
+		id  string
+		sev queue.Severity
+	}{{"wi-routine", queue.SeverityMedium}, {"wi-bad", queue.SeverityCritical}} {
+		item, err := q.Submit(ctx, queue.WorkItem{
+			ID: p.id, Tenant: tn, Box: "shop", Ingress: "ing-1", Task: p.id,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		item, lease, err := q.Claim(ctx, item)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.Park(ctx, item, lease, p.sev, "parked for "+p.id); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c, err := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Exceptions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 exceptions, got %d: %+v", len(got), got)
+	}
+	// Loudest first, and each row carries its own clock.
+	if got[0].ID != "wi-bad" || got[0].Severity != queue.SeverityCritical {
+		t.Fatalf("the wire does not order or label exceptions: %+v", got)
+	}
+	if got[0].Parked.IsZero() || got[0].Overdue {
+		t.Fatalf("a fresh exception arrived with no clock or already late: %+v", got[0])
+	}
+	// The item is still there whole — the age is additional, not a swap.
+	if got[0].Note != "parked for wi-bad" || got[0].Ingress != "ing-1" {
+		t.Fatalf("the work item did not survive the richer row: %+v", got[0])
+	}
+
+	st, err := c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Exceptions != 2 || st.ExceptionQueue.Parked != 2 {
+		t.Fatalf("the count and the metric disagree: %d vs %+v", st.Exceptions, st.ExceptionQueue)
+	}
+	if st.ExceptionQueue.ObjectiveSec != 3600 {
+		t.Fatalf("status reports the metric without the objective it is judged against: %+v", st.ExceptionQueue)
+	}
+	if !st.ExceptionQueue.Met || st.ExceptionQueue.Oldest == "" {
+		t.Fatalf("exception health: %+v", st.ExceptionQueue)
+	}
 }

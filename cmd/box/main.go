@@ -5,9 +5,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
+	"time"
 
 	"net"
 	"net/http"
@@ -16,6 +20,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/boxctx"
 	"github.com/ChristopherDavenport/project-box/internal/control"
+	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/gateway"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
@@ -105,13 +110,7 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		if len(items) == 0 {
-			fmt.Println("no exceptions — the factory has nothing waiting on a person")
-			return nil
-		}
-		for _, it := range items {
-			fmt.Printf("%-24s %-8s ingress=%s\n    %s\n", it.ID, it.State, it.Ingress, it.Note)
-		}
+		printExceptions(items)
 	case "stop":
 		if len(rest) == 0 {
 			return fmt.Errorf("stop needs a reason — it becomes the record")
@@ -189,13 +188,97 @@ func parseStates(s string) []queue.State {
 }
 
 // printQueue renders the queue the way an operator reads it: one line per
-// unit, and the note underneath. The note is the answer to "why is it still
-// there" — which the queue has always written and a counter can never carry.
+// unit, and underneath it the note and whatever the frontier has to say. The
+// note is the answer to "why is it still there" — which the queue has always
+// written and a counter can never carry.
+//
+// The frontier lines are here and not only in the browser on purpose. A fact
+// some readers of the queue know and others do not is worse than one nobody
+// has, because work does not disappear loudly from a view — it disappears
+// plausibly, and the state vocabulary has already had that failure once.
+// printSession is one unit as `box item` now answers it: what it is, how far
+// it has got, and what its agent has been doing — the three things a claimed
+// item could not say.
+func printSession(s control.Session) {
+	e := s.QueueEntry
+	fmt.Printf("%s state=%s stage=%s head=%s\n", e.ID, e.State, dash(e.Stage), dash(e.Head))
+	origin := e.Route
+	if e.Key != "" {
+		origin += "/" + e.Key
+	}
+	if origin == "" {
+		origin = e.Ingress
+	}
+	fmt.Printf("  %s  box=%s repo=%s origin=%s\n", e.Task, dash(e.Box), dash(e.Repo), dash(origin))
+	if e.Seat != "" {
+		fmt.Printf("  seat=%s agentref=%s\n", e.Seat, short(e.AgentRef))
+	}
+	for _, l := range s.Layers {
+		fmt.Printf("    layer %-6s %-20s %s %s\n", l.Scope, l.Name, l.Source, short(l.Digest))
+	}
+	if e.Stage != "" {
+		fmt.Printf("  %s in stage, %s since it opened\n", age(e.InStateSec), age(e.AgeSec))
+	}
+	if e.Note != "" {
+		fmt.Printf("  %s\n", e.Note)
+	}
+	if len(s.Timeline) == 0 {
+		// Silence and blindness are not the same thing, and the difference
+		// decides whether an operator goes and looks at a stuck run.
+		if e.State == queue.StateClaimed && !s.Watching {
+			fmt.Println("  (no live stream here — another runner holds this, or the window has rolled)")
+		}
+		return
+	}
+	fmt.Println("  timeline:")
+	for _, f := range s.Timeline {
+		line, _, _ := strings.Cut(frameText(f), "\n")
+		fmt.Printf("    %s %-8s %s\n", f.At.Format("15:04:05"), f.Kind, line)
+	}
+}
+
+// frameText is the one line a frame is worth on a terminal. The kinds are the
+// wire's strings rather than the runtime's constants: this is an HTTP client,
+// and a CLI that imported the ACP runtime to read a JSON field would be
+// coupling the two ends of a protocol that exists to keep them apart.
+func frameText(f control.Frame) string {
+	switch {
+	case f.Reason != "":
+		return f.Reason
+	case f.Tool != "":
+		return f.Tool
+	case f.Kind == "tool":
+		// A call the dialect named nothing at all: policy had nothing to match
+		// on, which is a hole and not a blank.
+		return "(unnamed — nothing for policy to match)"
+	}
+	return f.Text
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+// byState renders a backlog's tally in a stable order — alphabetical, because
+// the states have no rank and a map's order would make two identical statuses
+// print differently.
+func byState(m map[queue.State]int) string {
+	var parts []string
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		parts = append(parts, fmt.Sprintf("%s=%d", k, m[k]))
+	}
+	return strings.Join(parts, " ")
+}
+
 func printQueue(entries []control.QueueEntry) {
 	if len(entries) == 0 {
 		fmt.Println("the queue is empty")
 		return
 	}
+	ready := 0
 	for _, e := range entries {
 		origin := e.Route
 		if e.Key != "" {
@@ -204,16 +287,103 @@ func printQueue(entries []control.QueueEntry) {
 		if origin == "" {
 			origin = e.Ingress
 		}
-		fmt.Printf("%-22s %-8s %6s  %-22s %s\n", e.ID, e.State, age(e.AgeSec), origin, e.Task)
+		mark := " "
+		if e.Ready {
+			mark, ready = ">", ready+1
+		}
+		fmt.Printf("%s %-22s %-8s %6s  %-22s %s\n", mark, e.ID, e.State, age(e.AgeSec), origin, e.Task)
 		if e.Note != "" {
 			fmt.Printf("    %s [%s in state]\n", e.Note, age(e.InStateSec))
 		}
+		if len(e.BlockedBy) > 0 {
+			fmt.Printf("    blocked by %s\n", strings.Join(e.BlockedBy, ", "))
+		}
+		if e.Root != "" {
+			fmt.Printf("    cascaded from %s\n", e.Root)
+		}
+		if e.Runner != "" {
+			if e.LeaseLapsed {
+				fmt.Printf("    held by %s — LEASE LAPSED %s ago, nothing is running this\n",
+					e.Runner, age(-e.LeaseExpiresSec))
+			} else {
+				fmt.Printf("    held by %s — %s of lease left\n", e.Runner, age(e.LeaseExpiresSec))
+			}
+		}
 	}
-	fmt.Printf("\n%d item(s)\n", len(entries))
+	// Ready work with nothing moving is the first symptom of a stopped pump or
+	// a budget refusal, so the count goes next to the total rather than being
+	// left for the reader to tally off the markers.
+	fmt.Printf("\n%d item(s), %d ready to claim (>)\n", len(entries), ready)
+}
+
+// printTranscript renders a run so a person can judge it: what the agent was
+// told, how that instruction was composed, and what it said back.
+//
+// The agentref settles whether two runs had the same instructions and cannot
+// show you either of them, so for evaluating a prompt — as against auditing
+// one — the digest is the wrong artefact entirely. These records are the
+// right one, and they are unreadable as raw chain output: base64 bodies with
+// a multi-kilobyte string inside a JSON field.
+func printTranscript(recs []evidence.Record) error {
+	found := false
+	for _, r := range recs {
+		switch r.Kind {
+		case "agent-prompt":
+			var p struct{ AgentRef, Prompt, Bundle string }
+			if err := json.Unmarshal(r.Body, &p); err != nil {
+				return err
+			}
+			found = true
+			fmt.Printf("=== PROMPT (agentref %s, %s) ===\n\n%s\n", short(p.AgentRef), r.At.Format(time.RFC3339), p.Prompt)
+			fmt.Printf("\n=== BUNDLE ===\n\n%s\n", p.Bundle)
+		case "agent-text":
+			var tx struct{ AgentRef, StopReason, Text string }
+			if err := json.Unmarshal(r.Body, &tx); err != nil {
+				return err
+			}
+			found = true
+			fmt.Printf("\n=== AGENT SAID (stop=%s) ===\n\n%s\n", tx.StopReason, tx.Text)
+		}
+	}
+	if !found {
+		fmt.Println("no agent transcript on this item — it may predate prompt recording, or no agent ran")
+	}
+	return nil
+}
+
+func short(ref string) string {
+	if len(ref) > 12 {
+		return ref[:12]
+	}
+	return ref
 }
 
 // age renders a duration at the precision an operator cares about: seconds
 // while a run is live, days once something has been forgotten.
+// printExceptions renders the exception queue in the order a person should
+// work it: loudest first, then oldest. The age and the "!" are the point —
+// a list of exceptions with no clock on it cannot show the one that has been
+// sitting since Friday.
+func printExceptions(items []control.Exception) {
+	if len(items) == 0 {
+		fmt.Println("no exceptions — the factory has nothing waiting on a person")
+		return
+	}
+	for _, it := range items {
+		flag := " "
+		if it.Overdue {
+			flag = "!"
+		}
+		told := ""
+		if it.Escalations > 0 {
+			told = fmt.Sprintf(" told=%d", it.Escalations)
+		}
+		fmt.Printf("%s %-22s %-8s %6s  ingress=%s%s\n    %s\n",
+			flag, it.ID, it.Severity.OrDefault(), age(it.AgeSec), it.Ingress, told, it.Note)
+	}
+	fmt.Printf("\n%d exception(s); ! is past the response-time objective\n", len(items))
+}
+
 func age(sec int64) string {
 	switch {
 	case sec < 90:
@@ -244,6 +414,20 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		}
 		fmt.Printf("tenant=%s box=%s runner=%s stopped=%v pending=%d exceptions=%d up=%ds routes=%v\n",
 			st.Tenant, st.Box, st.Runner, st.Stopped, st.Pending, st.Exceptions, st.UptimeSec, st.Routes)
+		// Which states that pending number is made of, and the pointer to the
+		// verb that lists them. A bare count is the whole complaint.
+		if b := st.Backlog; b.Total > 0 {
+			fmt.Printf("backlog: %d of %d still owed a run — %s (box queue lists them)\n",
+				b.Pending, b.Total, byState(b.ByState))
+		}
+		if q := st.ExceptionQueue; q.Parked > 0 {
+			met := "met"
+			if !q.Met {
+				met = fmt.Sprintf("MISSED by %d item(s)", q.Overdue)
+			}
+			fmt.Printf("exception queue: oldest=%s (%s) objective=%s %s\n",
+				age(q.OldestAgeSec), q.Oldest, age(q.ObjectiveSec), met)
+		}
 	case "queue":
 		sub := flag.NewFlagSet("queue", flag.ContinueOnError)
 		state := sub.String("state", "", "comma-separated states (pending, claimed, waiting, parked, done, failed); empty shows all")
@@ -264,13 +448,7 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		if err != nil {
 			return err
 		}
-		if len(items) == 0 {
-			fmt.Println("no exceptions — the factory has nothing waiting on a person")
-			return nil
-		}
-		for _, it := range items {
-			fmt.Printf("%-24s %-8s ingress=%s\n    %s\n", it.ID, it.State, it.Ingress, it.Note)
-		}
+		printExceptions(items)
 	case "submit":
 		sub := flag.NewFlagSet("submit", flag.ContinueOnError)
 		route := sub.String("route", "issues", "configured route name")
@@ -291,11 +469,16 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		if len(rest) == 0 {
 			return fmt.Errorf("item needs an id")
 		}
-		it, err := c.Item(ctx, rest[0])
+		// The session view, not the bare item. `state=claimed head=` was the
+		// whole answer for the length of a run, and the CLI and the room must
+		// not diverge on it: a fact one reader of the queue has and another
+		// does not is worse than one nobody has — the same argument `box
+		// queue` settled for the frontier.
+		sn, err := c.Session(ctx, rest[0])
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s state=%s head=%s\n%s\n", it.ID, it.State, it.Head, it.Note)
+		printSession(sn)
 	case "provenance":
 		if len(rest) == 0 {
 			return fmt.Errorf("provenance needs a sha")
@@ -315,8 +498,33 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 			return c.Stop(ctx, rest[0])
 		}
 		return c.Resume(ctx, rest[0])
+	case "transcript":
+		if len(rest) == 0 {
+			return fmt.Errorf("transcript needs an item id")
+		}
+		recs, err := c.Evidence(ctx, rest[0])
+		if err != nil {
+			return err
+		}
+		return printTranscript(recs)
+	case "resolve", "retry":
+		sub := flag.NewFlagSet(cmd, flag.ContinueOnError)
+		item := sub.String("item", "", "work item id, as `box queue` lists it")
+		reason := sub.String("reason", "", "why — it becomes the record")
+		if err := sub.Parse(rest); err != nil {
+			return err
+		}
+		if *item == "" {
+			return fmt.Errorf("%s needs -item", cmd)
+		}
+		out, err := c.Reopen(ctx, cmd, *item, *reason)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("%s %s state=%s\n%s\n", cmd, out.ID, out.State, out.Note)
+		return nil
 	default:
-		return fmt.Errorf("daemon mode supports status|exceptions|submit|item|provenance|stop|resume, got %q", cmd)
+		return fmt.Errorf("daemon mode supports status|queue|exceptions|submit|item|resolve|retry|provenance|stop|resume, got %q", cmd)
 	}
 	return nil
 }

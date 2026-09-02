@@ -13,8 +13,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/store"
@@ -31,12 +33,104 @@ const (
 	// finished. Distinct from parked — conflating them buries real exceptions
 	// under routine review latency.
 	StateWaiting State = "waiting"
+	// StateHandedOff is a session that ended mid-change and asked for a fresh
+	// one: the agent is not finished and is not stuck.
+	//
+	// The third state on the same axis as the second, for the same reason.
+	// Waiting is work held on somebody else's answer; handed off is work whose
+	// session ran out of room with nobody to wait for. Neither needs a person,
+	// so filing either in the exception queue would bury the parkings that do
+	// under routine ones that do not.
+	//
+	// Not pending either, though it is claimable like one. Pending says nobody
+	// has started this, and an item three sessions deep has been started three
+	// times — a state that lies about that is a state an operator cannot use.
+	StateHandedOff State = "handedoff"
 	// StateParked is the exception queue: something went wrong and a person
 	// or a later run has to look.
 	StateParked State = "parked"
 	StateDone   State = "done"
 	StateFailed State = "failed"
+	// StateResolved is an exception a person closed by hand: the item needed
+	// no landing, and someone said so on the record.
+	//
+	// Not StateDone, which means a commit reached the branch and feeds the
+	// landings index that review sampling draws from — an auditor pulling a
+	// sampled item expects a sha. Not StateFailed either: an agent reporting
+	// that an issue was already implemented did its job, and filing that
+	// verdict as a failure would make the one honest answer look like the
+	// crash it is meant to be distinguished from.
+	StateResolved State = "resolved"
 )
+
+// Claimable names the states a drain may take work in — equivalently, the
+// states that are not settled, which is what an operator means by "pending".
+//
+// One list rather than several. The pump's selection, the pump's settled
+// count and the room's backlog read the same vocabulary, and when it was
+// spelled out separately in each of them a state added to one and not the
+// others had the pump running an item and then reporting it as finished. The
+// state vocabulary has already had that failure once, which is why this is a
+// function and not a switch three readers each write out.
+func Claimable(s State) bool {
+	switch s {
+	case StatePending, StateWaiting, StateHandedOff:
+		return true
+	}
+	return false
+}
+
+// Severity is how loudly a parking asks for a person, set by the stage that
+// parked it — the only place that knows whether a failing unit test and a
+// revoked credential are the same emergency.
+//
+// It is not a priority: nothing claims work in severity order. It exists so
+// the control room can decide who has to be told and how soon, which is the
+// difference between an exception queue and a list nobody opens.
+type Severity string
+
+const (
+	// SeverityLow is an exception the queue itself is enough for: somebody
+	// will see it when they next look, and nobody needs telling before then.
+	SeverityLow Severity = "low"
+	// SeverityMedium is the default, and it is deliberately not the quietest
+	// one. A stage that did not say has not thereby said "routine" — silence
+	// must never read as "nothing to see", here as everywhere else.
+	SeverityMedium Severity = "medium"
+	// SeverityHigh is work that has stopped and will stay stopped until a
+	// person acts: an authority the factory does not hold, a judgement it
+	// could not obtain, a landing it cannot explain.
+	SeverityHigh Severity = "high"
+	// SeverityCritical is a mechanism the factory depends on having failed,
+	// so the ordinary recovery path is gone too.
+	SeverityCritical Severity = "critical"
+)
+
+// Rank orders severities. Anything unrecognised ranks with [SeverityMedium];
+// see that constant for why an unknown value is not the quiet one.
+func (s Severity) Rank() int {
+	switch s {
+	case SeverityLow:
+		return 1
+	case SeverityHigh:
+		return 3
+	case SeverityCritical:
+		return 4
+	}
+	return 2
+}
+
+// OrDefault resolves an unset or unrecognised severity to [SeverityMedium].
+func (s Severity) OrDefault() Severity {
+	switch s {
+	case SeverityLow, SeverityMedium, SeverityHigh, SeverityCritical:
+		return s
+	}
+	return SeverityMedium
+}
+
+// AtLeast reports whether s is at least as loud as other.
+func (s Severity) AtLeast(other Severity) bool { return s.Rank() >= other.Rank() }
 
 // WorkItem is one claimable unit of work.
 type WorkItem struct {
@@ -67,6 +161,13 @@ type WorkItem struct {
 	// its own initiative, inherited from the ingress. Externally delivered
 	// work is 0; see loop.OpenRepair for what bounds it.
 	Depth int `json:"depth,omitempty"`
+	// Prior is the attempt this item follows, inherited from the ingress
+	// when the factory opened this work to repair one of its own: the red
+	// sha, which check reported it, and the branch that still carries the
+	// change. It resolves into a layer at wake time, so a repair run's
+	// bundle — and therefore its agentref — records what it was woken
+	// knowing. See [agent.Prior].
+	Prior *agent.Prior `json:"prior,omitempty"`
 	// Head is the commit the item produced, once it has.
 	Head string `json:"head,omitempty"`
 	// Built is a commit this item has already produced but not landed: the
@@ -84,6 +185,25 @@ type WorkItem struct {
 	// was judged against a base that no longer exists, and a rebuild is the
 	// honest answer rather than a cheap one.
 	BuiltBase string `json:"built_base,omitempty"`
+	// Unfinished marks Built as work in progress rather than a change offered
+	// for judgement: a session ran out of room, handed off, and left what it
+	// had committed in the tree.
+	//
+	// It is what keeps the two resumes apart. An ordinary resume SKIPS the
+	// builder — the commit is already the answer and only the gate has not
+	// spoken — and doing that to half a change would gate and land exactly the
+	// degraded commit a mid-run handoff exists to prevent. An unfinished
+	// resume adopts the same tree and runs the agent again on top of it.
+	Unfinished bool `json:"unfinished,omitempty"`
+	// Hops counts how many times this item has handed off to a fresh session
+	// of itself.
+	//
+	// It bounds the spend: a session that can summon its own successor
+	// indefinitely is an unbounded bill with no landing, so the limit parks
+	// with the reason named. And it answers "how many sessions did this change
+	// take", which nothing else carries and which is the most direct signal
+	// there is about whether an item was sized for one.
+	Hops int `json:"hops,omitempty"`
 	// PassedGates names the gates that already returned pass on Built.
 	//
 	// They are carried rather than re-run while that head stands. A gate that
@@ -95,6 +215,10 @@ type WorkItem struct {
 	PassedGates []string `json:"passed_gates,omitempty"`
 	// Note carries the parked/failed reason.
 	Note string `json:"note,omitempty"`
+	// Severity is how loudly this parking asks for a person. Set by the stage
+	// that parked it, meaningful only while the item is parked, and dropped
+	// on the way back off the exception queue.
+	Severity Severity `json:"severity,omitempty"`
 }
 
 // ErrStopped reports that the stop button is down: no new claims, tenant-wide,
@@ -109,6 +233,72 @@ var ErrBlocked = errors.New("queue: dependencies not yet settled")
 // has been parked in cascade, naming the cause.
 var ErrDependencyFailed = errors.New("queue: dependency parked or failed")
 
+// ErrNoItem reports that an id names no work item.
+//
+// Distinct from a store or decoding failure on purpose, because intake keys
+// on the difference: "there is no item yet" means create one, while "I could
+// not tell" must never mean create a second. Reading any error as absence is
+// how one unreadable chain became a new queued record on every tick.
+var ErrNoItem = errors.New("queue: no such item")
+
+// stateKinds are the record kinds whose body is the WHOLE work item.
+//
+// An item's chain carries two sorts of record and always has. The state
+// transitions ARE the item: their body is the marshalled WorkItem, and
+// folding them in order is what [Queue.Load] means. Everything else is the
+// narrative — which agent ran under which ref, what a gate decided, why a
+// seat escalated, what a handoff failed on — and its body is whatever that
+// event needed to say, which is frequently prose.
+//
+// So the fold must SELECT, not merely unmarshal. It used to unmarshal every
+// record in the scope, and both halves of that mistake were load-bearing:
+// valid JSON that was not an item (an agent-run's agentref) zeroed the item
+// for the length of the run, and prose (an escalation's reason) failed
+// outright and took down every reader at once — Load, the pending drain, the
+// queue listing, and the exception queue that existed to show the escalation.
+// A factory stopped draining because an agent said, correctly, that it had
+// nothing to do.
+var stateKinds = map[string]bool{
+	"queued":    true,
+	"claimed":   true,
+	"built":     true,
+	"waiting":   true,
+	"handedoff": true,
+	"parked":    true,
+	"done":      true,
+	"failed":    true,
+	"resolved":  true,
+	"retried":   true,
+	"recovered": true,
+}
+
+// StateRecord reports whether a record kind carries the whole work item and
+// therefore takes part in the fold.
+//
+// This is the contract between the writers and the readers of an item's
+// chain, and it binds both directions: a writer using one of these kinds MUST
+// write the whole item, and a writer of anything else must not. TestFoldSkips
+// holds the writers to it.
+func StateRecord(kind string) bool { return stateKinds[kind] }
+
+// StateKinds is that vocabulary as a sorted list.
+//
+// Exported because the fold is not its only reader: the control room derives
+// a stage column from the same kinds, and the two drifted the moment three
+// were added here and nowhere else. A recovered item went on reporting
+// "building" — the stale stage of the run that abandoned it — which is the
+// one reading an operator must never be given, since it names work in
+// progress that nobody is doing. Whoever reads this vocabulary can now be
+// held to covering all of it.
+func StateKinds() []string {
+	out := make([]string, 0, len(stateKinds))
+	for k := range stateKinds {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
 // Queue submits, claims, and settles work items.
 type Queue struct {
 	Store  store.Store
@@ -118,6 +308,19 @@ type Queue struct {
 }
 
 func scope(id string) string { return "workitem/" + id }
+
+// ClaimRepo is the pseudo-repository a claim is leased under. A claim IS a
+// lease, and a lease names a (repo, ref) pair; no git repository is involved.
+const ClaimRepo = "_queue"
+
+// ClaimRef names the ref one item's claim is held on.
+//
+// Exported because the claim is not only the queue's business: the control
+// room reads the same key to say which runner holds an item and when the hold
+// lapses. A second spelling of it would have the room report "unclaimed" for
+// work a runner is holding, which is the reading an operator must never be
+// given.
+func ClaimRef(id string) string { return scope(id) }
 
 // Submit records a new pending item. An item with no ingress is refused.
 func (q *Queue) Submit(ctx context.Context, w WorkItem) (WorkItem, error) {
@@ -155,6 +358,10 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 			// what died.
 			w.State = StateParked
 			w.Note = fmt.Sprintf("dependency %s %s: %s", dep, d.State, d.Note)
+			// The cause's severity, not a fresh one. A leaf must no more
+			// read as routine than it may park mysteriously when its root
+			// is what died.
+			w.Severity = d.Severity.OrDefault()
 			if rerr := q.record(ctx, w, "parked", w.ID, w.Note); rerr != nil {
 				return w, forge.Lease{}, rerr
 			}
@@ -167,7 +374,7 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 		}
 	}
 	lease, err := q.Store.Leaser(q.Runner).Acquire(ctx, forge.LeaseRequest{
-		Tenant: w.Tenant, Repo: "_queue", Ref: scope(w.ID), Run: w.ID, TTL: q.TTL,
+		Tenant: w.Tenant, Repo: ClaimRepo, Ref: ClaimRef(w.ID), Run: w.ID, TTL: q.TTL,
 	})
 	if err != nil {
 		return w, forge.Lease{}, err
@@ -182,8 +389,13 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 // Park moves the item to the exception queue and frees its claim. The
 // exception index is what the control room lists; an unparked exception queue
 // is a factory nobody can triage.
-func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
-	w.State, w.Note = StateParked, reason
+//
+// The severity is the parking stage's to state, and it is a parameter rather
+// than a field so that stating it is not optional. A stage that would have
+// forgotten a field cannot forget an argument, and the room's routing is only
+// as good as the loudest thing it is told.
+func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, sev Severity, reason string) (WorkItem, error) {
+	w.State, w.Note, w.Severity = StateParked, reason, sev.OrDefault()
 	w.dropResume()
 	err := q.record(ctx, w, "parked", w.ID, reason)
 	if err == nil {
@@ -196,9 +408,29 @@ func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, reason 
 // dropResume clears the resume point. Every settle does this: the built
 // commit either landed or was judged and refused, so a later attempt must
 // build afresh rather than re-offer a commit whose verdict is on the record.
-// Wait is the one transition that keeps it, because waiting is the one state
-// the same commit is still the answer to.
-func (w *WorkItem) dropResume() { w.Built, w.BuiltBase, w.PassedGates = "", "", nil }
+// Wait and HandOff are the transitions that keep it, because they are the
+// states the same tree is still worth coming back to.
+func (w *WorkItem) dropResume() {
+	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = "", "", nil, false
+}
+
+// KeepCandidate records a finished change to come back to instead of buying
+// it from an agent twice: the commit, the base it stands on, and the gates
+// that have already passed on it.
+func (w *WorkItem) KeepCandidate(head, base forge.Commit, passed []string) {
+	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = string(head), string(base), passed, false
+}
+
+// KeepUnfinished records work in progress a handed-off session left behind.
+//
+// A method rather than three assignments at each call site, because the
+// difference between the two resume points is one boolean and the cost of
+// getting it wrong is asymmetric: a candidate mistaken for unfinished buys a
+// second agent run, and unfinished mistaken for a candidate lands half a
+// change. No gate has judged this content, so any carried verdict goes.
+func (w *WorkItem) KeepUnfinished(head, base forge.Commit) {
+	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = string(head), string(base), nil, true
+}
 
 // Wait records a pending gate and frees the claim; the item resumes when the
 // gate answers. It keeps any resume point the caller set on the item — see
@@ -206,6 +438,26 @@ func (w *WorkItem) dropResume() { w.Built, w.BuiltBase, w.PassedGates = "", "", 
 func (q *Queue) Wait(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
 	w.State, w.Note = StateWaiting, reason
 	err := q.record(ctx, w, "waiting", w.ID, reason)
+	q.Store.Leaser(q.Runner).Release(ctx, lease)
+	return w, err
+}
+
+// HandOff ends a session without settling the item: the agent asked for a
+// fresh one, and the same work goes back to the queue for the same seat. See
+// [StateHandedOff] for why this is neither waiting nor parked, and
+// [WorkItem.Hops] for what bounds it.
+//
+// The resume point survives, as it does through Wait and for a nearer reason:
+// what the session committed is still in the tree, and the successor
+// continuing it is the whole difference between a handoff and a park.
+//
+// The hop is counted here rather than by the caller. The count is the bound,
+// and a bound a stage has to remember to increment is a bound that stops
+// binding the first time somebody adds a second call site.
+func (q *Queue) HandOff(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
+	w.State, w.Note = StateHandedOff, reason
+	w.Hops++
+	err := q.record(ctx, w, "handedoff", w.ID, reason)
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
 }
@@ -234,6 +486,125 @@ func (q *Queue) Fail(ctx context.Context, w WorkItem, lease forge.Lease, reason 
 	return w, err
 }
 
+// Recover returns to the queue a claimed item whose runner is gone.
+//
+// StateClaimed was written in one place and read in none. Drain selects only
+// pending and waiting, so an item whose runner died mid-run — a crash, a
+// SIGKILL, a drain window that elapsed with work still in flight — stayed
+// claimed forever: its lease lapsed after the TTL, nothing noticed, and the
+// control room went on reporting it as building. The shutdown path even says
+// so out loud, "fencing makes re-runs safe", which is true and beside the
+// point. Fencing makes a re-run SAFE. It does not make one HAPPEN.
+//
+// Liveness needs no new primitive. Acquire already refuses a ref that a live
+// claim holds, so taking the lease is itself the proof the holder is gone; a
+// runner still working gets ErrHeld and is left entirely alone. A runner that
+// is alive but stalled past its TTL is recovered and re-run, which is the
+// stalled-runner case the fencing was built for in the first place.
+func (q *Queue) Recover(ctx context.Context, w WorkItem) (WorkItem, bool, error) {
+	if w.State != StateClaimed {
+		return w, false, nil
+	}
+	leaser := q.Store.Leaser(q.Runner)
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+		Tenant: w.Tenant, Repo: ClaimRepo, Ref: ClaimRef(w.ID), Run: w.ID, TTL: q.TTL,
+	})
+	switch {
+	case errors.Is(err, forge.ErrHeld):
+		return w, false, nil // somebody is still working on it
+	case err != nil:
+		return w, false, err
+	}
+	w.State = StatePending
+	w.Note = "recovered: claimed by a runner that is no longer holding its lease"
+	w.dropResume()
+	rerr := q.record(ctx, w, "recovered", w.ID, w.Note)
+	// Hold it only long enough to prove it was free. Releasing here rather
+	// than deferring keeps the next claim — possibly this same tick's — from
+	// contending with the probe that freed it.
+	leaser.Release(ctx, lease)
+	if rerr != nil {
+		return w, false, rerr
+	}
+	return w, true, q.index(ctx, w.Tenant, "pending", w.ID, w.Note)
+}
+
+// Resolve closes a parked item without a landing: the operator read the
+// exception, agreed there is nothing to build, and said so.
+//
+// The exception queue had no way out. StateParked was written in one place
+// and read in five, and nothing anywhere moved an item off it — so every
+// parked item was permanent, the queue only ever grew, and the verdict an
+// escalating agent had gone to the trouble of writing ("this issue is already
+// implemented, close it") was a recommendation the system could not act on.
+// An exception queue nobody can clear is a list, not a queue.
+func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id, actor, why string) (WorkItem, error) {
+	if why == "" {
+		return WorkItem{}, errors.New("queue: resolve needs a reason — closing an exception is a judgement and the record must carry whose")
+	}
+	return q.reopen(ctx, t, id, actor, StateResolved, "resolved", why)
+}
+
+// Retry returns a parked item to the queue for another attempt, with the
+// operator's note replacing the one it parked with.
+//
+// The counterpart to Resolve, and the reason parking could not simply be
+// terminal: an item parks for transient reasons too — a flaky gate, a
+// timeout, an agent that ran out of room — and without this the factory could
+// never recover work it had already been asked to do. The resume point is
+// already gone (Park drops it), so a retry builds afresh rather than
+// re-offering a commit whose verdict is on the record.
+func (q *Queue) Retry(ctx context.Context, t tenant.ID, id, actor, note string) (WorkItem, error) {
+	return q.reopen(ctx, t, id, actor, StatePending, "retried", note)
+}
+
+// reopen is the one transition off the exception queue, in both directions it
+// can go. Only a parked item may take it: an operator resolving something
+// still running would race the runner that holds its lease.
+func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to State, kind, note string) (WorkItem, error) {
+	w, err := q.Load(ctx, t, id)
+	if err != nil {
+		return WorkItem{}, err
+	}
+	if w.State != StateParked {
+		return w, fmt.Errorf("queue: item %s is %s, not parked — only an exception can be %s", id, w.State, kind)
+	}
+	w.State, w.Note = to, note
+	w.dropResume()
+	// Off the exception queue is off it. Leaving the severity behind would
+	// have a retried item come back already shouting, and would restart a
+	// later parking's clock with the previous parking's volume.
+	w.Severity = ""
+	// The actor is the operator, not the runner: this is the one transition a
+	// person makes by hand, and an audit that could not tell it from the
+	// daemon's own work would be missing the only human act in the loop.
+	if _, err := q.Store.Log().Append(ctx, evidence.Record{
+		Tenant: w.Tenant, Scope: scope(w.ID), Kind: kind, Subject: w.ID,
+		Actor: actor, OnBehalfOf: w.Requester, Body: mustMarshal(w),
+	}); err != nil {
+		return w, err
+	}
+	if to == StatePending {
+		// Back into the drain's index. The drain folds it by subject and
+		// would find the original queued entry anyway, but the live event
+		// stream grows its follow set from new index/pending records alone —
+		// so without this a retried item runs unwatched until someone
+		// reconnects.
+		return w, q.index(ctx, w.Tenant, "pending", w.ID, note)
+	}
+	return w, nil
+}
+
+func mustMarshal(w WorkItem) []byte {
+	b, err := json.Marshal(w)
+	if err != nil {
+		// WorkItem is plain data; a marshal failure here is a programming
+		// error, not a runtime condition.
+		panic("queue: marshalling a work item: " + err.Error())
+	}
+	return b
+}
+
 // Load folds an item's chain back into its current state.
 func (q *Queue) Load(ctx context.Context, t tenant.ID, id string) (WorkItem, error) {
 	var w WorkItem
@@ -242,19 +613,25 @@ func (q *Queue) Load(ctx context.Context, t tenant.ID, id string) (WorkItem, err
 		if err != nil {
 			return WorkItem{}, err
 		}
-		// Start from zero for every record. Each body is the WHOLE item, and
-		// omitempty leaves a cleared field out of the JSON entirely — so
-		// unmarshalling over the previous record would carry forward exactly
-		// the values a transition meant to drop. A settled item kept the note
-		// it parked with, and would have kept its resume point too.
+		if !StateRecord(r.Kind) {
+			continue // narrative, not state — see stateKinds
+		}
+		// Start from zero for every state record. Each body is the WHOLE
+		// item, and omitempty leaves a cleared field out of the JSON entirely
+		// — so unmarshalling over the previous record would carry forward
+		// exactly the values a transition meant to drop. A settled item kept
+		// the note it parked with, and would have kept its resume point too.
 		w = WorkItem{}
 		if err := json.Unmarshal(r.Body, &w); err != nil {
-			return WorkItem{}, fmt.Errorf("queue: item %s record %d: %w", id, r.Seq, err)
+			// A state record that will not parse is real corruption, not a
+			// record of another shape: say which one, because the reader that
+			// hits it next has no other way to find it.
+			return WorkItem{}, fmt.Errorf("queue: item %s record %d (%s): %w", id, r.Seq, r.Kind, err)
 		}
 		found = true
 	}
 	if !found {
-		return WorkItem{}, fmt.Errorf("queue: no such item %s", id)
+		return WorkItem{}, fmt.Errorf("%w: %s", ErrNoItem, id)
 	}
 	return w, nil
 }

@@ -110,6 +110,250 @@ Work enters through an **ingress** and never otherwise. Every stage may **park**
 its WorkItem into the exception queue rather than proceed; a factory that cannot
 stop is not automated, it is unsupervised.
 
+### An unread exception is not an exception
+
+Parking is only half the control. A parked item nobody looks at is
+indistinguishable from work that was never flagged, and in-band notification
+guarantees nobody looks: a queue that announces itself only inside the control
+room announces itself only to people already in the room. A dark factory whose
+exception queue goes unattended is unsupervised by the same sentence.
+
+So a park carries a **severity**, stated by the parking stage — the only place
+that knows whether a failing unit test and a revoked credential are the same
+emergency. It is a parameter rather than a field, because a stage that would
+forget a field cannot forget an argument, and an unstated severity resolves to
+*medium* rather than to the quiet end: silence must never read as "nothing to
+see", here as everywhere else.
+
+Exceptions **age**, and the age is measured against a stated **objective** —
+four hours by default, which is a CC7 response-time objective and not a
+dashboard threshold. Past it the room tells somebody **out of band** through a
+notifier seam it knows nothing about, and repeats once per objective up to a
+bound: an exception nobody answers must not become an alarm nobody can
+silence, because a muted page looks like coverage. Every telling is recorded
+*before* it is sent, carrying the objective in force at the time — the count
+is what bounds the repetition, so a notice the chain never saw is one that
+would be sent forever, and an unrecordable escalation is an unsent one for the
+same reason break-glass takes that posture.
+
+The metric is the **oldest parked item**, not the queue's length. Length says
+how much there is to do; only the oldest says whether anything is being done,
+and a queue drained briskly except for the one item nobody wants looks healthy
+by every other measure. An exception queue with an unbounded oldest-item age
+is the finding written for you.
+
+### A queue that cannot say what is runnable
+
+The exception queue names work that needs a person; the landings index names
+work that finished. Everything actually in flight sits between them, and the
+state vocabulary alone cannot describe it. **Pending** says the same word for
+an item that is next and an item waiting behind something that will never
+settle — so a queue of pending work and a queue of *runnable* work look
+identical from outside, and the difference between them is the difference
+between a factory with nothing to do and a factory that has stopped.
+
+So the frontier is a projection over the same rows (decided 2026-09-01): each
+unit reports whether it is claimable now, which declared dependencies have not
+settled, which item a cascade actually started at, and which runner holds its
+claim with how much lease left.
+
+Two of those are not folds over the chain, which is why they are additions
+rather than merely a rendering. The **cascade root** exists because `Claim`
+writes its cause as prose, nesting its own dependency's note inside its own:
+the root's reason survives down the chain as the tail of a string that grows at
+every level, present but unusable as a key, so nothing can group the queue by
+what broke or answer how many items one failure is holding up. The **claim
+holder** exists because an item's chain records that a runner took it and can
+never record that the runner went away — a lapsed lease beside a still-claimed
+state is the room's only evidence that a row is work nobody is doing, and
+reading it is what put a single read on the store's lease seam.
+
+Readiness is deliberately item-local: the stop button and the budget are *not*
+folded into it. Ready work that is not moving **is** the symptom, and a flag
+that went false whenever claims were stopped would erase it at the exact
+moment it fired. The cause sits beside the count, never inside it.
+
+**And the count is a projection of that listing, never a second reading of
+it.** The counter and the rows began as separate walks over the same index,
+each carrying its own copy of the vocabulary for *not settled yet*, and they
+agreed only because two switch statements happened to match. That is agreement
+with no mechanism behind it: a state added to one and not the other makes the
+number on the wall stop describing the queue underneath it, and stop quietly —
+which is the failure this system's state vocabulary has already had once, where
+work did not disappear loudly but plausibly. So the queue numbers are a tally
+of the rows the listing serves, and what the count calls pending is what the
+pump will claim, read from one function both of them call. The cost is stated
+rather than hidden: the status endpoint folds the queue where it used to walk
+an index, which is the trade the exception queue's health metric already makes
+beside it, for the same reason.
+
+**The table is the representation of record; a diagram renders on top of it.**
+A node-link view of the same edges is worth having and is not the feature: a
+graph that is the only way to see blocked work is a barrier to anyone reading
+with a keyboard or a screen reader, and it holds the whole view hostage to a
+layout decision.
+
+**Where that layout is computed is settled once, for every graph view.** In Go,
+server-side, shipping coordinates; the browser renders and does not lay out.
+`dist/` is committed and `go:embed`-served so CI stays a Go toolchain, which
+makes any JavaScript layout library bytes in this repository forever — a bill
+this repo has already paid once. A Go dependency sits in a toolchain CI runs
+anyway, and the same computed layout is what lets a static export reach an
+auditor who will never be handed a running daemon.
+
+### A claimed item is a black box until it settles
+
+The frontier says which work could be moving. It says nothing about the work
+that *is*: a claimed item reports `state=claimed head=` for the whole length
+of a run, which on a real agent is minutes to tens of minutes. That was never
+a shortage of facts. `telemetry.Stage` brackets build, gate, land and the
+post-land check; the ACP session is a live stream of messages, tool calls and
+refusals; the composer resolved a concrete set of layers on a named seat. All
+of it was known inside the daemon and none of it left.
+
+So the room shows a **unit at a time** (decided 2026-09-01): identity — item,
+route, key, seat, and the composed layers the run was launched with; progress
+— stage, time in stage, the head once built; and communication — the agent's
+messages and tool calls as they happen, its refusals, and the box verbs with
+their reasons. Several units in flight are several cards, because a merged
+feed is where fan-out fails: the question is whether *this* unit is moving,
+and a stream of five interleaved runs answers it by scrolling.
+
+**The live stream is a window, not a record**, and that is the load-bearing
+choice. Putting the per-call sequence on the evidence chain would look like
+the stronger option — it is durable, and "if the room can show it, the chain
+recorded it" is otherwise a good rule — but it contradicts the split this
+system already made twice. Which tools ran and which were refused reach the
+chain as a tally when the run settles; the agent's own account reaches it as
+`agent-text`; the sequence lives on span events. A hash-chained,
+WORM-exported, audit-period-retained record per tool call buys an auditor
+nothing they were not already given and costs the evidence plane its
+proportion. This is the telemetry column of the table under Telemetry, on a
+new surface: interesting while it is happening, superseded by the chain the
+moment it settles.
+
+What keeps that honest is that the two accounts must **agree**. The live
+frames and the settled tally come off one dedup in the runtime rather than
+two readings of the stream, so an operator who watched forty tool calls and
+an auditor who reads thirty is a test failure and not a discrepancy anyone
+has to notice. The cost is stated rather than implied: the window is bounded
+and a daemon restart loses it, which is survivable precisely because the run
+it was watching was that daemon's child and died with it.
+
+**The visualization is still a forcing function on the recording**, in the
+place where it should be. The room wanted to show which layers an agent was
+composed from, and could not: the `agentref` is a digest, and recovering the
+composition behind it meant re-resolving the bundle from the same material at
+the same commits — exactly the thing a record exists so nobody has to have.
+So the layers now ride the `agent-run` record, in application order, which is
+the part the order carries. That is a chain change the view demanded, and it
+is the right kind: a fact about the run, written once, not a stream.
+
+**An empty timeline is reported as one of two things.** A unit this daemon is
+running and a unit it merely knows about are both silent, and only one of them
+is a run to go and look at. Left to infer, a reader infers the alarming one —
+so the card says which, and a run announces itself to the bus at its first
+instant rather than at its first tool call.
+
+### A session is not the unit of work
+
+A run ends in one of three ways an agent can choose, and only two of them
+existed. It can finish, and it can **escalate** — a recorded refusal that
+parks. What it could not say is the thing an agent 80% through a change and
+out of context actually means: *I am not finished and I am not stuck.*
+Escalating parks work that needs no person and discards what the session
+built; grinding on produces the low-quality commit the working contract exists
+to prevent. So there is a third transition (decided 2026-09-01): the agent
+requests a **handoff**, the session ends, and the same item goes back to the
+queue for a fresh one.
+
+Gas City makes the same distinction with `request-restart`, and the half worth
+copying is *who decides*. The agent requests; the orchestrator kills the
+session and chooses whether another follows. Here that decision is a bound —
+hops are counted on the item, each one an evidence record, and exhausting the
+limit parks with the reason named. A session able to summon its own successor
+indefinitely is an unbounded spend with no landing, and the hop count doubles
+as the answer to "how many sessions did this change take", which is the most
+direct signal there is about whether an item was sized for one.
+
+**Handed off is not parked, for the reason waiting is not parked.** The
+exception queue names work that needs a person; a handed-off item needs
+nothing but another session. Filing it there would bury real exceptions under
+routine continuity exactly as filing a pending gate there would bury them
+under routine review latency — the same argument, a third time, on a third
+axis. It is not pending either: pending says nobody has started this, and an
+item three sessions deep has been started three times.
+
+What makes it worth the state is that the successor **continues** rather than
+restarts. The workspace is held and the partial commit kept, so the next
+session adopts the tree the last one stopped in — and the notes it left are
+written to the seat *at the hop* rather than at settle, because the item does
+not settle and a note deferred to settle is a note the successor wakes
+without. That is the continuity machinery of Phase 12 fired at the moment it
+is worth the most, which is the cheapest available extension of the one result
+this system has actually measured (`docs/experiments/continuity-2026-08-31.md`:
+4/4 against 0/4).
+
+### A new stage is a gate, a dependent item, or a change to the transaction
+
+`internal/loop`'s `Run` fixes a sequence — claim, authorize, lease,
+materialize, build, gate, land, settle — so the question that follows is
+whether adding a stage should be an edit to it (decided 2026-09-01). Gas Town
+answered no on its own axis: it hardcoded Mayor, Deacon, Witness, Refinery
+and Polecat as Go types, ran it, and then spent seven months extracting every
+one into a downloadable pack, concluding flatly that any orchestration pack is
+pure config.
+
+That lesson binds here, and it binds on the axis it was learned on. Gas Town's
+five were **agent roles**, and roles are already config here — the layer
+system is that extraction, done up front, which is what "the layer is the
+surface" means below. What `Run` holds is not a set of roles. It is one unit
+of work's transaction, and the two are not the same kind of thing.
+
+So a new stage is one of three things, and only the last is code:
+
+| The new work | Where it goes |
+|---|---|
+| judges a candidate change | a `Gate` in the Box's gate set |
+| produces a change of its own | a dependent `WorkItem`, under its own role layer |
+| must happen inside one unit's bracket | `Run` — and that is not orchestration |
+
+A critique pass and a security review read a change and answer about it, which
+is exactly what a gate is: `Evaluate` sees the whole ChangeSet and returns
+pass, fail, or *pending*, and the verdict is recorded. `approval.GateAdapter`
+is the precedent — a gate with a human behind it — and one with an agent
+behind it asks no more of the loop than that one did.
+
+A propose/critique **pair** is different, because the critic edits. That is a
+second unit of work, and it wants what every unit of work has: its own lease,
+its own budget slot, its own evidence scope, its own `agentref`, and its own
+line in the exception queue. Inside `Run` each of those is singular by
+construction — one claim, one workspace lease, one resume point (`Built` is
+one commit), one meter slot taken per item by the pump, one park note carrying
+one severity. Two agent turns in one `Run` would share every one of them. So
+the pair belongs one level up, in the work graph, where the nodes are
+one-to-one with the things that must be separate. Phase 10's `DependsOn` is
+that level, and it is this axis's answer to Gas City's formula graph: an
+orchestrator running a graph across agents, except that each node is a whole
+audited unit rather than a step inside one.
+
+What stays in Go is the transaction, deliberately. A declared sequence makes
+it configurable to put `land` before `gate`, to build outside a lease, or to
+settle something never claimed — and those are not misconfigurations that park
+an item, they are the ones that leave an unjudged commit on a branch. The
+stages between the seams are not a pipeline anyone wants a different shape of;
+they are the reason a change an agent made is landable and evidenced at all.
+
+**What this does not yet reach.** The graph is enforced where it must be —
+`Claim` blocks on an unsettled dependency and cascades a dead one, naming the
+cause — but nothing outside a test creates a dependent item, and an item
+cannot name the role it should run under: the pump routes by box and
+repository, and a loop's builder carries one role. The extension point is
+therefore real in the queue and not yet reachable from `box.yaml`. That is a
+producer and a routing key, not a retrofit — nothing already recorded is
+missing for want of it — which is why this is a decision with follow-on work
+rather than a gap that had to be closed first.
+
 ## The estate
 
 A Box *enrols* repositories, which is a declaration. The estate *observes* them,
@@ -352,6 +596,88 @@ looking for, so the coupling is a control rather than a convenience: every
 invocation inherits a why, a timeline, and a postmortem obligation, and
 "show me every break-glass invocation" resolves to a list of incidents. A
 campaign can never reach for elevated authority, however urgent it feels.
+
+### And a data envelope: what the work may touch, and which endpoints see it
+
+The authority envelope says what work may **do**. It says nothing about what
+work may **touch**, and those are different questions of the same shape
+(decided 2026-09-01).
+
+Vulnerability remediation across a regulated estate is the case that makes it
+concrete. An embargoed or internally-discovered finding is material non-public
+information; a published CVE with a known upgrade path is not. Both arrive as
+"fix a security issue", both route to the same builder, and nothing here could
+tell them apart. Whether a human reviews the resulting pull request is beside
+the point — the decision that mattered was made the moment the description was
+sent to a model.
+
+So an origination also declares a **data envelope**: the class of its payload
+and of the work it opens, the endpoints that may receive it, the classes of
+context readable under it, what may appear in spans and evidence, and whether
+its own text may travel at all or only a reference to it. That last is the
+sharpest of the five and worth keeping available — the strongest handling of an
+embargoed finding is not redacting its description but opening work that says
+"this test fails, make it pass" and never telling the agent it is a security
+issue, which is a per-class judgement and therefore a declared option rather
+than something decided in prose at dispatch time. The taxonomy itself is the
+operator's; nothing here ships class names, because the same finding is
+material non-public information in one estate and an ordinary ticket in
+another.
+
+**It belongs on the origination, not on the Box and not on the bundle.**
+Sensitivity travels with the request: one repository legitimately receives a
+routine dependency bump and an embargoed fix, so scoping to the Box would force
+the restrictive envelope onto everything the Box does. And the bundle is *what
+the agent is* where the class is *what the work is* — one builder serves both,
+under different envelopes.
+
+**The envelope narrows and never widens.** It is an input to bundle resolution,
+intersected with the ceiling in force, and the resolved bundle's endpoints and
+readable context are that intersection. Delegation intersects and never unions,
+applied to data handling; an agent layer cannot widen its origination's
+envelope, and that is the property that makes the envelope worth declaring
+rather than documenting. An endpoint here is defined by where the payload
+*goes* rather than by what answers, so an MCP server is one. A tool is not:
+tool allows already intersect across layers and a narrower layer can only
+narrow, so the property the envelope would need there already holds.
+
+**Absence means minimum.** An origination whose declaration is missing is
+refused, never given a permissive default — the same rule as an empty grant set
+and an unset rollout, a third time, because unclassified is the state every
+mis-scoped request arrives in and therefore the state that has to be safe. It
+extends down every field: an unstated redaction posture is the strictest, an
+unstated payload posture sends a reference rather than text, and an endpoint
+nobody named is refused, since "whatever the runtime was configured with" is
+not an answer to which endpoint saw the data.
+
+**Refusal, not silent narrowing.** A bundle reaching past its envelope does not
+resolve to a smaller one. A narrowed run nobody was told about is worse than a
+refused one.
+
+**It is on the record almost for free.** Because the envelope constrains bundle
+resolution and the bundle is content-addressed, folding it into the digest
+makes a different envelope a different agent — exactly as continuity notes
+already are — and "this run was permitted to see class X and ran against
+endpoint Y" becomes a fact on the chain rather than an unanswerable question.
+Anthropic is already named a CC9.2 subservice organization here; this is what
+turns that from a design note into per-run evidence.
+
+This is one half of a pair, and neither substitutes for the other. The envelope
+governs what an agent may be **given**; confinement stops it **taking** more,
+and a live run already read past its workspace once.
+
+**What is declared and what is enforced are not the same set yet**, which is
+recorded rather than implied. The mechanism lives in the agent plane, where the
+intersection and the resolve-time refusal are. The redaction posture is
+declared and the telemetry path does not consult it. The second enforcement
+point — the stream, where tool policy is already enforced — has nothing
+envelope-shaped in it. And the declaration has no governed home: the ingress
+kind is a Go constant with behaviour welded to it rather than a declaration, so
+an envelope is supplied at the resolver's seam and no `box.yaml` configures
+one. It is the fifth field of the collapse the kind is waiting on, cheap there
+and archaeology afterwards — every run that executes before classification
+exists is unclassifiable retroactively, and no query recovers what class of
+data a past run was permitted to see.
 
 ### Campaigns reconcile, they do not enumerate
 
@@ -654,21 +980,50 @@ server or a raised model changes the `agentref` and shows up in the record.
 
 What an agent may read is declared, not assumed: repositories at pinned commits,
 optionally narrowed to paths, read-only unless the role grants otherwise, plus
-the knowledge scopes it may query.
+the knowledge scopes it may query — and, where a data envelope is in force, only
+material at a class that envelope reads.
 
-The runtime materializes exactly that set and nothing else, so least privilege
-holds by construction — the agent cannot read what it was not granted, rather
-than being instructed not to. And because the context set is part of the
-recorded bundle, "which agents could have seen this" is answerable after the
-fact, which is the question incident response actually asks.
+The runtime materializes exactly that set and nothing else. And because the
+context set is part of the recorded bundle, "which agents could have seen
+this" is answerable after the fact, which is the question incident response
+actually asks.
+
+### Materializing the set is not confining the agent
+
+Materialization makes the grant *precise*. It does not by itself make it a
+*boundary*, and the gap is not academic: a live run had an agent account for
+its escalation by citing what it had found in "the repo, its git history, the
+factory mirror, and the sibling workspace" — three of which it was never
+granted. A process on the runner can read the runner, so the set describes
+what an agent was given rather than what it can reach.
+
+Confinement is what closes that, and it is a **container** (decided
+2026-09-01): the workspace mounted writable, the materialized set mounted
+read-only, and no third path. The factory's root — mirrors, the store, every
+other run's workspace — is then unreachable by *absence* rather than by a
+rule, which is the distinction worth paying for, because a rule is something
+a confused process can be talked past and an unmounted path is not. The OS
+sandbox is the alternative and was rejected for shape rather than for
+efficacy: an allow-list over a filesystem that is otherwise present has to
+enumerate everything a runtime touches, per OS, and that list rots.
+
+The wrapper is **configuration, not a second code path** — an image declared
+on a Box, rendered into the agent's argv — because the daemon must keep
+exactly one way to start an agent. Two limits are recorded rather than
+implied. It bounds the filesystem and not the network, since an agent that
+cannot reach a model does nothing, so exfiltration is a seam that does not
+exist yet. And an unconfined Box remains possible, which is the honest
+default while the image is an operational prerequisite rather than a given.
 
 **Pulled-in repositories are an injection surface.** A README or comment in a
 context repository can carry instructions, and this is the same class of problem
 as knowledge poisoning: attack what the agent believes rather than what it runs.
-Two mitigations. Context repositories are pinned and read-only, so their content
-cannot change mid-run. And the base layer states that context material is data
-to be read, never instructions to be followed — a weak control on its own, which
-is why the pinning and the tool policy carry the real weight.
+Context repositories are pinned and read-only, so their content cannot change
+mid-run; confinement is what makes that read-only a property of the runner
+rather than a property of a file mode. The base layer also states that context
+material is data to be read, never instructions to be followed — a weak control
+on its own, which is why the pinning, the confinement, and the tool policy carry
+the real weight.
 
 ## Evidence
 
@@ -709,7 +1064,7 @@ the design is built around.
 | Segregation of duties | builder, gate, and deploy authority are distinct grants — a builder holds no land grant; agents cannot approve their own work | per-principal attribution (actor and on-behalf-of) on every evidence record |
 | Logical access (CC6) | GitOps — the control plane holds no cluster credentials; only the reconciler writes to clusters, from gated env-repo commits | env-repo history, installation scope |
 | Monitoring (CC4.1) | documented periodic human review of a sample of automated changes | sign-off records from the control room |
-| Incident handling (CC7) | exception queue is a first-class workflow with escalation and resolution | parked/resolved transitions |
+| Incident handling (CC7) | exception queue is a first-class workflow with severity, aging against a stated response-time objective, bounded out-of-band escalation, and resolution | parked/resolved transitions, escalation records carrying the objective in force |
 | Break-glass | defined, logged, reviewed procedure | every invocation, with reviewer sign-off |
 | Vendor management (CC9.2) | GCP, GitHub, Anthropic — subservice organizations with reports available | vendor review records |
 
@@ -773,6 +1128,10 @@ Honeycomb is good at — rather than by a trace id held open across the gaps.
 
 Agent runs get the same treatment: ACP tool calls become spans, so what the
 agent actually did is legible and timed rather than inferred from its output.
+The same fan-in feeds the control room's per-unit live view — see "A claimed
+item is a black box until it settles" — which is telemetry's other property
+put to use: it is the account that exists *while the run is running*, where
+the evidence chain's is the one that is still there next year.
 
 ### The collector
 
@@ -903,7 +1262,19 @@ turns any prompt injection or confused agent into a production change.
 
 1. **ACP stream interception** — the agent runtime speaks ACP, whose stream
    carries tool calls and permission requests. The only place policy can be
-   enforced without patching the agent.
+   enforced without patching the agent. Having a protocol is why there are no
+   per-provider adapters here, and that remains the right call — but one
+   protocol still has versions, so **the dialect is pinned and asserted**
+   (decided 2026-09-01), the way a skill resolves to a digest and never to a
+   branch. A transcript recorded from a known-good agent replays in a
+   conformance test, so an update shape that moves fails a build. It moved
+   once already and cost nothing visible: the tool-call metric read zero
+   across eight experiment runs and the only thing that noticed was a human
+   reading a column of zeros. The shapes that carry the count are the shapes
+   that carry enforcement, so a dialect this runtime cannot parse is not an
+   undercount, it is a denied tool nobody recognised. Same argument as the
+   store conformance suite, on a different surface: the property is asserted
+   by a suite rather than believed.
 2. **Role-scoped authority** — an agent holds leases only on repo roles its Box
    policy grants. `env` and `infra` are distinct grants from `service`.
 3. **Gates** — nothing lands unreviewed, and a gate evaluates the ChangeSet
@@ -942,6 +1313,17 @@ anything else. This is the Thunderdome posture (see Prior art), made auditable
 by machinery the ceremony-free version lacks: every landing, failure, and
 repair is on the evidence chain, keyed by sha, and revert-forward is the
 repair primitive of last resort rather than a bisection queue.
+
+**Repair carries the attempt it follows.** Opening through a route makes the
+repair item new work — a task string and nothing else — so its agent would
+start cold and re-derive from the diff what the last run already knew. Instead
+the item carries the red sha, the branch that still holds the change, which
+check reported it, and the predecessor's handoff, and those resolve into a
+**layer at wake time** exactly as seat continuity does. Merge semantics stay
+explicit rather than being flattened into the instruction, and the carried
+context is in the `agentref`: "this run was woken knowing X" becomes
+answerable after the fact, the same way "which instructions was it operating
+under" already is.
 
 **The gated lane** — environment repositories, infrastructure, campaign waves,
 and anything a Box's policy names. Gates pass, then land. Unchanged.

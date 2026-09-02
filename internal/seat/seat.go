@@ -39,24 +39,83 @@ func (s *Seat) Scope() string { return "seat/" + s.Name }
 // come from any settled state — a parked run's "here is where I got stuck"
 // is exactly what the next occupant needs most.
 func (s *Seat) RecordHandoff(ctx context.Context, item queue.WorkItem, repoRemote string, notes []string) error {
+	repo, commit := "", ""
+	if repoRemote != "" && item.Head != "" {
+		repo, commit = repoRemote, item.Head
+	}
+	return s.write(ctx, item.ID, repo, commit, notes)
+}
+
+// RecordMidRun writes the notes of a session ending WITHOUT its item settling:
+// an agent that asked for a fresh session mid-change.
+//
+// Closure is normally part of finishing, and for a mid-run handoff that is too
+// late by construction. The item does not settle — it goes back to the queue
+// for a successor of itself — so a note deferred to the settle path is a note
+// the successor wakes without, which is the one thing the verb exists to
+// carry.
+//
+// The notes bind to no commit on purpose. What the session left is committed
+// in a workspace and may never land; binding them to that sha would have them
+// swept stale the moment the tree went, which is the opposite of what the
+// successor needs from them.
+func (s *Seat) RecordMidRun(ctx context.Context, run string, notes []string) error {
+	return s.write(ctx, run, "", "", notes)
+}
+
+func (s *Seat) write(ctx context.Context, run, repo, commit string, notes []string) error {
 	for _, n := range notes {
 		if strings.TrimSpace(n) == "" {
 			continue
 		}
-		r := knowledge.Record{
-			Scope:    s.Scope(),
-			Claim:    n,
-			Producer: s.Name,
-			Run:      item.ID,
-		}
-		if repoRemote != "" && item.Head != "" {
-			r.Repo, r.Commit = repoRemote, item.Head
-		}
-		if _, err := s.Base.Put(ctx, r); err != nil {
+		if _, err := s.Base.Put(ctx, knowledge.Record{
+			Scope: s.Scope(), Claim: n, Producer: s.Name, Run: run,
+			Repo: repo, Commit: commit,
+		}); err != nil {
 			return fmt.Errorf("seat %s: handoff: %w", s.Name, err)
 		}
 	}
 	return nil
+}
+
+// HandoffFrom returns the notes one named run left in this seat's scope, in
+// the order they were written.
+//
+// [Seat.WakeLayer] answers "what has this seat been doing lately", which is
+// the right question for the seat's next run and the wrong one for a
+// successor that is not it. Repair work is a different item on a different
+// line, opened as new work through a route, and what it needs is the attempt
+// IT follows rather than the seat's recent history — the same records, keyed
+// by run instead of by recency.
+//
+// The lookup stays inside this seat's scope. A predecessor that sat elsewhere
+// carries its facts to the successor and not its notes, because a seat's
+// memory is its own: reading another's would be exactly the cross-scope read
+// the knowledge plane refuses everywhere else, and it would need a grant to
+// be anything but that.
+func (s *Seat) HandoffFrom(ctx context.Context, run string) ([]string, error) {
+	if run == "" {
+		return nil, nil
+	}
+	records, err := s.Base.Retrieve(ctx, knowledge.Query{Granted: []string{s.Scope()}})
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, r := range records {
+		if r.Run != run {
+			continue
+		}
+		// Marked, not hidden — same rule as the wake layer. A successor
+		// deciding whether its predecessor's note still applies needs to see
+		// that the code underneath it has moved.
+		if r.Stale {
+			out = append(out, r.Claim+" [stale: the code this was about has moved]")
+			continue
+		}
+		out = append(out, r.Claim)
+	}
+	return out, nil
 }
 
 // WakeLayer builds the continuity layer for the seat's next run: its most
