@@ -67,6 +67,17 @@ const (
 	// exists for every run — empty when the bundle granted nothing — so the
 	// argv never has to be conditional on what a particular bundle carries.
 	ContextPlaceholder = "{{context}}"
+
+	// SkillsPlaceholder is replaced with the run's materialized skill plugin.
+	//
+	// Separate from the context set because the two are granted separately and
+	// mean different things to a reader of the argv: context is reference
+	// material the bundle handed the agent, skills are capability it was
+	// given. Like the context directory it exists for every run, so the argv
+	// stays unconditional; unlike it, a wrapper that omits this one fails
+	// quietly rather than loudly — the agent starts, and simply never has the
+	// skills its own agentref says it was running.
+	SkillsPlaceholder = "{{skills}}"
 )
 
 // Substitute fills the per-run placeholders in an agent argv.
@@ -77,11 +88,12 @@ const (
 // nobody wrote. A path carrying a comma or a colon is refused for the same
 // reason: those are the delimiters a mount argument is parsed on, so such a
 // path would change the meaning of the argument rather than fill it.
-func Substitute(argv []string, workspace, contextDir string) ([]string, error) {
+func Substitute(argv []string, workspace, contextDir, skillsDir string) ([]string, error) {
 	out := slices.Clone(argv)
 	for _, s := range []struct{ placeholder, path, what string }{
 		{WorkspacePlaceholder, workspace, "workspace"},
 		{ContextPlaceholder, contextDir, "context directory"},
+		{SkillsPlaceholder, skillsDir, "skills directory"},
 	} {
 		if !slices.ContainsFunc(out, func(a string) bool { return strings.Contains(a, s.placeholder) }) {
 			continue
@@ -161,6 +173,7 @@ func (p Profile) Wrap(agent []string) ([]string, error) {
 		// can land. --mount refuses.
 		"--mount", "type=bind,source=" + WorkspacePlaceholder + ",target=" + WorkspacePlaceholder,
 		"--mount", "type=bind,source=" + ContextPlaceholder + ",target=" + ContextPlaceholder + ",readonly",
+		"--mount", "type=bind,source=" + SkillsPlaceholder + ",target=" + SkillsPlaceholder + ",readonly",
 		// The same path inside as out. The prompt names the context directory
 		// by its host path and every tool call starts from the workspace, so a
 		// remapped root would make both wrong.

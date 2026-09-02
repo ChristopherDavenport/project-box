@@ -59,9 +59,13 @@ type Builder struct {
 	// settle via [Builder.Handoff].
 	Seat      *seat.Seat
 	WakeNotes int
-	// Mirror materializes the bundle's context set; nil is fine when
-	// bundles carry no context repos.
+	// Mirror materializes the bundle's context set and its skills; nil is
+	// fine only when bundles carry neither.
 	Mirror *gitforge.Mirror
+	// InheritSettings passes the machine's own harness configuration through
+	// to the builder — see [Runtime.InheritSettings]. The plugin set is
+	// recorded in the bundle either way.
+	InheritSettings bool
 	// Spend, when set, reports what a run cost to the capacity meter. The
 	// adapter is the only place that can: the loop sees a commit, the pump
 	// sees a slot, and only the stream sees tokens. Nil leaves the factory
@@ -169,6 +173,34 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		granted = contextDir
 	}
 
+	// Skills land as a generated plugin beside the workspace, and the
+	// directory exists for every run for the same reason the context one
+	// does: it is the third thing a confining wrapper is told to let through,
+	// and an argv conditional on what a bundle happens to carry is one an
+	// operator cannot read and be sure of.
+	//
+	// Failing here rather than proceeding without them: a bundle that names a
+	// skill and an agent that never received it is the silent-divergence case
+	// the agentref exists to make impossible, and from the outside it looks
+	// exactly like a run that simply chose not to use it.
+	skillsDir := forge.SkillsDir(ws.Dir)
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		return "", err
+	}
+	loaded := "" // handed to the harness only when something is actually there
+	if len(bundle.Skills) > 0 {
+		if b.Mirror == nil {
+			return "", fmt.Errorf("acp: bundle grants %d skills but the builder has no mirror to materialize them", len(bundle.Skills))
+		}
+		wrote, err := b.Mirror.MaterializeSkills(ctx, skillsDir, bundle.Skills)
+		if err != nil {
+			return "", err
+		}
+		if wrote {
+			loaded = skillsDir
+		}
+	}
+
 	// The prompt itself, verbatim, immediately before it is sent.
 	//
 	// The agentref proves WHICH prompt ran and detects tampering, but it is a
@@ -189,7 +221,8 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	})
 
 	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: contextDir, Env: b.Env,
-		MaxTokens: b.MaxTokens, Transcript: b.Transcript, Progress: b.progress(ctx, ws.Run)}
+		MaxTokens: b.MaxTokens, Transcript: b.Transcript, Progress: b.progress(ctx, ws.Run),
+		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: b.InheritSettings}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, sent)
 	elapsed := time.Since(started)

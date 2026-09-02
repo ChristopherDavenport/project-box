@@ -126,8 +126,11 @@ type Box struct {
 	// render the rest is the same "derived, not authored" trade the deploy
 	// artifacts make.
 	Confine *Confine `yaml:"confine"`
-	Seat    string   `yaml:"seat"`
-	Repos   []Repo   `yaml:"repos"`
+	// Harness is what the box's builders load: plugins, pinned skills, and
+	// the MCP servers they are actually granted.
+	Harness Harness `yaml:"harness"`
+	Seat    string  `yaml:"seat"`
+	Repos   []Repo  `yaml:"repos"`
 }
 
 // Confine is box.yaml's spelling of [confine.Profile].
@@ -144,6 +147,70 @@ type Confine struct {
 	// Network is docker's --network when set. Empty keeps the default,
 	// because an agent that cannot reach a model API does nothing.
 	Network string `yaml:"network"`
+}
+
+// Harness is the agentic surface handed to a box's builders.
+//
+// It exists because the surface was already there and nobody had declared it.
+// The ACP adapter starts every builder with the machine's own harness settings
+// in play, so a box inherited whatever ~/.claude had enabled — plugins, their
+// skills, their hooks, and their MCP servers — without a line of configuration
+// saying so and without any of it reaching the agentref. These fields make the
+// inheritance a decision.
+type Harness struct {
+	// Plugins is where the builders' plugins come from:
+	//
+	//   user  the machine's enabled set, read fresh on EVERY run, so
+	//         enabling a plugin in the harness reaches the next build with
+	//         no reload. The default, because a factory nobody can extend
+	//         without a restart is a factory nobody extends.
+	//   none  nothing but what skills: pins. The bundle is the only
+	//         authority and the machine's configuration is not consulted.
+	//
+	// Either way the resolved set is recorded in the bundle: what changes is
+	// who decides it, never whether it is known.
+	Plugins string `yaml:"plugins"`
+	// PluginMCP loads each plugin's own MCP servers along with the plugin.
+	//
+	// Off by default, and this is the one default here chosen for safety
+	// rather than convenience. A plugin's knowledge is not its credentials: a
+	// probe of the running dogfood found builders inheriting authenticated
+	// servers for Slack, Jira, GitHub, Datadog and Honeycomb, none of which a
+	// box had asked for and any of which an unattended agent could have
+	// written through. Grant servers deliberately under mcp: instead.
+	PluginMCP bool `yaml:"plugin_mcp"`
+	// Skills are pinned by ref: a repo, a commit, and a path. They do not
+	// live in the box's own repository, so a skill can be governed and
+	// versioned where it belongs and still name an exact tree here.
+	Skills []Skill `yaml:"skills"`
+	// MCP names the servers the builders may call. Empty means none: with
+	// plugin MCP off and nothing listed, a builder has no MCP surface at all,
+	// which is the right starting point for an agent nobody is watching.
+	MCP []MCPServer `yaml:"mcp"`
+}
+
+// Skill pins one skill to the exact tree it names.
+type Skill struct {
+	// Name is what the skill is called to the agent, and the directory it is
+	// materialized under. It need not match the name in the source repo.
+	Name string `yaml:"name"`
+	// Repo is the remote the skill comes from, Commit the commit it is pinned
+	// at — a commit, never a branch — and Path where the skill directory sits
+	// in that tree.
+	Repo   string `yaml:"repo"`
+	Commit string `yaml:"commit"`
+	Path   string `yaml:"path"`
+}
+
+// MCPServer is one MCP server granted to a box's builders.
+type MCPServer struct {
+	Name string `yaml:"name"`
+	// Command is a stdio server's argv; URL is an HTTP one. Exactly one.
+	Command []string `yaml:"command"`
+	URL     string   `yaml:"url"`
+	// Tools narrows what may be called, enforced at the stream by the
+	// bundle's tool policy. Empty is every tool the server offers.
+	Tools []string `yaml:"tools"`
 }
 
 // Repo is one repository in a Box.
@@ -229,6 +296,9 @@ func (c *Config) validate() error {
 		if len(bx.Agent) > 0 && bx.Seat == "" {
 			bx.Seat = "mason"
 		}
+		if err := bx.Harness.validate(bx.Name); err != nil {
+			return err
+		}
 		if bx.Confine != nil {
 			if len(bx.Agent) == 0 {
 				return fmt.Errorf("boxcfg: box %s: confine with no agent — a repo's build command runs on the daemon itself, and there is nothing here to put a container around", bx.Name)
@@ -273,6 +343,63 @@ func (c *Config) validate() error {
 				r.Check = "true"
 			}
 		}
+	}
+	return nil
+}
+
+// PluginsInherit and PluginsNone are the values of [Harness.Plugins].
+const (
+	PluginsInherit = "user"
+	PluginsNone    = "none"
+)
+
+// commitLen is the length of a full hex object id. Skill pins are required to
+// be one: an abbreviated sha is ambiguous across a repository's lifetime, and
+// a branch name would resolve to different content on different days — which
+// is exactly the failure the pin exists to prevent, arriving silently.
+const commitLen = 40
+
+func (h *Harness) validate(box string) error {
+	switch h.Plugins {
+	case "":
+		h.Plugins = PluginsInherit
+	case PluginsInherit, PluginsNone:
+	default:
+		return fmt.Errorf("boxcfg: box %s: harness.plugins %q — expected %q or %q",
+			box, h.Plugins, PluginsInherit, PluginsNone)
+	}
+	seen := map[string]bool{}
+	for i := range h.Skills {
+		s := &h.Skills[i]
+		switch {
+		case s.Name == "":
+			return fmt.Errorf("boxcfg: box %s: skill %d has no name", box, i)
+		case strings.ContainsAny(s.Name, "/\\") || s.Name == "." || s.Name == "..":
+			return fmt.Errorf("boxcfg: box %s: skill name %q must be a plain directory name", box, s.Name)
+		case seen[s.Name]:
+			return fmt.Errorf("boxcfg: box %s: skill %q is declared twice — the later pin would silently win", box, s.Name)
+		case s.Repo == "":
+			return fmt.Errorf("boxcfg: box %s: skill %s has no repo", box, s.Name)
+		case s.Path == "":
+			return fmt.Errorf("boxcfg: box %s: skill %s has no path", box, s.Name)
+		case len(s.Commit) != commitLen:
+			return fmt.Errorf("boxcfg: box %s: skill %s is pinned to %q — a skill ref needs a full %d-character commit, so the exact version a builder ran is answerable later",
+				box, s.Name, s.Commit, commitLen)
+		}
+		seen[s.Name] = true
+	}
+	names := map[string]bool{}
+	for i := range h.MCP {
+		m := &h.MCP[i]
+		switch {
+		case m.Name == "":
+			return fmt.Errorf("boxcfg: box %s: mcp server %d has no name", box, i)
+		case names[m.Name]:
+			return fmt.Errorf("boxcfg: box %s: mcp server %q is declared twice", box, m.Name)
+		case (len(m.Command) == 0) == (m.URL == ""):
+			return fmt.Errorf("boxcfg: box %s: mcp server %s needs exactly one of command or url", box, m.Name)
+		}
+		names[m.Name] = true
 	}
 	return nil
 }

@@ -30,6 +30,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
+	"github.com/ChristopherDavenport/project-box/internal/harness"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
@@ -162,14 +163,23 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				Store: d.store, Tenant: d.tenant, Box: bx.Name,
 				Command:   bx.Agent,
 				MaxTokens: cfg.Budget.MaxTokensPerRun,
-				Composer: &agent.Composer{Source: agent.StaticLayers{{
-					Name: "builder", Scope: agent.ScopeRole,
-					Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},
-					Instructions: "You are a build agent in an automated factory. Make the requested change precisely and minimally.",
-					Tools:        agent.ToolPolicy{PermissionMode: "acceptEdits"},
-				}}},
-				Seat:   &seat.Seat{Name: bx.Seat, Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
-				Mirror: d.mirror,
+				Composer: &agent.Composer{Source: &harness.Source{
+					Base: []agent.Layer{{
+						Name: "builder", Scope: agent.ScopeRole,
+						Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},
+						Instructions: "You are a build agent in an automated factory. Make the requested change precisely and minimally.",
+						Tools:        agent.ToolPolicy{PermissionMode: "acceptEdits"},
+					}},
+					Box:       bx.Name,
+					Inherit:   bx.Harness.Plugins == boxcfg.PluginsInherit,
+					PluginMCP: bx.Harness.PluginMCP,
+					Skills:    skillRefs(bx.Harness.Skills),
+					MCP:       mcpRefs(bx.Harness.MCP),
+					Resolver:  d.mirror,
+				}},
+				Seat:            &seat.Seat{Name: bx.Seat, Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
+				Mirror:          d.mirror,
+				InheritSettings: bx.Harness.Plugins == boxcfg.PluginsInherit,
 				// The stream is the only place the cost is visible, so it is
 				// the adapter that charges the meter.
 				Spend: func(ctx context.Context, run string, u acp.Usage) {
@@ -214,6 +224,28 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 		}
 	}
 	return loops, routes, nil
+}
+
+// skillRefs turns configured pins into unresolved refs. Resolution — the
+// commit-to-tree lookup that fills Digest — happens per run in the layer
+// source, not here: a digest captured at assemble time would be a digest that
+// stops matching the moment the pin is edited and reloaded.
+func skillRefs(skills []boxcfg.Skill) []agent.SkillRef {
+	out := make([]agent.SkillRef, 0, len(skills))
+	for _, s := range skills {
+		out = append(out, agent.SkillRef{Name: s.Name, Source: agent.Source{
+			Kind: agent.SourceGit, Repo: s.Repo, Commit: s.Commit, Path: s.Path,
+		}})
+	}
+	return out
+}
+
+func mcpRefs(servers []boxcfg.MCPServer) []agent.MCPRef {
+	out := make([]agent.MCPRef, 0, len(servers))
+	for _, m := range servers {
+		out = append(out, agent.MCPRef{Name: m.Name, Command: m.Command, URL: m.URL, Tools: m.Tools})
+	}
+	return out
 }
 
 // Reload re-reads the config file and swaps the daemon's shape. Identity

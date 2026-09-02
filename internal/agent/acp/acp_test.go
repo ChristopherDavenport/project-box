@@ -317,6 +317,11 @@ func fakeAgent(scenario string) {
 	}
 	mode := ""
 	var sessionID string
+	// newMeta is what session/new carried, kept so a scenario can hand it
+	// back. The harness surface is delivered in that one call and nowhere
+	// else, so echoing it is the only way to assert from outside that what
+	// the bundle granted is what the agent was actually offered.
+	newMeta := "null"
 	for {
 		m := f.read()
 		id := m["id"]
@@ -329,6 +334,11 @@ func fakeAgent(scenario string) {
 			f.write(map[string]any{"id": id, "result": map[string]any{"protocolVersion": v}})
 		case "session/new":
 			sessionID = "sess-1"
+			if p, ok := m["params"].(map[string]any); ok {
+				if b, err := json.Marshal(p["_meta"]); err == nil {
+					newMeta = string(b)
+				}
+			}
 			f.write(map[string]any{"id": id, "result": map[string]any{"sessionId": sessionID}})
 		case "session/set_mode":
 			if p, ok := m["params"].(map[string]any); ok {
@@ -338,6 +348,13 @@ func fakeAgent(scenario string) {
 		case "session/prompt":
 			var report string
 			switch scenario {
+			case "harness":
+				f.notify("session/update", map[string]any{
+					"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": newMeta}},
+				})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "polite":
 				report = "mode:" + mode
 				for _, tool := range []string{"Bash", "DeleteProd"} {

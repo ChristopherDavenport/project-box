@@ -75,8 +75,9 @@ func (m *Mirror) MaterializeContext(ctx context.Context, dir string, set agent.C
 	return nil
 }
 
-// RemoveContext deletes a materialized context tree, restoring write
-// permission on the way down.
+// RemoveContext deletes a materialized tree, restoring write permission on
+// the way down. Named for its first caller; it reclaims anything this package
+// sealed, which now also means a run's generated skill plugin.
 //
 // Plain [os.RemoveAll] cannot do it. Removing an entry needs write permission
 // on its DIRECTORY, and [makeReadOnly] leaves every directory at 0555, so the

@@ -95,6 +95,48 @@ type SkillRef struct {
 	Source Source
 }
 
+// PluginRef names one harness plugin the agent loads: a bundle of skills,
+// subagents, commands and hooks that arrives as a unit.
+//
+// Recorded because it is authority. A plugin contributes hooks that run on
+// every tool call and subagents that spawn their own sessions, so "which
+// plugins were loaded" is the same class of question as "which instructions
+// was it operating under" — and it was the one input nothing captured. A live
+// probe of the adapter's own dialect found 44 plugins, 79 skills and three
+// hook sets reaching the builders through the harness's ambient settings, none
+// of it on the record and none of it chosen by this system.
+//
+// Version and Commit are provenance, not identity: identity is Path plus
+// whatever Source.Digest the discovery could establish. A marketplace plugin
+// installed from git has a commit; one installed from a local directory has
+// nothing but its path, and saying so is better than inventing a pin.
+type PluginRef struct {
+	// Name is the plugin's own name, as its manifest states it.
+	Name string
+	// Marketplace is where it was installed from, empty for a local path.
+	Marketplace string
+	// Path is the plugin directory handed to the harness.
+	Path string
+	// Version is the manifest version; Commit is the marketplace checkout's
+	// commit when there was one.
+	Version string
+	Commit  string
+	// MCP reports whether this plugin's own MCP servers are loaded with it.
+	// False is the factory default: a plugin's knowledge is not its
+	// credentials, and an unattended agent that inherits a Slack token has
+	// been granted something nobody decided to grant.
+	MCP bool
+}
+
+// ID is the plugin's stable identity for merging and for the record:
+// name@marketplace where there is one, the bare name otherwise.
+func (p PluginRef) ID() string {
+	if p.Marketplace == "" {
+		return p.Name
+	}
+	return p.Name + "@" + p.Marketplace
+}
+
 // MCPRef names an MCP server the agent may call.
 type MCPRef struct {
 	Name string
@@ -159,6 +201,7 @@ type Layer struct {
 	Source       Source
 	Instructions string
 	Skills       []SkillRef
+	Plugins      []PluginRef
 	MCP          []MCPRef
 	Context      ContextSet
 	Tools        ToolPolicy
@@ -208,6 +251,7 @@ type Bundle struct {
 	// Instructions is the composed prose, in layer order.
 	Instructions string
 	Skills       []SkillRef
+	Plugins      []PluginRef
 	MCP          []MCPRef
 	Context      ContextSet
 	Tools        ToolPolicy

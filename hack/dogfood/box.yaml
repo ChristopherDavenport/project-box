@@ -54,6 +54,43 @@ boxes:
   - name: pb
     agent: claude-agent-acp
     seat: mason
+    # What the builders load. Before this block existed the answer was
+    # "whatever ~/.claude has enabled", decided by nobody and recorded
+    # nowhere: a probe of this very box found 44 plugins, 79 skills, three
+    # hook sets and every authenticated MCP server the machine holds reaching
+    # the agent through the adapter's default setting sources.
+    harness:
+      # Read the machine's enabled set on EVERY run. Enable a plugin in the
+      # harness and the next build has it — no reload, no restart. The set is
+      # resolved into the bundle before the agent starts, so the agentref
+      # says which plugins were loaded even though the machine chose them.
+      plugins: user
+
+      # Plugin MCP stays off. This box runs unattended against its own
+      # repository; inheriting the machine's knowledge is the point, and
+      # inheriting its Slack, Jira, GitHub, Datadog and Honeycomb credentials
+      # is not. Servers are granted deliberately under mcp: — none, here,
+      # which means the builders have no MCP surface at all.
+      plugin_mcp: false
+
+      # Skills by ref: a repo, a commit, a path. They do not live in this
+      # repository, so a skill stays governed and versioned where it belongs
+      # and is still pinned to an exact tree here. The digest is the tree
+      # object at that path in that commit, and it rides the agentref — so
+      # "which version of the Go skill was this agent running" is answerable
+      # from the evidence chain, not from whatever is on disk today.
+      #
+      # To add one: name it, pin it, kill -HUP. To move one forward: change
+      # the commit. Both are ordinary edits to this file.
+      skills:
+        - name: go
+          repo: https://github.com/christopherdavenport/christopherdavenport-marketplace.git
+          commit: 611d9835ec22d3b5ceba07afafc4b3ddce719e1f
+          path: backend/go/skills/go
+        - name: sqlite
+          repo: https://github.com/christopherdavenport/christopherdavenport-marketplace.git
+          commit: 611d9835ec22d3b5ceba07afafc4b3ddce719e1f
+          path: backend/sqlite/skills/sqlite
     repos:
       - name: project-box
         remote: https://github.com/ChristopherDavenport/project-box.git

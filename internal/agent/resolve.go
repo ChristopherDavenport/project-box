@@ -85,8 +85,10 @@ type Composer struct {
 // Merge rules, per field:
 //
 //   - Instructions concatenate in layer order.
-//   - Skills and MCP servers merge by name; a more specific layer's entry
-//     replaces a broader one's.
+//   - Skills, plugins and MCP servers merge by name; a more specific layer's
+//     entry replaces a broader one's. Plugins key on [PluginRef.ID], so the
+//     same plugin from two marketplaces is two entries rather than one
+//     silently winning.
 //   - Context repos merge by repo name the same way; knowledge scopes union.
 //   - Tool denies union: a deny anywhere holds everywhere. Tool allows
 //     intersect across the layers that state one: a narrower layer can only
@@ -134,6 +136,8 @@ func (c *Composer) Resolve(ctx context.Context, req Request) (Bundle, error) {
 	var prose []string
 	skills := map[string]SkillRef{}
 	var skillOrder []string
+	plugins := map[string]PluginRef{}
+	var pluginOrder []string
 	mcps := map[string]MCPRef{}
 	var mcpOrder []string
 	repos := map[string]ContextRepo{}
@@ -153,6 +157,12 @@ func (c *Composer) Resolve(ctx context.Context, req Request) (Bundle, error) {
 				skillOrder = append(skillOrder, sk.Name)
 			}
 			skills[sk.Name] = sk
+		}
+		for _, p := range l.Plugins {
+			if _, seen := plugins[p.ID()]; !seen {
+				pluginOrder = append(pluginOrder, p.ID())
+			}
+			plugins[p.ID()] = p
 		}
 		for _, m := range l.MCP {
 			if _, seen := mcps[m.Name]; !seen {
@@ -190,6 +200,9 @@ func (c *Composer) Resolve(ctx context.Context, req Request) (Bundle, error) {
 	b.Instructions = strings.Join(prose, "\n\n")
 	for _, n := range skillOrder {
 		b.Skills = append(b.Skills, skills[n])
+	}
+	for _, n := range pluginOrder {
+		b.Plugins = append(b.Plugins, plugins[n])
 	}
 	for _, n := range mcpOrder {
 		b.MCP = append(b.MCP, mcps[n])
@@ -282,6 +295,14 @@ func (c *Composer) Explain(_ context.Context, b Bundle) ([]byte, error) {
 	for _, s := range b.Skills {
 		fmt.Fprintf(&w, "  %s @ %s\n", s.Name, s.Source.Digest)
 	}
+	fmt.Fprintf(&w, "\nplugins:\n")
+	for _, p := range b.Plugins {
+		pin := p.Commit
+		if pin == "" {
+			pin = "unpinned"
+		}
+		fmt.Fprintf(&w, "  %s %s @ %s mcp=%v %s\n", p.ID(), p.Version, pin, p.MCP, p.Path)
+	}
 	fmt.Fprintf(&w, "\nmcp:\n")
 	for _, m := range b.MCP {
 		fmt.Fprintf(&w, "  %s tools=%v\n", m.Name, m.Tools)
@@ -325,6 +346,13 @@ func ref(b Bundle) string {
 	}
 	for _, s := range b.Skills {
 		put("skill:" + s.Name + ":" + s.Source.Digest)
+	}
+	for _, p := range b.Plugins {
+		mcp := "nomcp"
+		if p.MCP {
+			mcp = "mcp"
+		}
+		put("plugin:" + p.ID() + ":" + p.Version + ":" + p.Commit + ":" + p.Path + ":" + mcp)
 	}
 	for _, m := range b.MCP {
 		put("mcp:" + m.Name + ":" + m.URL + ":" + strings.Join(m.Command, "\x00") + ":" + strings.Join(m.Tools, "\x00"))

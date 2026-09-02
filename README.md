@@ -71,11 +71,11 @@ boxes:
         check: go test ./...
 ```
 
-`confine:` puts the agent in a container whose filesystem is the two
+`confine:` puts the agent in a container whose filesystem is the three
 directories the run was granted — the workspace, writable, and the
-materialized context set, read-only. Nothing else is mounted, so the mirrors,
-the store, and every other run's workspace are unreachable by absence rather
-than by a rule:
+materialized context set and skills, read-only. Nothing else is mounted, so
+the mirrors, the store, and every other run's workspace are unreachable by
+absence rather than by a rule:
 
 ```yaml
     agent: claude-agent-acp
@@ -89,12 +89,14 @@ model API does nothing — and `docker run` killed by its parent leaves the
 container behind, so a confined box still wants `max_tokens_per_run`.
 
 `agent:` is an argv, so a wrapper can also be written by hand;
-`{{workspace}}` and `{{context}}` become the run's two paths. A wrapper given
-only the workspace confines the agent out of its own reading material.
+`{{workspace}}`, `{{context}}` and `{{skills}}` become the run's three paths.
+A wrapper given only the workspace confines the agent out of its own reading
+material — and one that omits `{{skills}}` fails quietly rather than loudly:
+the agent starts and simply never has the skills its agentref says it ran.
 
 ```yaml
     agent: [sandbox-exec, -D, "WS={{workspace}}", -D, "CTX={{context}}",
-            -f, /etc/box/agent.sb, claude-agent-acp]
+            -D, "SK={{skills}}", -f, /etc/box/agent.sb, claude-agent-acp]
 ```
 
 A run that finishes without reporting what it cost stops new claims until the
@@ -106,6 +108,53 @@ the saying so is on the record.
 `build_timeout` bounds one build (default 30m; a negative duration means no
 bound). Nothing else does: the lease TTL is renewed while a run holds it, so
 without this an agent that hangs runs until the daemon stops.
+
+## What the builders load
+
+A box's `harness:` block is its agentic surface — plugins, skills, MCP — and
+all of it is resolved into the bundle before the agent starts, so the
+`agentref` answers "what could this agent do" as well as "what was it told".
+
+```yaml
+    harness:
+      plugins: user            # the machine's enabled set, re-read every run
+      plugin_mcp: false        # a plugin's knowledge, never its credentials
+      skills:                  # pinned by ref, resolved out of any repo
+        - name: go
+          repo: https://github.com/you/marketplace.git
+          commit: 611d9835ec22d3b5ceba07afafc4b3ddce719e1f
+          path: backend/go/skills/go
+      mcp:                     # granted deliberately; empty means none
+        - name: telemetry
+          command: [node, cli.js, mcp]
+```
+
+`plugins: user` reads the harness's own enabled set on **every run**, so
+enabling a plugin reaches the next build with no reload — and the resolved set
+lands in the bundle regardless, because inheriting is not the same as not
+knowing. `plugins: none` makes the configuration the only authority.
+
+**Plugin MCP is off by default and `strictMcpConfig` is unconditional.** The
+two are not the same lever: the first decides what the plugin loader reads,
+the second decides what the session may connect to at all. Without them a
+plugin's own `.mcp.json` loads with the plugin, so inheriting a machine's
+knowledge means inheriting its credentials — measured on this repository's own
+box, that was authenticated Slack, Jira, GitHub, Datadog and Honeycomb servers
+in an unattended builder that no box had granted anything.
+
+A skill ref needs a full 40-character commit, refused at load otherwise. The
+digest recorded is the **tree** at that path in that commit, not the commit
+itself, so revising a neighbouring skill does not churn this one's pin and
+revising this one cannot go unnoticed. Skills materialize as a generated
+plugin beside the workspace, read-only, never inside the tree — the builder
+commits whatever it finds dirty. Adding a skill is an edit and a `kill -HUP`;
+moving one forward is a new commit on the same line.
+
+Check the pins in a config without spending a session:
+
+```sh
+BOX_HARNESS_LIVE=$PWD/hack/dogfood/box.yaml go test -run TestLiveHarness ./internal/harness/ -v
+```
 
 Open work and step back — the daemon's ticks do the rest:
 

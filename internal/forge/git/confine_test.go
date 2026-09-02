@@ -62,6 +62,13 @@ func TestConfinedRunnerCannotReadOutsideItsContextSet(t *testing.T) {
 	// Its context set, materialized exactly where the builder puts it: a
 	// sibling of the workspace, pinned, narrowed, read-only.
 	ctxDir := ws.Dir + ".context"
+	// The skills plugin is the third granted path. Empty here — this test is
+	// about what the mount reaches, not what a bundle pinned — but it has to
+	// exist, because the wrapper mounts it unconditionally.
+	skillsDir := forge.SkillsDir(ws.Dir)
+	if err := os.MkdirAll(skillsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(ctxDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +134,7 @@ func TestConfinedRunnerCannotReadOutsideItsContextSet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("wrap: %v", err)
 	}
-	argv, err = confine.Substitute(argv, ws.Dir, ctxDir)
+	argv, err = confine.Substitute(argv, ws.Dir, ctxDir, skillsDir)
 	if err != nil {
 		t.Fatalf("substitute: %v", err)
 	}

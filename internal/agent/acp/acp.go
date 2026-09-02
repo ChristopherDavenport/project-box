@@ -216,6 +216,32 @@ type Runtime struct {
 	// preceded cannot arrive out of order. It must therefore not block: hand
 	// off to a buffer, never to a network.
 	Progress func(Update)
+	// SkillsDir is where this run's skills are materialized as a generated
+	// plugin, beside the workspace. Set for every run whether or not the
+	// bundle granted any, because it is the third path a confining wrapper is
+	// told to let through — see [confine.SkillsPlaceholder].
+	SkillsDir string
+	// LoadedSkills is SkillsDir when something was actually written there, and
+	// empty otherwise.
+	//
+	// Two fields rather than one because the two questions differ: the wrapper
+	// needs a path that always exists, and the harness needs a plugin
+	// directory that actually contains a manifest. Handing it an empty
+	// directory would fail the load for a bundle that granted nothing, which
+	// is the one case where nothing is the right answer.
+	LoadedSkills string
+	// InheritSettings keeps the harness's own configuration sources in play —
+	// the machine's enabled plugins, its environment block, its permissions.
+	//
+	// True is the live-inheritance posture: whatever the operator has enabled
+	// in the harness reaches the next build with no reload, which is usually
+	// what somebody dogfooding their own factory wants. False makes the bundle
+	// the sole authority: only [agent.Bundle.Plugins] load, and the CLAUDE.md
+	// discovery that needs project scope is all that survives.
+	//
+	// Either way the plugin set is RECORDED, because the resolver reads the
+	// same files the harness will. Inheriting is not the same as not knowing.
+	InheritSettings bool
 }
 
 // Result is what a completed run reports.
@@ -276,7 +302,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	argv, err := confine.Substitute(rt.Command, rt.Dir, rt.ContextDir)
+	argv, err := confine.Substitute(rt.Command, rt.Dir, rt.ContextDir, rt.SkillsDir)
 	if err != nil {
 		return Result{}, err
 	}
@@ -502,6 +528,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	}
 	if err := conn.call(ctx, "session/new", map[string]any{
 		"cwd": rt.Dir, "mcpServers": []any{},
+		"_meta": map[string]any{"claudeCode": map[string]any{"options": rt.harnessOptions(b)}},
 	}, &newRes); err != nil {
 		return Result{}, fmt.Errorf("acp: session/new: %w", err)
 	}
@@ -578,6 +605,76 @@ func noteLines(s string) []string {
 		}
 	}
 	return out
+}
+
+// harnessOptions is the bundle's agentic surface in the shape the adapter
+// forwards to its harness: `_meta.claudeCode.options` on session/new, which
+// claude-agent-acp passes through to the underlying SDK.
+//
+// This is the seam that was missing. Bundle.Skills and Bundle.MCP have existed
+// since Phase 2 — resolved, merged, hashed into the agentref, rendered by
+// Explain — and were delivered nowhere: session/new went out with an empty
+// mcpServers array and no options at all, so a bundle could grant a skill and
+// the agent would never see it. Meanwhile the adapter's own default loaded the
+// machine's ENTIRE harness configuration, which is the opposite failure: the
+// factory recorded a set it did not deliver, and delivered a set it did not
+// record.
+//
+// strictMcpConfig is unconditional. It is the one option here that is a
+// security property rather than a preference: without it a plugin's own
+// .mcp.json is loaded with the plugin, so inheriting a machine's knowledge
+// means inheriting its credentials — an unattended builder holding live Jira,
+// Slack and GitHub write tools that no box asked for. With it, the only MCP
+// servers that exist are the ones [agent.Bundle.MCP] names, which is a
+// decision somebody made and evidence can show.
+func (rt *Runtime) harnessOptions(b agent.Bundle) map[string]any {
+	// Every plugin is loaded with skipMcpDiscovery, belt to strictMcpConfig's
+	// braces: one bounds what the session may connect to, the other bounds
+	// what the plugin loader even reads.
+	plugins := make([]map[string]any, 0, len(b.Plugins)+1)
+	if !rt.InheritSettings {
+		for _, p := range b.Plugins {
+			plugins = append(plugins, map[string]any{
+				"type": "local", "path": p.Path, "skipMcpDiscovery": !p.MCP,
+			})
+		}
+	}
+	if rt.LoadedSkills != "" {
+		plugins = append(plugins, map[string]any{
+			"type": "local", "path": rt.LoadedSkills, "skipMcpDiscovery": true,
+		})
+	}
+
+	mcp := map[string]any{}
+	for _, m := range b.MCP {
+		switch {
+		case m.URL != "":
+			mcp[m.Name] = map[string]any{"type": "http", "url": m.URL}
+		case len(m.Command) > 0:
+			mcp[m.Name] = map[string]any{
+				"type": "stdio", "command": m.Command[0], "args": m.Command[1:],
+			}
+		}
+	}
+
+	// project scope is not optional even in the locked-down posture: the SDK
+	// loads CLAUDE.md only when project settings are in play, and a builder
+	// that cannot read the repository's own conventions is a builder that will
+	// violate them.
+	sources := []string{"project"}
+	if rt.InheritSettings {
+		sources = []string{"user", "project", "local"}
+	}
+
+	opts := map[string]any{
+		"settingSources":  sources,
+		"strictMcpConfig": true,
+		"mcpServers":      mcp,
+	}
+	if len(plugins) > 0 {
+		opts["plugins"] = plugins
+	}
+	return opts
 }
 
 // noteUnknown records a dialect surprise once. Callers hold mu.

@@ -45,3 +45,10 @@ type Workspace struct {
 // neither owns it — the agent runtime materializes into it and hands the path
 // to a confining wrapper, and the mirror reclaims it with the workspace.
 func ContextDir(workspaceDir string) string { return workspaceDir + ".context" }
+
+// SkillsDir names where a run's pinned skills are materialized as a generated
+// plugin. A sibling for the same reason [ContextDir] is one, and separate from
+// it because the two are granted independently and a confining wrapper has to
+// mount them as different things: context is reference material the agent was
+// handed, skills are capability it was given.
+func SkillsDir(workspaceDir string) string { return workspaceDir + ".skills" }

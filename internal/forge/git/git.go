@@ -162,6 +162,9 @@ func (m *Mirror) Checkout(ctx context.Context, l forge.Lease, at forge.Commit) (
 	if err := RemoveContext(forge.ContextDir(dir)); err != nil {
 		return forge.Workspace{}, err
 	}
+	if err := RemoveContext(forge.SkillsDir(dir)); err != nil {
+		return forge.Workspace{}, err
+	}
 	if _, err := run(ctx, "", "clone", "--no-checkout", m.mirrorDir(l.Repo), dir); err != nil {
 		return forge.Workspace{}, fmt.Errorf("git: materialize workspace: %w", err)
 	}
@@ -268,8 +271,13 @@ func (m *Mirror) Prune(ctx context.Context) error {
 				continue
 			}
 			// The context set is a sibling, so RemoveAll above never saw it —
-			// and it is the half that holds whole repositories.
+			// and it is the half that holds whole repositories. The skill
+			// plugin is a sibling for the same reason and sealed the same way.
 			if err := RemoveContext(forge.ContextDir(dir)); err != nil {
+				errs = append(errs, err)
+				continue
+			}
+			if err := RemoveContext(forge.SkillsDir(dir)); err != nil {
 				errs = append(errs, err)
 				continue
 			}

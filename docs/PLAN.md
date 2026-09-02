@@ -1185,6 +1185,44 @@ against the real remote; the optimistic lane on a scratch mirror needs no
 code (Phase 9 shipped it, and boxcfg's default IS optimistic) — it needs a
 scratch remote and a deliberate session.
 
+The harness surface is DECLARED and delivered (2026-09-01). Phase 2 resolved
+`Bundle.Skills` and `Bundle.MCP`, merged them, hashed them into the agentref
+and rendered them in Explain — and delivered them nowhere: `session/new` went
+out with an empty `mcpServers` and no options at all. A bundle could grant a
+skill and the agent would never see it. Meanwhile the adapter's own default
+loaded the machine's ENTIRE harness configuration, so the factory recorded a
+set it did not deliver and delivered a set it did not record. Probed on this
+box: 44 plugins, 79 skills, three hook sets firing on every tool call, and
+every MCP server the machine holds — Slack, Jira, GitHub, Datadog, Honeycomb,
+Wrike — reaching an unattended builder that no box had granted anything.
+
+What closes it:
+
+  - `boxcfg.Harness` — `plugins: user|none`, `plugin_mcp`, skill refs, MCP
+    grants. The inheritance is now a decision instead of an accident.
+  - `internal/harness` — discovery reads the same two files the harness reads
+    (`settings.json`, `installed_plugins.json`), user scope only, PER RUN. A
+    plugin enabled in the harness reaches the next build with no reload, and
+    the set is in the bundle either way: inheriting is not not knowing. Its
+    `Source` is the `LayerSource` the daemon composes with.
+  - Skills by ref — repo, commit, path, resolved through the mirror to the
+    TREE object at that path, which is why a sibling skill's revision does
+    not churn this one's digest. A full 40-char commit is required at load.
+    Materialized as a generated plugin beside the workspace, read-only.
+  - `strictMcpConfig` unconditional at `session/new`, `skipMcpDiscovery` on
+    every plugin. Two levers, not one: what the loader reads, and what the
+    session may connect to.
+  - `git.RemoveTree` — Prune could never reclaim a materialized tree.
+    `makeReadOnly` seals it 0555 and `os.RemoveAll` cannot unlink inside
+    that, so `.context` siblings had been accumulating one per dead run
+    since Phase 2, invisibly, because nothing ever failed. Found by a test's
+    own TempDir cleanup.
+
+`TestLiveHarnessResolves` (BOX_HARNESS_LIVE=<box.yaml>) resolves a shipped
+config against the real network and materializes it, which is the failure a
+fixture cannot catch: a force-pushed commit, a path that moved between
+releases, a private remote the credential channel cannot reach.
+
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
 an agent image and the live run that turns confinement on for the dogfood,
 review sampling/sign-off endpoints for the control room, and OIDC as a
