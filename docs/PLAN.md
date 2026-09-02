@@ -428,6 +428,11 @@ claim is decoration.
 | Redaction | a planted credential does not reach the exporter | 5 |
 | Exception timeliness | the oldest parked item is measured against a recorded objective; a stale exception is told out of band, once per objective, bounded | 5 |
 | Frontier legibility | ready is distinguished from blocked and from held; a cascade leaf names its ROOT rather than its neighbour; a claimed item whose lease lapsed still names the runner that took it | 5 |
+| A running unit is legible | a claimed unit reports its seat, its composed layers in application order, its stage and time in stage, and its agent's messages, tool calls and refusals AS THEY HAPPEN | 5 |
+| The live view is not a second account | the tool calls and denials a watcher saw are exactly the ones the settled record is charged with, and the message frames concatenate to the run's own text | 5 |
+| Fan-out stays per unit | concurrent runs produce one card each with its own timeline; no frame appears on another unit's card, and a scoped subscriber receives no other unit's stream | 5 |
+| Silence is distinguished from blindness | a claimed unit no bus is watching says so, rather than rendering as an agent that has done nothing | 5 |
+| The committed bundle is not stale | every custom element the room's source defines is present in the embedded `dist/`, since CI runs no esbuild and an unbuilt page renders as an empty box | 5 |
 | Lease readable without taking it | `Inspect` reports the holder and the deadline, does not disturb the claim, sees nothing across tenants, and still names a holder past the deadline that Acquire treats as free | 0 |
 | Preemption | incident revokes a campaign lease; preempted land is rejected | 5 |
 | Break-glass gating | refused with no open incident | 5 |
@@ -506,6 +511,8 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | An origination declares a data envelope, and it sits on the origination | sensitivity travels with the request, not the target: one repository legitimately receives a routine bump and an embargoed fix, so the Box would force the restrictive envelope onto everything it does, and the bundle is what the agent is where the class is what the work is |
 | The envelope narrows and never widens, refuses rather than narrows silently, and rides the agentref | delegation intersects applied to data handling — an envelope an agent layer could widen would be documentation; a narrowed run nobody was told about is worse than a refused one; and the bundle is already content-addressed, so a different envelope is a different agent for free |
 | Unclassified is refused, never defaulted — on every field | absence means minimum, the same rule as an empty grant set and an unset rollout, and unclassified is the state every mis-scoped request arrives in |
+| A run's live stream is a bounded window, not evidence; what it shows, the chain records at settle | the per-call sequence is already on span events and the tally on the chain, so a hash-chained WORM-exported record per tool call buys an auditor nothing and costs the evidence plane its proportion — and the two accounts come off ONE dedup, so "the room showed forty and the record says thirty" is a test failure rather than a discrepancy somebody has to spot |
+| The composed layers ride the agent-run record | the agentref is a digest and alone answers nothing about what the agent was; recovering the composition meant re-resolving the bundle from the same material at the same commits, which is the thing a record exists so nobody has to have |
 
 ## 7. Deferred decisions
 
@@ -1085,6 +1092,66 @@ be captured before that declaration is designed, and the §2 argument is why it
 could not wait — a run that executed before classification existed is
 unclassifiable retroactively, and there is no query that recovers what class of
 data it was permitted to see.
+
+Issue #19 opened the claimed item (2026-09-01). #14 answered which work COULD
+be moving; a claimed unit still said `state=claimed head=` for the length of a
+run, and the reason was never a shortage of facts — the stage bracket, the
+composed layers, the seat, and every word the agent said were all inside the
+daemon and none of them left it. Three things closed that, and only the middle
+one is new machinery.
+
+The FAN-IN: `acp.Runtime.Progress` reports the stream as it arrives —
+messages coalesced at the agent's actions (a frame per chunk is a log dump, a
+frame at the end is no live view), each distinct tool call, each refusal, and
+both box verbs with their reasons. `Builder.Progress` tags them with the work
+item. It comes off the SAME dedup the settled tally does, which is the
+property that makes it worth trusting: the tool calls a watcher saw are
+exactly the ones the run is charged with, and the message frames concatenate
+to `res.Text` — asserted against the PINNED dialect, so a shape that moves
+breaks the live view here rather than quietly emptying it in production.
+
+The BUS: `control.Live`, in memory, bounded, one global cursor. The decision
+and its reasoning are in ARCHITECTURE under "A claimed item is a black box
+until it settles" — the live stream is a window and not a record, because the
+per-call sequence is already on span events, the tally is already on the
+chain, and a WORM-exported record per tool call buys an auditor nothing. What
+that costs is stated: a restart loses the window, which is survivable exactly
+because the run it was watching was that daemon's child.
+
+The VIEW: `Room.Sessions` folds identity, progress and timeline into one card
+per RUNNING unit — claimed and nothing else, because a live view that quietly
+includes work nobody is doing is the stale-stage bug in a bigger frame. `GET
+/v1/sessions`, `GET /v1/items/{id}/session`, and `GET /v1/events?item=` as the
+per-item scope (a scope and not a filter: the server stops reading what the
+subscriber would only discard). The room grows a Sessions page of cards side
+by side; `box item` prints the same card, because a fact one reader of the
+queue has and another does not is worse than one nobody has — the argument
+`box queue` settled for the frontier, used again.
+
+Two smaller things the view forced. The composed LAYERS now ride the
+`agent-run` record in application order: the room wanted to show what the
+agent was and the agentref is a digest, so the alternative was re-resolving
+the bundle from the same material at the same commits. And an empty timeline
+now reports WHICH kind of empty it is — a run announces itself to the bus at
+its first instant, so silence from a unit this daemon is running is an idle
+agent and silence from one it is not is blindness, and a reader left to infer
+infers the alarming one.
+
+The issue also names the v0.70 tool-call dialect as undercounted; that half
+was closed by #9 and this change inherits the pin rather than re-fixing it —
+the new assertions replay the same transcript.
+
+NOT done, recorded rather than implied. The post-land check is bracketed by
+`telemetry.Stage` and reaches the item's chain as an ordinary `gate` record,
+so the room's stage column reads "gating" for it and there is no "landing"
+stage at all — the Lander writes to its own scope. Closing that is a chain
+vocabulary change with every reader of `stageOf` on the other end, and it is
+the next thing this view will ask for. The browser pass is owed: the room
+smoke grows a Sessions step, and it is UNRUN in this workspace because a
+sandboxed `bind()` on a unix socket is denied and boxd cannot start at all.
+And a timeline with real agent frames in a browser needs the dogfood box with
+a live ACP session, which is the same live run #6 and #7 are already waiting
+on.
 
 Still unrun from #7: the second lane. Everything above is the gated lane
 against the real remote; the optimistic lane on a scratch mirror needs no

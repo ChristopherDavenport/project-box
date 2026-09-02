@@ -194,6 +194,72 @@ func parseStates(s string) []queue.State {
 // some readers of the queue know and others do not is worse than one nobody
 // has, because work does not disappear loudly from a view — it disappears
 // plausibly, and the state vocabulary has already had that failure once.
+// printSession is one unit as `box item` now answers it: what it is, how far
+// it has got, and what its agent has been doing — the three things a claimed
+// item could not say.
+func printSession(s control.Session) {
+	e := s.QueueEntry
+	fmt.Printf("%s state=%s stage=%s head=%s\n", e.ID, e.State, dash(e.Stage), dash(e.Head))
+	origin := e.Route
+	if e.Key != "" {
+		origin += "/" + e.Key
+	}
+	if origin == "" {
+		origin = e.Ingress
+	}
+	fmt.Printf("  %s  box=%s repo=%s origin=%s\n", e.Task, dash(e.Box), dash(e.Repo), dash(origin))
+	if e.Seat != "" {
+		fmt.Printf("  seat=%s agentref=%s\n", e.Seat, short(e.AgentRef))
+	}
+	for _, l := range s.Layers {
+		fmt.Printf("    layer %-6s %-20s %s %s\n", l.Scope, l.Name, l.Source, short(l.Digest))
+	}
+	if e.Stage != "" {
+		fmt.Printf("  %s in stage, %s since it opened\n", age(e.InStateSec), age(e.AgeSec))
+	}
+	if e.Note != "" {
+		fmt.Printf("  %s\n", e.Note)
+	}
+	if len(s.Timeline) == 0 {
+		// Silence and blindness are not the same thing, and the difference
+		// decides whether an operator goes and looks at a stuck run.
+		if e.State == queue.StateClaimed && !s.Watching {
+			fmt.Println("  (no live stream here — another runner holds this, or the window has rolled)")
+		}
+		return
+	}
+	fmt.Println("  timeline:")
+	for _, f := range s.Timeline {
+		line, _, _ := strings.Cut(frameText(f), "\n")
+		fmt.Printf("    %s %-8s %s\n", f.At.Format("15:04:05"), f.Kind, line)
+	}
+}
+
+// frameText is the one line a frame is worth on a terminal. The kinds are the
+// wire's strings rather than the runtime's constants: this is an HTTP client,
+// and a CLI that imported the ACP runtime to read a JSON field would be
+// coupling the two ends of a protocol that exists to keep them apart.
+func frameText(f control.Frame) string {
+	switch {
+	case f.Reason != "":
+		return f.Reason
+	case f.Tool != "":
+		return f.Tool
+	case f.Kind == "tool":
+		// A call the dialect named nothing at all: policy had nothing to match
+		// on, which is a hole and not a blank.
+		return "(unnamed — nothing for policy to match)"
+	}
+	return f.Text
+}
+
+func dash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
 func printQueue(entries []control.QueueEntry) {
 	if len(entries) == 0 {
 		fmt.Println("the queue is empty")
@@ -384,11 +450,16 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		if len(rest) == 0 {
 			return fmt.Errorf("item needs an id")
 		}
-		it, err := c.Item(ctx, rest[0])
+		// The session view, not the bare item. `state=claimed head=` was the
+		// whole answer for the length of a run, and the CLI and the room must
+		// not diverge on it: a fact one reader of the queue has and another
+		// does not is worse than one nobody has — the same argument `box
+		// queue` settled for the frontier.
+		sn, err := c.Session(ctx, rest[0])
 		if err != nil {
 			return err
 		}
-		fmt.Printf("%s state=%s head=%s\n%s\n", it.ID, it.State, it.Head, it.Note)
+		printSession(sn)
 	case "provenance":
 		if len(rest) == 0 {
 			return fmt.Errorf("provenance needs a sha")

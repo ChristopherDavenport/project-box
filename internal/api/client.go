@@ -116,6 +116,19 @@ func (c *Client) Item(ctx context.Context, id string) (queue.WorkItem, error) {
 	return out, c.do(ctx, "GET", "/v1/items/"+id, nil, &out)
 }
 
+// Sessions is the per-unit live view: one entry per running unit.
+func (c *Client) Sessions(ctx context.Context) ([]control.Session, error) {
+	var out []control.Session
+	return out, c.do(ctx, "GET", "/v1/sessions", nil, &out)
+}
+
+// Session is one unit's card — identity, progress, and what its agent is
+// saying — whatever state the unit is in.
+func (c *Client) Session(ctx context.Context, id string) (control.Session, error) {
+	var out control.Session
+	return out, c.do(ctx, "GET", "/v1/items/"+id+"/session", nil, &out)
+}
+
 // Provenance is the audit query over the wire.
 func (c *Client) Provenance(ctx context.Context, sha string) ([]evidence.Record, error) {
 	var out []evidence.Record

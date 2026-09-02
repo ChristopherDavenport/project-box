@@ -73,7 +73,12 @@ type Daemon struct {
 	pump      *pump.Pump
 	meter     *capacity.Meter
 	escalator *control.Escalator
-	API       *api.Server
+	// live is the daemon's window into runs in flight, and belongs to the
+	// daemon rather than to an assembled executor: a reload rebuilds the
+	// builders and must not blind the room to the runs those builders are
+	// already in the middle of.
+	live *control.Live
+	API  *api.Server
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -100,6 +105,7 @@ func New(path string) (*Daemon, error) {
 		ConfigPath: path, store: s, tenant: t, mirror: m,
 		queue: &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
 		meter: &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
+		live:  &control.Live{},
 		cfg:   cfg, every: cfg.EveryDuration(),
 	}
 	loops, routes, err := d.assemble(context.Background(), cfg)
@@ -131,6 +137,7 @@ func New(path string) (*Daemon, error) {
 		Store: s, Tenant: t, Routes: routes,
 		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner},
 		Queue:  d.queue, Meter: d.meter, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
+		Live:    d.live,
 		Started: time.Now(),
 		Reload:  d.reloadForAPI,
 	}
@@ -167,6 +174,14 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// the adapter that charges the meter.
 				Spend: func(ctx context.Context, run string, u acp.Usage) {
 					d.meter.Charge(ctx, run, u.Total(), u.Reported)
+				},
+				// And the same argument for the stream: the adapter is the
+				// only place a run is visible while it is running, so it is
+				// where the room's live view has to be fed from.
+				Progress: func(_ context.Context, run string, u acp.Update) {
+					d.live.Append(run, control.Frame{
+						Kind: string(u.Kind), Tool: u.Tool, Text: u.Text, Reason: u.Reason,
+					})
 				},
 			}
 		}

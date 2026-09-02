@@ -71,6 +71,10 @@ type Builder struct {
 	// [Runtime.Transcript]. This is the only path a real agent runs through,
 	// so it is the only place the pinned dialect can be re-recorded from one.
 	Transcript io.Writer
+	// Progress, when set, receives the run's stream as it arrives, tagged with
+	// the work item it belongs to — the fan-in a per-unit live view needs. Nil
+	// leaves a claimed item the black box it was until it settles.
+	Progress func(ctx context.Context, run string, u Update)
 
 	mu    sync.Mutex
 	notes map[string][]string // run id -> extracted handoff notes
@@ -113,13 +117,34 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	// vendor-management or data-handling review asks, and answering it from a
 	// class alone would mean re-resolving the bundle to learn where the data
 	// actually went.
+	//
+	// The LAYERS ride it for a reason of the same kind. The agentref is a
+	// digest: it proves which agent ran and cannot say what that agent was.
+	// "Which layers, in which order, on which seat" is the other half of what
+	// an agent knows, and it was reachable only by re-resolving the bundle —
+	// which needs the same material still on disk at the same commits, i.e.
+	// exactly the thing the record exists so nobody has to have.
 	envelope := "(none declared)"
 	if bundle.Envelope != nil {
 		envelope = bundle.Envelope.String()
 	}
-	b.record(ctx, ws.Run, "agent-run", bundle.Ref,
-		fmt.Sprintf(`{"agentref":%q,"role":%q,"mode":%q,"seat":%q,"envelope":%q}`,
-			bundle.Ref, role, bundle.Tools.PermissionMode, b.seatName(), envelope))
+	layers := make([]layerRecord, 0, len(bundle.Layers))
+	for _, l := range bundle.Layers {
+		layers = append(layers, layerRecord{
+			Scope: string(l.Scope), Name: l.Name,
+			Source: string(l.Source.Kind), Digest: l.Source.Digest,
+		})
+	}
+	b.recordJSON(ctx, ws.Run, "agent-run", bundle.Ref, runRecord{
+		AgentRef: bundle.Ref, Role: string(role), Mode: bundle.Tools.PermissionMode,
+		Seat: b.seatName(), Envelope: envelope, Layers: layers,
+	})
+	// And the same fact to whoever is watching, at the same moment. The
+	// record answers afterwards; this is what puts the unit on a live view
+	// from its first instant rather than from its first tool call.
+	if b.Progress != nil {
+		b.Progress(ctx, ws.Run, Update{Kind: UpdateStarted, Text: bundle.Ref})
+	}
 
 	// A sibling of the workspace, never inside it: granted reading material
 	// must not become part of the change.
@@ -164,7 +189,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	})
 
 	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: contextDir, Env: b.Env,
-		MaxTokens: b.MaxTokens, Transcript: b.Transcript}
+		MaxTokens: b.MaxTokens, Transcript: b.Transcript, Progress: b.progress(ctx, ws.Run)}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, sent)
 	elapsed := time.Since(started)
@@ -473,6 +498,37 @@ func (b *Builder) wakeNotes() int {
 		return b.WakeNotes
 	}
 	return 8
+}
+
+// progress binds the run id onto the runtime's stream hook, so the fan-in
+// arrives already knowing which unit it belongs to. Nil in, nil out: a
+// runtime with no hook does no work per update.
+func (b *Builder) progress(ctx context.Context, run string) func(Update) {
+	if b.Progress == nil {
+		return nil
+	}
+	return func(u Update) { b.Progress(ctx, run, u) }
+}
+
+// runRecord is which agent ran, under what, on whose seat.
+type runRecord struct {
+	AgentRef string `json:"agentref"`
+	Role     string `json:"role"`
+	Mode     string `json:"mode"`
+	Seat     string `json:"seat"`
+	Envelope string `json:"envelope"`
+	// Layers is the composition in APPLICATION ORDER, which is the part the
+	// order carries: a narrower layer's contribution only means anything
+	// against what it came after.
+	Layers []layerRecord `json:"layers,omitempty"`
+}
+
+// layerRecord is one composed layer, named the way Explain names it.
+type layerRecord struct {
+	Scope  string `json:"scope"`
+	Name   string `json:"name"`
+	Source string `json:"source"`
+	Digest string `json:"digest"`
 }
 
 // promptRecord is the exact input to one agent run, and how it was composed.

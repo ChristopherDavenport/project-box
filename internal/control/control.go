@@ -55,6 +55,11 @@ type Room struct {
 	// whose alarm threshold and whose objective disagree is measuring one
 	// thing and acting on another.
 	Objective time.Duration
+	// Live is the window into runs still going — see [Room.Sessions]. Nil is
+	// valid and means the room can say what a unit IS and not what it is
+	// SAYING, which is the state every reader of this package was in before
+	// the ACP stream had anywhere to arrive.
+	Live *Live
 	// Now is injectable for tests; nil means time.Now.
 	Now func() time.Time
 }
@@ -248,6 +253,12 @@ type QueueEntry struct {
 	// Head is the landed commit; Built one produced and not yet landed.
 	Head  string `json:"head,omitempty"`
 	Built string `json:"built,omitempty"`
+	// Seat and AgentRef are who ran this unit and exactly which agent it was,
+	// read off the agent-run record. Empty until an agent starts, and empty
+	// forever on a unit built by a shell command — which is a distinction
+	// worth showing rather than hiding behind a placeholder.
+	Seat     string `json:"seat,omitempty"`
+	AgentRef string `json:"agentref,omitempty"`
 	// Stage is the furthest point this item has reached, read off the last
 	// record on its chain: claimed, building, gating, landing, done. A
 	// claimed item was a black box — "state=claimed" and nothing else — and
@@ -308,15 +319,24 @@ type QueueEntry struct {
 // which is a live lease and the one thing the chain cannot say, because a
 // runner does not record its own death.
 func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, error) {
+	out, _, err := r.fold(ctx, states...)
+	return out, err
+}
+
+// fold is Queue's body, returning the frontier as well so a caller wanting
+// more than a row — [Room.Sessions] wants the composed layers — reads it from
+// the same single walk rather than opening a second one.
+func (r *Room) fold(ctx context.Context, states ...queue.State) ([]QueueEntry, *frontier, error) {
 	f := &frontier{
 		r: r, now: r.now(), items: map[string]queue.WorkItem{}, errs: map[string]error{},
-		q: &queue.Queue{Store: r.Store, Runner: r.Actor},
+		q:      &queue.Queue{Store: r.Store, Runner: r.Actor},
+		layers: map[string][]Layer{},
 	}
 	seen := map[string]bool{}
 	var out []QueueEntry
 	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/pending", 1) {
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if seen[rec.Subject] {
 			continue
@@ -324,7 +344,7 @@ func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, 
 		seen[rec.Subject] = true
 		e, err := r.entry(ctx, rec.Subject, f)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if len(states) > 0 && !slices.Contains(states, e.State) {
 			continue
@@ -332,7 +352,7 @@ func (r *Room) Queue(ctx context.Context, states ...queue.State) ([]QueueEntry, 
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Opened.Before(out[j].Opened) })
-	return out, nil
+	return out, f, nil
 }
 
 // frontier is one fold's shared state: the clock every row is measured
@@ -345,6 +365,11 @@ type frontier struct {
 	now   time.Time
 	items map[string]queue.WorkItem
 	errs  map[string]error
+	// layers is each item's composition, taken from the agent-run record the
+	// walk passes anyway. Out of band rather than on QueueEntry, because a
+	// listing of the whole queue does not want every row carrying its agent's
+	// layer stack.
+	layers map[string][]Layer
 }
 
 func (f *frontier) load(ctx context.Context, id string) (queue.WorkItem, error) {
@@ -415,10 +440,21 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 	var w queue.WorkItem
 	var opened, changed time.Time
 	stage := ""
+	var ran runRecord
 	found, folded := false, false
 	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "workitem/"+id, 1) {
 		if err != nil {
 			return QueueEntry{}, err
+		}
+		if rec.Kind == "agent-run" {
+			// Which agent, on whose seat, composed from what. Best effort: a
+			// record this reader cannot parse is a thinner row, never a
+			// listing that fails. The LAST one wins — a handed-off item has
+			// one per session, and the current session is the one running.
+			var got runRecord
+			if json.Unmarshal(rec.Body, &got) == nil {
+				ran = got
+			}
 		}
 		// Only the state transitions carry the item. The narrative records
 		// still count for the clock and the stage below — an agent-run is
@@ -453,10 +489,13 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 	e := QueueEntry{
 		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,
 		Task: firstLine(w.Task), Note: w.Note, Severity: w.Severity,
-		Head: w.Head, Built: w.Built,
+		Head: w.Head, Built: w.Built, Seat: ran.Seat, AgentRef: ran.AgentRef,
 		Stage: stage, DependsOn: w.DependsOn,
 		Opened: opened, Changed: changed,
 		AgeSec: int64(now.Sub(opened).Seconds()), InStateSec: int64(now.Sub(changed).Seconds()),
+	}
+	if f.layers != nil && len(ran.Layers) > 0 {
+		f.layers[id] = ran.Layers
 	}
 	// Which dependencies have not settled — the answer to "why is nothing
 	// moving", which the declared list alone does not give.

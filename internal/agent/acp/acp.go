@@ -77,6 +77,53 @@ var knownUpdates = []string{
 	"usage_update",
 }
 
+// UpdateKind names what the stream said an agent did. The set is closed and
+// small on purpose: a live view is a timeline, not a log dump, and every kind
+// here is something an operator can act on.
+type UpdateKind string
+
+const (
+	// UpdateStarted is the run beginning. Emitted by [Builder] rather than by
+	// the stream, and worth its own kind for a reason beyond tidiness: it is
+	// what makes an empty timeline mean "this agent has done nothing yet"
+	// instead of "nobody here is watching this run".
+	UpdateStarted UpdateKind = "started"
+	// UpdateMessage is what the agent said — the run of message chunks that
+	// preceded whatever it did next.
+	UpdateMessage UpdateKind = "message"
+	// UpdateTool is one distinct tool call, deduped by call id exactly as the
+	// settled tally is.
+	UpdateTool UpdateKind = "tool"
+	// UpdateDenied is a permission request policy refused at the stream.
+	UpdateDenied UpdateKind = "denied"
+	// UpdateEscalate and UpdateHandoff are the box verbs, carrying the agent's
+	// own reason.
+	UpdateEscalate UpdateKind = "escalate"
+	UpdateHandoff  UpdateKind = "handoff"
+)
+
+// Update is one thing that happened on the stream, reported WHILE it is
+// happening.
+//
+// The Result below is the same run's account, and it is only available once
+// the run is over. That is the whole gap: an agent run is minutes to tens of
+// minutes, and for all of it the only thing anybody outside could learn was
+// that the item was claimed. These are the same facts, earlier — the ones
+// carried here are carried in Result too, so a viewer that watched a run live
+// and an auditor that reads the chain afterwards are told the same story.
+type Update struct {
+	Kind UpdateKind
+	// Tool is the call's name for UpdateTool and UpdateDenied, empty exactly
+	// when the dialect gave nothing to match on — which is a fact about
+	// enforcement and must not be papered over with a placeholder here.
+	Tool string
+	// Text is the agent's message for UpdateMessage, and the handoff's notes
+	// for UpdateHandoff.
+	Text string
+	// Reason is the agent's own words for the two box verbs.
+	Reason string
+}
+
 // Usage is what a run cost, as the agent reported it.
 //
 // Reported is the load-bearing field. An agent that says nothing about cost
@@ -156,6 +203,19 @@ type Runtime struct {
 	// Recording is off by default: a transcript carries the prompt and the
 	// agent's output, so it is run material, not a log.
 	Transcript io.Writer
+	// Progress, when set, receives the run's [Update]s as the stream produces
+	// them. Nil is the default and costs nothing.
+	//
+	// This is the fan-in a live view needs and nothing else here provides. The
+	// Transcript above is the whole wire and is off by default because it is
+	// run material; the Result is complete and arrives only at the end. In
+	// between, the stream is the only thing that knows what the agent is doing,
+	// and it knew it the whole time.
+	//
+	// Called with the runtime's lock held so that a message and the action it
+	// preceded cannot arrive out of order. It must therefore not block: hand
+	// off to a buffer, never to a network.
+	Progress func(Update)
 }
 
 // Result is what a completed run reports.
@@ -251,7 +311,31 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		// tool_call_update. Keying on the call id rather than the shape is
 		// what keeps the count right when a dialect prefers one spelling.
 		seenCalls = map[string]bool{}
+		// flushed is how much of res.Text has already gone out as progress. A
+		// cursor rather than a second buffer, so the live account cannot drift
+		// from the settled one.
+		flushed int
 	)
+	// flush releases the message the agent has written since its last action.
+	// Chunk-by-chunk would be a log dump — hundreds of frames a second saying
+	// nothing on their own — and waiting for the run to end would be no live
+	// view at all. What it said, then what it did, is the rhythm an operator
+	// actually reads. Callers hold mu.
+	flush := func() {
+		if rt.Progress != nil && flushed < len(res.Text) {
+			rt.Progress(Update{Kind: UpdateMessage, Text: res.Text[flushed:]})
+		}
+		flushed = len(res.Text)
+	}
+	// emit reports one action, after whatever the agent said leading up to it.
+	// Callers hold mu.
+	emit := func(u Update) {
+		if rt.Progress == nil {
+			return
+		}
+		flush()
+		rt.Progress(u)
+	}
 	conn := newConn(stdin, stdout, func(method string, params json.RawMessage) (any, error) {
 		switch method {
 		case "session/request_permission":
@@ -264,6 +348,10 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			mu.Lock()
 			if !ok {
 				res.Denied = append(res.Denied, p.ToolCall.Title)
+				// Only the refusal, so that the live account and Result agree
+				// exactly: a permitted ask announces itself as a tool_call too,
+				// and emitting here as well would count it twice.
+				emit(Update{Kind: UpdateDenied, Tool: p.ToolCall.Title})
 			}
 			mu.Unlock()
 			return permissionResponse(p, ok, reason), nil
@@ -279,6 +367,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			}
 			mu.Lock()
 			res.Escalated = p.Reason
+			emit(Update{Kind: UpdateEscalate, Reason: p.Reason})
 			mu.Unlock()
 			return map[string]any{"acknowledged": true}, nil
 		case "_box/handoff":
@@ -306,6 +395,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			}
 			res.HandedOff = p.Reason
 			res.HandoffNotes = append(res.HandoffNotes, noteLines(p.Notes)...)
+			emit(Update{Kind: UpdateHandoff, Reason: p.Reason, Text: p.Notes})
 			mu.Unlock()
 			return map[string]any{"acknowledged": true}, nil
 		case "session/update":
@@ -348,6 +438,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				seenCalls[key] = true
 				if first {
 					res.ToolCalls = append(res.ToolCalls, name)
+					emit(Update{Kind: UpdateTool, Tool: name})
 					if name == "" {
 						// Nothing to match on, so enforcement did not happen
 						// here and must not be reported as if it had. Counted,
@@ -435,6 +526,11 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 
 	mu.Lock()
 	defer mu.Unlock()
+	// Whatever the agent said after its last action. Without this a run that
+	// ends on a paragraph — an escalation explaining itself, a summary of what
+	// was changed — would have its closing words appear only once the item
+	// settled, which is the moment a live view stops being read.
+	flush()
 	// The turn's own total wins when it has one; otherwise the stream's
 	// increments are the best account there is. Summing both would bill the
 	// run twice.

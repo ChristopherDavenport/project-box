@@ -69,6 +69,12 @@ type Server struct {
 	// Reload, when set, re-reads the daemon's configuration; wired by the
 	// daemon, exposed as POST /v1/reload.
 	Reload func(ctx context.Context, actor string) (string, error)
+	// Live, when set, is the window into runs still going: the ACP stream
+	// fanned in from every agent this daemon is running. It is what turns a
+	// claimed item from `state=claimed head=` into a unit somebody can watch.
+	// Nil leaves every session's timeline empty and `watching` false, which is
+	// the truthful answer for a daemon nothing reports to.
+	Live *control.Live
 	// UI, when set, is served at / with SPA fallback: a path that is not a
 	// file gets index.html, so the router's deep links work on refresh.
 	UI fs.FS
@@ -109,6 +115,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/items", s.items)
 	mux.HandleFunc("GET /v1/items/{id}", s.item)
 	mux.HandleFunc("GET /v1/items/{id}/evidence", s.itemEvidence)
+	mux.HandleFunc("GET /v1/items/{id}/session", s.session)
+	mux.HandleFunc("GET /v1/sessions", s.sessions)
 	mux.HandleFunc("GET /v1/provenance/{sha}", s.provenance)
 	mux.HandleFunc("GET /v1/activity", s.activity)
 	mux.HandleFunc("GET /v1/events", s.events)
@@ -154,7 +162,8 @@ func (s *Server) actor(r *http.Request) string {
 // room is this request's control surface, carrying the server's objective so
 // every reader measures the queue against the same number.
 func (s *Server) room(r *http.Request) *control.Room {
-	return &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r), Objective: s.Objective}
+	return &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r),
+		Objective: s.Objective, Live: s.Live}
 }
 
 // Status is /v1/status.
@@ -276,6 +285,36 @@ func (s *Server) exceptions(w http.ResponseWriter, r *http.Request) {
 		items = []control.Exception{}
 	}
 	writeJSON(w, items)
+}
+
+// sessions is the per-unit live view: one entry per RUNNING unit, each with
+// its own identity, its own progress, and its own timeline.
+//
+// A collection rather than a merged feed, because fan-out is the case that
+// breaks a feed. Several units in flight interleave into one stream that
+// reads as noise, and the question an operator has — is THIS unit moving —
+// cannot be answered by scrolling. One entry per unit answers it per unit.
+func (s *Server) sessions(w http.ResponseWriter, r *http.Request) {
+	out, err := s.room(r).Sessions(r.Context())
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if out == nil {
+		out = []control.Session{}
+	}
+	writeJSON(w, out)
+}
+
+// session is one unit's card, whatever its state: an operator following a
+// link wants to be told the run settled, not shown an empty page.
+func (s *Server) session(w http.ResponseWriter, r *http.Request) {
+	out, err := s.room(r).Session(r.Context(), r.PathValue("id"))
+	if err != nil {
+		httpErr(w, 404, err.Error())
+		return
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) item(w http.ResponseWriter, r *http.Request) {

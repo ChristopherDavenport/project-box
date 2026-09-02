@@ -187,6 +187,60 @@ this repo has already paid once. A Go dependency sits in a toolchain CI runs
 anyway, and the same computed layout is what lets a static export reach an
 auditor who will never be handed a running daemon.
 
+### A claimed item is a black box until it settles
+
+The frontier says which work could be moving. It says nothing about the work
+that *is*: a claimed item reports `state=claimed head=` for the whole length
+of a run, which on a real agent is minutes to tens of minutes. That was never
+a shortage of facts. `telemetry.Stage` brackets build, gate, land and the
+post-land check; the ACP session is a live stream of messages, tool calls and
+refusals; the composer resolved a concrete set of layers on a named seat. All
+of it was known inside the daemon and none of it left.
+
+So the room shows a **unit at a time** (decided 2026-09-01): identity — item,
+route, key, seat, and the composed layers the run was launched with; progress
+— stage, time in stage, the head once built; and communication — the agent's
+messages and tool calls as they happen, its refusals, and the box verbs with
+their reasons. Several units in flight are several cards, because a merged
+feed is where fan-out fails: the question is whether *this* unit is moving,
+and a stream of five interleaved runs answers it by scrolling.
+
+**The live stream is a window, not a record**, and that is the load-bearing
+choice. Putting the per-call sequence on the evidence chain would look like
+the stronger option — it is durable, and "if the room can show it, the chain
+recorded it" is otherwise a good rule — but it contradicts the split this
+system already made twice. Which tools ran and which were refused reach the
+chain as a tally when the run settles; the agent's own account reaches it as
+`agent-text`; the sequence lives on span events. A hash-chained,
+WORM-exported, audit-period-retained record per tool call buys an auditor
+nothing they were not already given and costs the evidence plane its
+proportion. This is the telemetry column of the table under Telemetry, on a
+new surface: interesting while it is happening, superseded by the chain the
+moment it settles.
+
+What keeps that honest is that the two accounts must **agree**. The live
+frames and the settled tally come off one dedup in the runtime rather than
+two readings of the stream, so an operator who watched forty tool calls and
+an auditor who reads thirty is a test failure and not a discrepancy anyone
+has to notice. The cost is stated rather than implied: the window is bounded
+and a daemon restart loses it, which is survivable precisely because the run
+it was watching was that daemon's child and died with it.
+
+**The visualization is still a forcing function on the recording**, in the
+place where it should be. The room wanted to show which layers an agent was
+composed from, and could not: the `agentref` is a digest, and recovering the
+composition behind it meant re-resolving the bundle from the same material at
+the same commits — exactly the thing a record exists so nobody has to have.
+So the layers now ride the `agent-run` record, in application order, which is
+the part the order carries. That is a chain change the view demanded, and it
+is the right kind: a fact about the run, written once, not a stream.
+
+**An empty timeline is reported as one of two things.** A unit this daemon is
+running and a unit it merely knows about are both silent, and only one of them
+is a run to go and look at. Left to infer, a reader infers the alarming one —
+so the card says which, and a run announces itself to the bus at its first
+instant rather than at its first tool call.
+
 ### A session is not the unit of work
 
 A run ends in one of three ways an agent can choose, and only two of them
@@ -1060,6 +1114,10 @@ Honeycomb is good at — rather than by a trace id held open across the gaps.
 
 Agent runs get the same treatment: ACP tool calls become spans, so what the
 agent actually did is legible and timed rather than inferred from its output.
+The same fan-in feeds the control room's per-unit live view — see "A claimed
+item is a black box until it settles" — which is telemetry's other property
+put to use: it is the account that exists *while the run is running*, where
+the evidence chain's is the one that is still there next year.
 
 ### The collector
 

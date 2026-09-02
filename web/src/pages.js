@@ -1,6 +1,6 @@
 import { LitElement, html, css, nothing } from 'lit';
 import { Task } from '@lit/task';
-import { getStatus, getItems, getExceptions, getItem, getItemEvidence, getProvenance, openIngress } from './api.js';
+import { getStatus, getItems, getExceptions, getItem, getItemEvidence, getProvenance, getSessions, openIngress } from './api.js';
 import { ActivityController } from './sse.js';
 
 /** age renders a duration at the precision an operator cares about. */
@@ -427,6 +427,144 @@ export class BoxWork extends LitElement {
   }
 }
 customElements.define('box-work', BoxWork);
+
+// What a frame says, in one line. The kinds are the wire's strings: this is
+// an HTTP client and the ACP runtime's constants are on the other side of a
+// protocol that exists to keep the two apart.
+function frameLine(f) {
+  switch (f.kind) {
+    case 'started': return 'agent started';
+    case 'tool': return f.tool || '(unnamed — nothing for policy to match)';
+    case 'denied': return `${f.tool} — REFUSED by policy at the stream`;
+    case 'escalate': return f.reason;
+    case 'handoff': return f.reason;
+    default: return f.text ?? '';
+  }
+}
+
+// The frame kinds an operator should notice without looking for them.
+const FRAME_APPEARANCE = { denied: 'negative', escalate: 'negative', handoff: 'neutral', started: 'positive' };
+
+/**
+ * Sessions: one card per running unit — what it is, how far it has got, and
+ * what its agent is doing right now.
+ *
+ * The view the room did not have. A claimed item said `state=claimed head=`
+ * and nothing else for the whole length of a run, while the daemon knew the
+ * seat, the composed layers, the stage, and every word the agent had said.
+ *
+ * Cards side by side rather than one merged feed, because fan-out is the case
+ * a feed breaks on: several runs interleave into a stream that reads as noise,
+ * and the question an operator has — is THIS unit moving — is then answered by
+ * scrolling.
+ */
+export class BoxSessions extends LitElement {
+  static styles = css`
+    :host { display: block; }
+    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); align-items: start; }
+    .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); margin-bottom: 8px; }
+    .empty { color: var(--jh-color-content-secondary-enabled); }
+    .meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: .8rem;
+            color: var(--jh-color-content-secondary-enabled); margin-bottom: 8px; }
+    .layers { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+    .layer { font-size: .7rem; padding: 2px 6px; border-radius: 4px;
+             background: var(--jh-color-container-secondary-enabled); }
+    h4 { margin: 12px 0 4px; font-size: .8rem; color: var(--jh-color-content-secondary-enabled); }
+    ol { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font-size: .8rem; }
+    li { display: grid; grid-template-columns: 62px 70px 1fr; gap: 8px; padding: 3px 0;
+         border-bottom: 1px solid var(--jh-color-border-primary-enabled, #eee); }
+    li .t { color: var(--jh-color-content-secondary-enabled); font-variant-numeric: tabular-nums; }
+    li .k { font-weight: 600; }
+    li .x { white-space: pre-wrap; overflow-wrap: anywhere; }
+    li.negative .k { color: var(--jh-color-content-negative-enabled, #b3261e); }
+    .blind { color: var(--jh-color-content-secondary-enabled); font-style: italic; }
+    code { font-size: .75rem; }
+  `;
+  static properties = { _frames: { state: true } };
+
+  constructor() {
+    super();
+    // Frames arriving on the stream, keyed by unit, merged onto whatever the
+    // last fetch returned. Without this a card would only move as fast as the
+    // roster refetch, which is the reload the page exists to replace.
+    this._frames = {};
+    this._activity = new ActivityController(this, {
+      limit: 1,
+      onEvent: () => this._refresh(),
+      onSession: (f) => {
+        this._frames = { ...this._frames, [f.item]: [...(this._frames[f.item] ?? []), f] };
+      },
+    });
+  }
+
+  _task = new Task(this, { task: async (_, { signal }) => getSessions(signal), args: () => [] });
+
+  _refresh() {
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => this._task.run(), 400);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    clearTimeout(this._timer);
+  }
+
+  // The fetched timeline is the truth about the past; the streamed frames are
+  // what has happened since. Deduped by sequence, which the server assigns —
+  // a refetch mid-stream otherwise shows an operator the same tool call twice
+  // and makes a quiet run look busy.
+  _timeline(s) {
+    const seen = new Set((s.timeline ?? []).map((f) => f.seq));
+    return [...(s.timeline ?? []), ...(this._frames[s.id] ?? []).filter((f) => !seen.has(f.seq))];
+  }
+
+  render() {
+    return html`
+      <div class="live">${this._activity.connected ? 'live' : 'reconnecting…'}</div>
+      ${this._task.render({
+        pending: () => html`<jh-progress accessible-label="Loading sessions"></jh-progress>`,
+        error: (e) => html`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${e.message}</jh-notification>`,
+        complete: (sessions) => (sessions?.length ?? 0) === 0
+          ? html`<p class="empty">No unit is running. Claimed work appears here as it starts.</p>`
+          : html`<div class="grid">${sessions.map((s) => this._card(s))}</div>`,
+      })}`;
+  }
+
+  _card(s) {
+    const frames = this._timeline(s);
+    return html`
+      <jh-card header-title=${s.task || s.id} header-subtitle=${origin(s)} padding="medium">
+        <div class="meta">
+          <jh-tag size="small" label=${s.state}></jh-tag>
+          ${s.stage ? html`<jh-tag size="small" label=${s.stage}></jh-tag><span>${age(s.in_state_sec)} in stage</span>` : nothing}
+          ${s.seat ? html`<span>seat <strong>${s.seat}</strong></span>` : nothing}
+          ${s.agentref ? html`<code title=${s.agentref}>${s.agentref.slice(0, 12)}</code>` : nothing}
+          ${s.head ? html`<a href=${'/provenance/' + s.head}><code>${s.head.slice(0, 12)}</code></a>` : nothing}
+          <a href=${'/items/' + s.id}>${s.id}</a>
+        </div>
+        ${/* Which layers, in which order — the agentref is a digest and alone
+             it answers nothing about what the agent actually was. */ ''}
+        ${s.layers?.length
+          ? html`<div class="layers">${s.layers.map((l) => html`
+              <span class="layer" title=${`${l.source} ${l.digest}`}>${l.scope}:${l.name}</span>`)}</div>`
+          : nothing}
+        <h4>Timeline</h4>
+        ${frames.length === 0
+          ? (s.watching
+              ? html`<p class="empty">Started; nothing said yet.</p>`
+              : html`<p class="blind">No live stream here — another runner holds this, or the window has rolled.
+                     Silence about the run, not an idle agent.</p>`)
+          : html`<ol>${frames.map((f) => html`
+              <li class=${FRAME_APPEARANCE[f.kind] ?? ''}>
+                <span class="t">${new Date(f.at).toLocaleTimeString()}</span>
+                <span class="k">${f.kind}</span>
+                <span class="x">${frameLine(f)}</span>
+              </li>`)}
+            </ol>`}
+      </jh-card>`;
+  }
+}
+customElements.define('box-sessions', BoxSessions);
 
 /**
  * Exceptions: what still needs a person.
