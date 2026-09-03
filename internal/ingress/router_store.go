@@ -73,8 +73,8 @@ func (s *StoreRouter) Open(ctx context.Context, r Route, d Delivery) (Ingress, b
 		return Ingress{}, false, err
 	}
 	rec, err := s.Store.Log().Append(ctx, evidence.Record{
-		Tenant: s.Tenant, Scope: "ingress/" + id,
-		Kind: "ingress-open", Subject: "delivery/" + d.Key,
+		Tenant: s.Tenant, Scope: Scope(id),
+		Kind: RecordOpen, Subject: "delivery/" + d.Key,
 		Actor: r.Requester, Body: body,
 	})
 	if err != nil {
@@ -93,22 +93,13 @@ func (s *StoreRouter) Open(ctx context.Context, r Route, d Delivery) (Ingress, b
 	return ing, true, nil
 }
 
+// find reads an origination back through the one fold, rather than through a
+// second reader of the same chain. Two readers is how the head-read bug
+// survived: this one and the pump's each unmarshalled whatever record happened
+// to be newest, and both were wrong in the same way at the same time — which
+// reads as agreement.
 func (s *StoreRouter) find(ctx context.Context, id string) (Ingress, bool, error) {
-	head, err := s.Store.Log().Head(ctx, s.Tenant, "ingress/"+id)
-	if err != nil {
-		return Ingress{}, false, err
-	}
-	if head.Seq == 0 {
-		return Ingress{}, false, nil
-	}
-	var ing Ingress
-	if err := json.Unmarshal(head.Body, &ing); err != nil {
-		return Ingress{}, false, err
-	}
-	if ing.Opened.IsZero() {
-		ing.Opened = head.At
-	}
-	return ing, true, nil
+	return Load(ctx, s.Store.Log(), s.Tenant, id)
 }
 
 func hashKey(route, key string) string {

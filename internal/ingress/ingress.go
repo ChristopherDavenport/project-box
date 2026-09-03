@@ -37,6 +37,22 @@ const (
 	KindIncident Kind = "incident"
 )
 
+// Scope is the evidence chain one origination writes to. Exported because the
+// chain has more than one writer — the origination itself and every authority
+// it exercises — and a second spelling of the scope name would silently split
+// a provenance chain in half.
+func Scope(id string) string { return "ingress/" + id }
+
+// RecordOpen is the record kind carrying the whole origination; it is written
+// once, and it is the only kind [Load] folds.
+//
+// The chain carries two sorts of record and always has: the one that IS the
+// origination, and the narrative of what it authorized — a preemption, a
+// break-glass. So a reader must SELECT rather than unmarshal whatever record
+// happens to be newest, which is the same lesson the work item's fold already
+// learned the hard way.
+const RecordOpen = "ingress-open"
+
 // Ingress is one origination of work.
 type Ingress struct {
 	ID     string
