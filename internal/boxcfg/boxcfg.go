@@ -8,6 +8,7 @@ package boxcfg
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -37,10 +38,53 @@ type Config struct {
 	// BuildTimeout bounds one build; empty means 30m, and "-1s" (any negative
 	// duration) means no bound. Nothing bounded an agent session before: the
 	// lease TTL does not, because Checkout renews it.
-	BuildTimeout string `yaml:"build_timeout"`
-	OTLP         string `yaml:"otlp"`
-	Budget       Budget `yaml:"budget"`
-	Boxes        []Box  `yaml:"boxes"`
+	BuildTimeout string    `yaml:"build_timeout"`
+	OTLP         string    `yaml:"otlp"`
+	Budget       Budget    `yaml:"budget"`
+	Retention    Retention `yaml:"retention"`
+	Boxes        []Box     `yaml:"boxes"`
+}
+
+// Retention is how much evidence stays in the hot store, and where the rest
+// goes. Absent, nothing is ever compacted.
+//
+// The default is off, and deliberately: everywhere else here an unset policy
+// resolves to the strict end because the permissive end is the dangerous one,
+// and pruning inverts that — the destructive act is the one a silent default
+// would take. An operator who has said nothing has not asked for their
+// evidence moved off the hot store. Unbounded growth gets noticed; a default
+// that quietly pruned would be noticed by an auditor.
+type Retention struct {
+	// Keep is how many of the newest records stay hot per scope, and KeepFor
+	// is the age below which a record is never pruned. BOTH are required for
+	// anything to happen, and the stricter of the two wins: a count alone
+	// would flatten a quiet scope's whole history the moment it crossed the
+	// number, and an age alone would leave a scope that took a million
+	// records in an hour entirely hot.
+	Keep    int    `yaml:"keep"`
+	KeepFor string `yaml:"keep_for"`
+	// MinPrune is the smallest run worth a seam; empty means 100. A seam is
+	// not free — every summary is a record a verifier parses and an auditor
+	// reasons across — so compacting a handful of rows at a time would buy a
+	// slightly smaller store with a chain that is mostly boundaries.
+	MinPrune int `yaml:"min_prune"`
+	// Dir is where exported objects land; empty means `<root>/worm`.
+	//
+	// A local directory proves the SHAPE of WORM and not the property, and
+	// the receipt says so by carrying no retention lock. The bucket with the
+	// lock on it is what an auditor tests, and it replaces this at the Sink
+	// seam without the daemon changing.
+	Dir string `yaml:"dir"`
+}
+
+// KeepForDuration is the parsed age bound; zero when unset or unparseable,
+// which disables compaction rather than guessing at an interval.
+func (r Retention) KeepForDuration() time.Duration {
+	if r.KeepFor == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(r.KeepFor)
+	return d
 }
 
 // Budget mirrors capacity.Budget in config form.
@@ -301,6 +345,19 @@ func (c *Config) validate() error {
 			return fmt.Errorf("boxcfg: budget.window: %w", err)
 		}
 	}
+	if c.Retention.KeepFor != "" {
+		if _, err := time.ParseDuration(c.Retention.KeepFor); err != nil {
+			return fmt.Errorf("boxcfg: retention.keep_for: %w", err)
+		}
+	}
+	// Half a retention policy compacts nothing, silently. Refusing is the
+	// same call the config already makes about a repo with neither an agent
+	// nor a build command: an operator who configured a thing and got nothing
+	// should be told at load, not discover it from a store that never shrank.
+	if half := (c.Retention.Keep > 0) != (c.Retention.KeepForDuration() > 0); half {
+		return fmt.Errorf("boxcfg: retention needs BOTH keep and keep_for (got keep=%d keep_for=%q) — a count alone would flatten a quiet scope's whole history the moment it crossed the number, and an age alone would leave a busy one entirely hot",
+			c.Retention.Keep, c.Retention.KeepFor)
+	}
 	if len(c.Boxes) == 0 {
 		return fmt.Errorf("boxcfg: no boxes configured")
 	}
@@ -458,3 +515,12 @@ func (c Config) WindowDuration() time.Duration {
 // MaxCostMicros is the configured cost ceiling in micro-dollars — the one
 // place the operator's dollars become the integer the meter accumulates in.
 func (c Config) MaxCostMicros() int64 { return capacity.Micros(c.Budget.MaxCostPerWindow) }
+
+// RetentionDir is where exported evidence lands, defaulting beside the
+// mirrors under the daemon's root.
+func (c Config) RetentionDir() string {
+	if c.Retention.Dir != "" {
+		return c.Retention.Dir
+	}
+	return filepath.Join(c.Root, "worm")
+}
