@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,6 +32,67 @@ type world struct {
 	srv  *Server
 	pump *pump.Pump
 	rem  string
+}
+
+// queueDump renders every row the daemon holds, one per line, with the NOTE.
+//
+// It exists because the assertions below count, and a count is the one thing
+// that cannot say why it is wrong. Both of the tests that use it have failed
+// in CI on a bare number — "want 2 done, got 1", and "settled: pending=0
+// map[done:2 failed:1]" — which says an item failed instead of landing and
+// nothing else. Not which item, not at which stage, and above all not why.
+// Neither run was reproducible afterwards, so the arithmetic was the whole
+// record of an event that has now happened twice.
+//
+// The reason was on the row the entire time. `QueueEntry.Note` is "why the
+// item is in this state — a gate's reasons, a park cause", and its own doc
+// says the queue has always written it and nothing has ever shown it. That
+// sentence has been earned twice in this package already; a test is the last
+// place it should still be true.
+//
+// It never fails the test itself. This runs on a path where the test is
+// already failing, so a diagnostic that could panic or abort would replace
+// the weak message with no message at all.
+func queueDump(t *testing.T, c *Client) string {
+	t.Helper()
+	rows, err := c.Items(context.Background())
+	if err != nil {
+		return fmt.Sprintf("\n\t(the queue could not be read for diagnosis: %v)", err)
+	}
+	if len(rows) == 0 {
+		return "\n\t(the queue is empty)"
+	}
+	var b strings.Builder
+	for _, e := range rows {
+		fmt.Fprintf(&b, "\n\t%s state=%s stage=%s", e.ID, e.State, orNone(e.Stage))
+		if e.Head != "" {
+			fmt.Fprintf(&b, " head=%s", short(e.Head))
+		}
+		if e.Built != "" {
+			fmt.Fprintf(&b, " built=%s", short(e.Built))
+		}
+		if e.Runner != "" {
+			fmt.Fprintf(&b, " runner=%s lease=%ds", e.Runner, e.LeaseExpiresSec)
+		}
+		// Last and unabbreviated: it is the only field here that is prose,
+		// and the only one that has ever been the answer.
+		fmt.Fprintf(&b, "\n\t    note: %s", orNone(e.Note))
+	}
+	return b.String()
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "(none)"
+	}
+	return s
+}
+
+func short(s string) string {
+	if len(s) > 12 {
+		return s[:12]
+	}
+	return s
 }
 
 type builder struct{}
@@ -328,7 +390,7 @@ func TestQueueOverTheWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(pending) != 2 {
-		t.Fatalf("want 2 pending, got %d: %+v", len(pending), pending)
+		t.Fatalf("want 2 pending, got %d:%s", len(pending), queueDump(t, c))
 	}
 	// Where a unit came from, which the id hashes past recovery.
 	for _, e := range pending {
@@ -358,11 +420,11 @@ func TestQueueOverTheWire(t *testing.T) {
 		}
 	}
 	if still, err := c.Items(ctx, "pending"); err != nil || len(still) != 0 {
-		t.Fatalf("settled work still listed as pending: %d %v", len(still), err)
+		t.Fatalf("settled work still listed as pending: %d %v:%s", len(still), err, queueDump(t, c))
 	}
 	done, err := c.Items(ctx, "done")
 	if err != nil || len(done) != 2 {
-		t.Fatalf("want 2 done, got %d: %v", len(done), err)
+		t.Fatalf("want 2 done, got %d %v:%s", len(done), err, queueDump(t, c))
 	}
 	// Unfiltered is everything.
 	all, err := c.Items(ctx)
@@ -450,7 +512,7 @@ func TestTheCountAndTheListingAreOneFold(t *testing.T) {
 
 	st := agrees("after intake")
 	if st.Pending != 3 || st.Backlog.ByState[queue.StatePending] != 3 {
-		t.Fatalf("three submitted, status says %d: %+v", st.Pending, st.Backlog.ByState)
+		t.Fatalf("three submitted, status says %d: %+v%s", st.Pending, st.Backlog.ByState, queueDump(t, c))
 	}
 
 	// Mid-flight, where the two accounts had the most room to come apart: one
@@ -468,7 +530,7 @@ func TestTheCountAndTheListingAreOneFold(t *testing.T) {
 	}
 	st = agrees("settled")
 	if st.Pending != 0 || st.Backlog.ByState[queue.StateDone] != 3 {
-		t.Fatalf("settled: pending=%d %+v", st.Pending, st.Backlog.ByState)
+		t.Fatalf("settled: pending=%d %+v%s", st.Pending, st.Backlog.ByState, queueDump(t, c))
 	}
 }
 
