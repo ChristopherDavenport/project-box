@@ -42,6 +42,23 @@ import (
 	"github.com/ChristopherDavenport/project-box/web"
 )
 
+// SpendOf carries an agent's usage across the seam to the meter, whole.
+//
+// It exists so the conversion is written once. The adapter reports four token
+// counters and a cost and deliberately knows nothing about budgets, and the
+// meter is denominated in exactly those; collapsing them here — which is what
+// this used to do, with u.Total() — threw the split and the money away one
+// line before the only thing that could have used them, and left a charge
+// record no later reader could re-price.
+func SpendOf(u acp.Usage) capacity.Spend {
+	return capacity.Spend{
+		Input: u.InputTokens, Output: u.OutputTokens,
+		CacheRead: u.CachedReadTokens, CacheWrite: u.CachedWriteTokens,
+		Total: u.Tokens, CostMicros: capacity.Micros(u.CostUSD),
+		Reported: u.Reported,
+	}
+}
+
 // ShellBuilder runs a configured command in the workspace — the stand-in for
 // an ACP agent, and the loop cannot tell.
 type ShellBuilder struct{ Cmd string }
@@ -117,6 +134,7 @@ func New(path string) (*Daemon, error) {
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: cfg.Budget.MaxConcurrent,
 		MaxPerWindow:       cfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
+		MaxCostPerWindow:   cfg.MaxCostMicros(),
 		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration()})
 	// The window's account outlives the process that spent it. Without this a
 	// restart is a fresh budget, so the brake is only ever as strong as the
@@ -183,7 +201,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// The stream is the only place the cost is visible, so it is
 				// the adapter that charges the meter.
 				Spend: func(ctx context.Context, run string, u acp.Usage) {
-					d.meter.Charge(ctx, run, u.Total(), u.Reported)
+					d.meter.Charge(ctx, run, SpendOf(u))
 				},
 				// And the same argument for the stream: the adapter is the
 				// only place a run is visible while it is running, so it is
@@ -278,6 +296,7 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
 		MaxPerWindow:       ncfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow,
+		MaxCostPerWindow:   ncfg.MaxCostMicros(),
 		AllowUnmetered:     ncfg.Budget.AllowUnmetered, Window: ncfg.WindowDuration()})
 	d.mu.Lock()
 	d.cfg = ncfg

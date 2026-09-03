@@ -25,6 +25,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/agent/acp"
 	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
+	"github.com/ChristopherDavenport/project-box/internal/daemon"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
@@ -129,7 +130,7 @@ func run() error {
 			Seat:   &seat.Seat{Name: *seatName, Base: &knowledge.Base{Store: s, Tenant: t}},
 			Mirror: m,
 			Spend: func(ctx context.Context, run string, u acp.Usage) {
-				meter.Charge(ctx, run, u.Total(), u.Reported)
+				meter.Charge(ctx, run, daemon.SpendOf(u))
 			},
 		}
 		builder, handoff = ab, ab.Handoff

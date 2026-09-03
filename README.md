@@ -59,7 +59,8 @@ listen: unix:boxd.sock
 every: 15s
 budget:
   max_concurrent: 3
-  max_tokens_per_window: 2000000   # the brake, in the currency of the invoice
+  max_tokens_per_window: 2000000   # the volume brake, in tokens
+  max_cost_per_window: 25.00       # the money brake, in dollars — what bills
   window: 1h
 boxes:
   - name: shop

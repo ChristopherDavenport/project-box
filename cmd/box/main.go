@@ -19,6 +19,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/boxctx"
+	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/gateway"
@@ -262,6 +263,26 @@ func dash(s string) string {
 	return s
 }
 
+// tokenSplit renders a window's tokens by kind, omitting kinds that did not
+// occur rather than printing them as zero. Fixed order rather than sorted:
+// these have a rank the states do not — fresh input, what was generated, and
+// then the two cache figures that are cheap and usually largest.
+func tokenSplit(sp *capacity.Report) string {
+	var parts []string
+	for _, kv := range []struct {
+		name string
+		n    int64
+	}{
+		{"in", sp.Input}, {"out", sp.Output},
+		{"cache read", sp.CacheRead}, {"cache write", sp.CacheWrite},
+	} {
+		if kv.n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", kv.name, kv.n))
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
 // byState renders a backlog's tally in a stable order — alphabetical, because
 // the states have no rank and a map's order would make two identical statuses
 // print differently.
@@ -419,6 +440,39 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		if b := st.Backlog; b.Total > 0 {
 			fmt.Printf("backlog: %d of %d still owed a run — %s (box queue lists them)\n",
 				b.Pending, b.Total, byState(b.ByState))
+		}
+		// What the window has spent, in both currencies. The room has shown a
+		// token total for a while and this printed nothing at all, which is
+		// the asymmetry `box queue` already settled once: a fact one reader
+		// of the factory has and another does not is worse than one nobody
+		// has.
+		if sp := st.Spend; sp != nil {
+			line := fmt.Sprintf("spend: %d tokens", sp.Tokens)
+			if sp.MaxTokens > 0 {
+				line += fmt.Sprintf(" of %d", sp.MaxTokens)
+			}
+			// The parts, because the total cannot be priced without them —
+			// a cached read and an output token count the same here and bill
+			// an order of magnitude apart.
+			if split := tokenSplit(sp); split != "" {
+				line += " (" + split + ")"
+			}
+			if sp.CostMicros > 0 || sp.MaxCostMicros > 0 {
+				line += fmt.Sprintf(" · $%.4f", capacity.USD(sp.CostMicros))
+				if sp.MaxCostMicros > 0 {
+					line += fmt.Sprintf(" of $%.2f", capacity.USD(sp.MaxCostMicros))
+				}
+			}
+			if sp.Unmetered > 0 {
+				line += fmt.Sprintf(" · %d run(s) REPORTED NO COST", sp.Unmetered)
+			}
+			if sp.Unpriced > 0 {
+				line += fmt.Sprintf(" · %d run(s) reported no PRICE", sp.Unpriced)
+			}
+			if sp.Refusing {
+				line += " · REFUSING"
+			}
+			fmt.Println(line)
 		}
 		if q := st.ExceptionQueue; q.Parked > 0 {
 			met := "met"

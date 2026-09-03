@@ -49,6 +49,18 @@ export function describe(r) {
       }
       case 'authz':
         return o.reason ?? '';
+      case 'charge': {
+        // The charge body IS the spend, split and priced, so the feed can say
+        // what a run cost rather than only that it cost something. An
+        // unreported charge says so; a zero here would be the same lie the
+        // meter refuses to tell.
+        if (!o.metered) return 'cost NOT reported — claims stopped';
+        const bits = [`${fmtTokens(o.tokens ?? 0)} tokens`];
+        const split = tokenSplit(o);
+        if (split) bits.push(split);
+        if (o.cost_micros) bits.push(fmtUSD(o.cost_micros));
+        return bits.join(' · ');
+      }
       default:
         return firstLine(body);
     }
@@ -76,6 +88,34 @@ export function fmtTokens(n) {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${Math.round(n / 100) / 10}k`;
   return `${Math.round(n / 100_000) / 10}M`;
+}
+
+/**
+ * fmtUSD renders micro-dollars as money. Sub-cent figures keep four decimals
+ * because a single run's cost is often smaller than a cent and rounding it to
+ * $0.00 is the same lie as counting an unreported cost as zero.
+ */
+export function fmtUSD(micros) {
+  const usd = (micros ?? 0) / 1e6;
+  return usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
+/**
+ * tokenSplit is the total broken into what it is billed as.
+ *
+ * The total alone cannot be priced: a cached read costs roughly a tenth of a
+ * fresh input token and an output token several times either, so two windows
+ * with the same number here can differ on the invoice by an order of
+ * magnitude. Kinds that did not occur are left out rather than shown as zero.
+ */
+export function tokenSplit(s) {
+  const parts = [
+    ['in', s.input],
+    ['out', s.output],
+    ['cache read', s.cache_read],
+    ['cache write', s.cache_write],
+  ].filter(([, n]) => n > 0);
+  return parts.map(([k, n]) => `${k} ${fmtTokens(n)}`).join(' · ');
 }
 
 /** Where a unit came from, as one readable string. */
@@ -226,6 +266,17 @@ export class BoxDashboard extends LitElement {
                   <div class="n">${fmtTokens(s.spend.tokens)}</div>
                   <div class="l">tokens${s.spend.max_tokens ? ` of ${fmtTokens(s.spend.max_tokens)}` : ''}</div>
                 </div>
+                ${/* Money beside volume, because they are different questions
+                     and the token tile has never been able to answer the
+                     second one. Shown whenever there is a ceiling or a spend:
+                     a factory whose runs report no cost at all should see
+                     nothing here rather than a confident $0.00. */ ''}
+                ${s.spend.cost_micros || s.spend.max_cost_micros
+                  ? html`<div class="stat">
+                      <div class="n">${fmtUSD(s.spend.cost_micros)}</div>
+                      <div class="l">spend${s.spend.max_cost_micros ? ` of ${fmtUSD(s.spend.max_cost_micros)}` : ''}</div>
+                    </div>`
+                  : nothing}
                 <div class="stat">
                   <div class="n">${s.spend.running}/${s.spend.max_concurrent}</div>
                   <div class="l">running</div>
@@ -241,6 +292,12 @@ export class BoxDashboard extends LitElement {
                   Queue: ${breakdown(s.backlog.by_state)} — <a href="/work">list them</a>
                 </p>`
               : nothing}
+            ${/* What that token total is made of, for the same reason the
+                 backlog breakdown sits under the pending count: the number is
+                 not priceable without its parts. */ ''}
+            ${s.spend && tokenSplit(s.spend)
+              ? html`<p class="breakdown">Tokens: ${tokenSplit(s.spend)}</p>`
+              : nothing}
             ${/* The total alone is a lie whenever this number is not zero, so
                  it is never shown on its own. */ ''}
             ${s.spend?.unmetered
@@ -249,7 +306,17 @@ export class BoxDashboard extends LitElement {
                   incomplete and claims are stopped until the window turns.
                 </jh-notification>`
               : nothing}
-            ${s.spend?.refusing && !s.spend.unmetered
+            ${/* The same sentence one currency along. A run whose tokens
+                 parsed and whose cost did not looks metered everywhere except
+                 the place that bills, which is why it gets its own banner
+                 rather than being folded into the one above. */ ''}
+            ${s.spend?.unpriced
+              ? html`<jh-notification appearance="negative" type="banner" hide-dismiss-button>
+                  ${s.spend.unpriced} run(s) this window reported tokens but no cost — the money
+                  figure above is incomplete and claims are stopped until the window turns.
+                </jh-notification>`
+              : nothing}
+            ${s.spend?.refusing && !s.spend.unmetered && !s.spend.unpriced
               ? html`<jh-notification appearance="neutral" type="banner" hide-dismiss-button>
                   The meter is pacing work: the factory is idle because it is over budget, not because
                   there is nothing to do.

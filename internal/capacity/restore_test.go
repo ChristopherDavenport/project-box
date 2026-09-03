@@ -48,7 +48,7 @@ func TestTheBrakeSurvivesARestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.Charge(ctx, "run-1", 20_076_747, true)
+	m.Charge(ctx, "run-1", Spend{Total: 20_076_747, Reported: true})
 	release()
 
 	if _, err := m.Acquire(ctx, "run-2"); !errors.Is(err, ErrBudget) {
@@ -78,7 +78,7 @@ func TestRestoreForgetsTheWindowBefore(t *testing.T) {
 	ctx := context.Background()
 
 	release, _ := m.Acquire(ctx, "run-1")
-	m.Charge(ctx, "run-1", 20_076_747, true)
+	m.Charge(ctx, "run-1", Spend{Total: 20_076_747, Reported: true})
 	release()
 
 	now = now.Add(time.Hour) // into the next aligned bucket
@@ -106,7 +106,7 @@ func TestUnmeteredSurvivesARestart(t *testing.T) {
 	ctx := context.Background()
 
 	release, _ := m.Acquire(ctx, "run-1")
-	m.Charge(ctx, "run-1", 0, false) // said nothing about its cost
+	m.Charge(ctx, "run-1", Spend{}) // said nothing about its cost
 	release()
 
 	m2 := reopen()
@@ -128,7 +128,7 @@ func TestReloadCannotClearTheAccount(t *testing.T) {
 	ctx := context.Background()
 
 	release, _ := m.Acquire(ctx, "run-1")
-	m.Charge(ctx, "run-1", 20_076_747, true)
+	m.Charge(ctx, "run-1", Spend{Total: 20_076_747, Reported: true})
 	release()
 
 	m.SetBudget(budget) // the reload
@@ -153,7 +153,7 @@ func TestRefusingMeansWouldRefuseNow(t *testing.T) {
 	ctx := context.Background()
 
 	release, _ := m.Acquire(ctx, "run-1")
-	m.Charge(ctx, "run-1", 20_076_747, true)
+	m.Charge(ctx, "run-1", Spend{Total: 20_076_747, Reported: true})
 	release()
 	if _, err := m.Acquire(ctx, "run-2"); !errors.Is(err, ErrBudget) {
 		t.Fatal("setup: the meter should be braking")
@@ -184,7 +184,7 @@ func TestReportRollsTheWindowForward(t *testing.T) {
 	ctx := context.Background()
 
 	release, _ := m.Acquire(ctx, "run-1")
-	m.Charge(ctx, "run-1", 20_076_747, true)
+	m.Charge(ctx, "run-1", Spend{Total: 20_076_747, Reported: true})
 	release()
 	if !m.Report().Refusing {
 		t.Fatal("setup: should be braking")
