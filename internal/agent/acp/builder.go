@@ -48,12 +48,29 @@ type Builder struct {
 	Role     agent.Role
 	// Envelope is the data handling this work's origination declared. It is
 	// the origination's, not the Box's — the Box's bound is the composer's
-	// ceiling — so nothing here supplies one: it belongs on the governed kind
-	// declaration, and until that exists this seat is empty and no box.yaml
-	// fills it. A composer with a ceiling and nothing here refuses every run,
+	// ceiling. A composer with a ceiling and nothing here refuses every run,
 	// which is the correct failure and is why turning classification on is a
 	// deliberate act rather than a default.
+	//
+	// A static fallback for a builder whose whole box runs at one class.
+	// EnvelopeFor is the per-origination form and wins where it answers.
 	Envelope *agent.Envelope
+	// EnvelopeFor resolves the envelope for one run's work item, which is
+	// where the declaration finally reaches the agent plane.
+	//
+	// One builder serves a whole box and the envelope belongs to the KIND, so
+	// a per-builder field could only ever express "this box handles one class
+	// of thing". That was the gap #17 recorded rather than closed: the
+	// mechanism existed, the intersection and both refusals worked, and no
+	// configuration anywhere could fill the seat. The kind declaration is the
+	// governed home, and this is how it arrives — by run, because the run is
+	// what the builder is given.
+	//
+	// An error refuses the build. That is the point: unclassified work under a
+	// box that classifies must not fall back to the static envelope, because
+	// falling back is how a run ends up permitted to see more than its
+	// origination declared.
+	EnvelopeFor func(ctx context.Context, run string) (*agent.Envelope, error)
 	// Seat, when set, gives the agent continuity: its wake layer joins the
 	// bundle, and HANDOFF lines from its final message are recorded on
 	// settle via [Builder.Handoff].
@@ -90,7 +107,15 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	if role == "" {
 		role = agent.RoleBuilder
 	}
-	req := agent.Request{Tenant: b.Tenant, Role: role, Box: b.Box, Repo: ws.Repo, Run: ws.Run, Task: task, Envelope: b.Envelope}
+	envelopeIn := b.Envelope
+	if b.EnvelopeFor != nil {
+		declared, err := b.EnvelopeFor(ctx, ws.Run)
+		if err != nil {
+			return "", fmt.Errorf("acp: data envelope for %s: %w", ws.Run, err)
+		}
+		envelopeIn = declared
+	}
+	req := agent.Request{Tenant: b.Tenant, Role: role, Box: b.Box, Repo: ws.Repo, Run: ws.Run, Task: task, Envelope: envelopeIn}
 	if b.Seat != nil {
 		wake, ok, err := b.Seat.WakeLayer(ctx, b.wakeNotes())
 		if err != nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/render"
@@ -69,7 +70,7 @@ func TestDeployIsAChangeSet(t *testing.T) {
 
 	router := &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "runner-1"}
 	ing, _, err := router.Open(ctx,
-		ingress.Route{Name: "releases", Kind: ingress.RouteWebhook, Opens: ingress.KindIssue, Box: "shop", Requester: "chris"},
+		ingress.Route{Name: "releases", Kind: ingress.RouteWebhook, Opens: kind.SeedIssue, Box: "shop", Requester: "chris"},
 		ingress.Delivery{Key: "release-v1.2.3"})
 	if err != nil {
 		t.Fatal(err)

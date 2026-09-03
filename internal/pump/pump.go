@@ -19,7 +19,9 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -38,6 +40,18 @@ type Pump struct {
 	Loops map[string]*loop.Loop
 	Meter *capacity.Meter
 	Queue *queue.Queue
+	// Kinds is the declaration set intake resolves an origination's kind
+	// against, and Decomposers the producers those declarations name. Plans
+	// records what each decomposition decided.
+	//
+	// All three are required for intake to run, and none of them has a
+	// forgiving default. A pump with no declarations admits nothing, loudly,
+	// which is the honest failure: the alternative — falling back to a
+	// built-in identity plan for a kind nobody declared — is precisely the
+	// silent widening of an envelope that made the closed enum a mistake.
+	Kinds       kind.Sets
+	Decomposers *plan.Registry
+	Plans       *plan.Store
 
 	mu sync.RWMutex // guards Loops swaps against in-flight drains
 	// inflight tracks running item executions for graceful drain: on
@@ -68,6 +82,22 @@ func (p *Pump) SetLoops(loops map[string]*loop.Loop) {
 	p.mu.Unlock()
 }
 
+// SetKinds swaps the declaration table, under the same lock and for the same
+// reason: a reload that changed what a box may open work under while a drain
+// was reading the old table would decompose one origination against two
+// policies.
+func (p *Pump) SetKinds(kinds kind.Sets) {
+	p.mu.Lock()
+	p.Kinds = kinds
+	p.mu.Unlock()
+}
+
+func (p *Pump) kinds() kind.Sets {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.Kinds
+}
+
 func (p *Pump) loopFor(box, repo string) (*loop.Loop, bool) {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -78,9 +108,23 @@ func (p *Pump) loopFor(box, repo string) (*loop.Loop, bool) {
 	return lp, ok
 }
 
-// Intake creates a work item for every ingress that lacks one. Item ids are
-// deterministic from the ingress, so intake is idempotent however often it
-// ticks — the same rule as delivery keys, one level up.
+// Intake decomposes every origination that has not been decomposed yet, and
+// submits the graph its plan called for.
+//
+// Universal, which is the change. Intake used to admit issues and silently
+// step over everything else — a campaign advanced through its own engine, and
+// an incident produced no work at all and was an authority token wearing a
+// work item's struct. Now every ingress runs the decomposition step and emits
+// a graph: an ordinary issue emits a one-node graph, a campaign emits its
+// predicate's fan-out, and an incident emits restore-then-postmortem as the
+// edge it always described in prose.
+//
+// Idempotency has moved one link up and is otherwise the same rule as delivery
+// keys. The PLAN is what intake checks for, not the item: item ids are still
+// deterministic, but a plan that has been recorded must never be recomputed,
+// because a decomposer over moving facts would produce a second graph on the
+// next tick and every item on the first would be orphaned from the decision
+// that made it.
 func (p *Pump) Intake(ctx context.Context) (int, error) {
 	created := 0
 	var unreadable error
@@ -88,41 +132,78 @@ func (p *Pump) Intake(ctx context.Context) (int, error) {
 		if err != nil {
 			return created, err
 		}
-		id := "wi-" + rec.Subject
-		switch _, err := p.Queue.Load(ctx, p.Tenant, id); {
+		n, err := p.intakeOne(ctx, rec.Subject)
+		created += n
+		if err != nil {
+			// One origination that cannot be decomposed must not be a gate
+			// across the door: the rest of the factory's intake still runs,
+			// and the error still surfaces. Same posture the unreadable-chain
+			// case has taken since a single corrupt item stopped 31
+			// consecutive ticks from doing anything.
+			unreadable = errors.Join(unreadable, err)
+		}
+	}
+	return created, unreadable
+}
+
+// intakeOne decomposes and submits one origination's graph.
+func (p *Pump) intakeOne(ctx context.Context, ingressID string) (int, error) {
+	ing, ok, err := p.findIngress(ctx, ingressID)
+	if err != nil {
+		return 0, fmt.Errorf("pump: intake %s: %w", ingressID, err)
+	}
+	if !ok {
+		return 0, nil
+	}
+	decl, err := p.kinds().Lookup(ing.Box, string(ing.Kind))
+	if err != nil {
+		// A kind nobody declared is a configuration gap, and the work waits
+		// rather than being guessed at. Refusing here is the same call the
+		// config makes about a repo with neither an agent nor a build command:
+		// an operator who configured a thing and got nothing should be told,
+		// not left to infer it from a queue that never grew.
+		return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
+	}
+	if decl.Decompose.Standing {
+		// A reconciler's decomposition belongs to its standing task, which
+		// throttles it into waves and knows when the last one soaked. Intake
+		// planning it would enumerate a campaign, which is the one thing a
+		// campaign is defined by not doing.
+		return 0, nil
+	}
+	pl, planned, err := p.Plans.Latest(ctx, p.Tenant, ing.ID)
+	if err != nil {
+		return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
+	}
+	if !planned {
+		if pl, err = plan.Make(ctx, p.Decomposers, ing, decl); err != nil {
+			return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
+		}
+		// Recorded BEFORE the work exists. A graph whose items predate the
+		// plan that called for them is a plan reconstructed from its
+		// consequences, and the whole reason the decomposition is recorded is
+		// that it cannot be.
+		if pl, err = p.Plans.Record(ctx, ing, pl); err != nil {
+			return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
+		}
+	}
+	created := 0
+	for _, item := range plan.Items(ing, pl) {
+		switch _, err := p.Queue.Load(ctx, p.Tenant, item.ID); {
 		case err == nil:
 			continue // already has its item
 		case !errors.Is(err, queue.ErrNoItem):
 			// Absence is the only answer that may create work. Treating an
 			// unreadable chain as "no item yet" re-queued a parked item on
 			// every tick, which is a spend loop wearing an idempotency key.
-			//
-			// Carry on to the next ingress rather than returning: one broken
-			// chain must not also be a gate across the door, or no new work
-			// could enter the factory until someone repaired the old.
-			unreadable = errors.Join(unreadable, fmt.Errorf("pump: intake %s: %w", id, err))
-			continue
+			return created, fmt.Errorf("pump: intake %s: %w", item.ID, err)
 		}
-		ing, ok, err := p.findIngress(ctx, rec.Subject)
-		if err != nil {
-			return created, err
-		}
-		if !ok || ing.Kind != ingress.KindIssue {
-			continue // campaigns and incidents advance through their own engines
-		}
-		task := ing.Note
-		if task == "" {
-			task = ing.Title
-		}
-		if task == "" {
-			task = "attend to ingress " + ing.ID
-		}
-		if _, err := p.Queue.Submit(ctx, loop.ItemFor(ing, id, task)); err != nil {
+		if _, err := p.Queue.Submit(ctx, item); err != nil {
 			return created, err
 		}
 		created++
 	}
-	return created, unreadable
+	return created, nil
 }
 
 // Drain runs every claimable item, within budget. It returns how many items
