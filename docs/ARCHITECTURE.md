@@ -1083,6 +1083,57 @@ them back in a seat whose failure parks the one item that asked for one.
   store. Not built; it is the accepted-risk answer if the dishonest-operator
   gap ever needs closing (see Identity and permissioning).
 
+### Pruning a tamper-evident chain
+
+Durability and volume are different problems and the second one has no
+maintenance-job answer here. Gas Town could flatten its ledger because it was
+honest by norm; ours is tamper-evident by construction, so a prune is
+indistinguishable from the attack `Verify` exists to catch. Compaction is
+therefore a **schema decision** rather than a chore we get to write later, and
+it was designed with the chain rather than after it — the sequencing principle
+about what cannot be retrofitted applies to the hole an added-later compaction
+would leave exactly where the early work was.
+
+The seam is one record. A scope's cold prefix is exported to a sink, and a
+**summary takes the pruned head's seat** — same sequence number, and `Prev`
+naming the pruned head's ID, which is the hash the surviving successor already
+names. So nothing that survives is rewritten, and the chain stays continuous
+across the boundary. The summary's body carries what was pruned (the range,
+the count, the record kinds as semantic residue, the time span) and the export
+receipt that pins it: same range, and a head equal to the hash the summary
+continues from. `compaction` is a **reserved kind** that `Append` refuses, so a
+well-formed summary cannot be smuggled in mid-stream — a summary enters a chain
+only through `Compact`, in one transaction, after the receipt has been checked
+against the store's own rows. No checkpoint, no prune; and a prefix that does
+not verify is refused rather than flattened, because compaction would otherwise
+launder precisely the tampering it must not hide.
+
+Both sides then prove, from bytes alone. `Verify` walks the hot side across the
+seam, and `VerifySeam` proves the pruned run against the exported object —
+offline, with no service running, which is the form an auditor is actually
+handed. A scope holds at most one summary, at its start, so successive
+compactions chain: each covers back to the previous summary, whose body names
+the export before it, all the way to genesis.
+
+**Retention is off unless configured, and that inverts this system's usual
+default on purpose.** Everywhere else an unset policy resolves to the strict
+end because the permissive end is dangerous; here the destructive act is the
+one a silent default would take. Unbounded growth is a problem that gets
+noticed. A default that quietly pruned would be noticed by an auditor. When it
+is configured, a count and an age both bind and the stricter wins — a count
+alone flattens a quiet scope's whole history the moment it crosses the number,
+an age alone leaves a scope that took a million records in an hour entirely
+hot — and half a policy is refused at load rather than silently doing nothing.
+
+The sweep visits the **standing** scopes, the ones that grow without bound, and
+deliberately not the per-entity chains. A `workitem/<id>` chain is bounded by
+the thing it is about and is exactly what an auditor sampling that change asks
+for by subject; compacting it would trade the evidence most likely to be read
+for space the control chains are actually consuming. What that leaves open is
+stated rather than implied: a factory running for years accumulates unboundedly
+many bounded per-entity chains, which is a different problem — an archive of
+settled work — wanting its own enumerator and its own policy.
+
 ### The provenance chain
 
 ```

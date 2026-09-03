@@ -404,6 +404,7 @@ claim is decoration.
 | Backend equivalence | one conformance suite, every backend, no skips in CI | 0 |
 | Chain integrity | `Verify` catches a tampered record *and* a removed one | 0 |
 | Compaction seam | a compacted scope still verifies — the hot side across the seam, the WORM side against the export — and a chopped, tampered, or re-aimed compacted chain still fails | 0 |
+| Compaction is a chore, not a plan | the daemon's sweep compacts a standing scope past its retention and the chain proves out on both sides afterwards; successive summaries chain back to genesis through their exports; an unconfigured daemon prunes nothing and half a policy is refused at load | 0, 11 |
 | Delegation cannot escalate | an agent acting for a user is denied what that user lacks | 0 |
 | No implicit allow | a principal with an empty grant set can do nothing | 0 |
 | No agent on a critical path | with zero agents configured and no runtime assembled, the daemon still ticks, drains a change to a landing, parks a refused gate, ages and escalates it out of band, refuses over budget, verifies every scope it wrote, and runs both standing chores — and no ACP builder is assembled at all | 2, 11 |
@@ -1276,6 +1277,37 @@ permanently disagreeing. Acquire and Report both roll and Charge did not,
 which is why it hid: a claim rolls the clock a moment before every charge
 except the one that straddles a boundary — the long run, which is the
 expensive one.
+
+Issue #3 gave compaction an operator (2026-09-03). The schema half had been in
+the store since Phase 0 and was complete — the reserved kind, `Summarize`, the
+summary at the pruned head's seat, `Verify` across the seam, both backends,
+the conformance suite including the tampered and re-aimed receipts. Nothing
+called it. There was also no `Sink` at all, only the interface, so the durable
+half of a compaction had nowhere to go: the safe prune existed entirely in
+tests.
+
+`evidence.DirSink` is the local one, and it says what it is. A directory
+proves the SHAPE of WORM and not the property, so the receipt carries no
+`RetainUntil` — a retention date nobody enforces is worse evidence than an
+absent one — while everything checkable from bytes does hold: the object is
+the run in order, content-addressed, written 0444 and never rewritten, and
+`VerifySeam` proves the pruned side offline against it. `evidence.Compactor`
+is the policy, and the daemon runs it as a standing chore beside the prune and
+the escalation sweep. Retention is OFF unless configured, which inverts this
+system's usual default deliberately: everywhere else an unset policy resolves
+to the strict end because the permissive end is dangerous, and here the
+destructive act is the one a silent default would take. A count and an age
+both bind and the stricter wins; half a policy is refused at load rather than
+compacting nothing in silence.
+
+The sweep visits the standing scopes by name. A `workitem/<id>` chain is
+bounded by the thing it is about and is what an auditor sampling that change
+asks for by subject, so compacting it would trade the evidence most likely to
+be READ for space the control chains are consuming. Named rather than
+discovered for that reason, and the gap is recorded rather than implied: a
+factory running for years accumulates unboundedly many bounded per-entity
+chains, which is an archive problem wanting its own enumerator and policy, not
+a wildcard in this list.
 
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
 an agent image and the live run that turns confinement on for the dogfood,

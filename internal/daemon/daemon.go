@@ -95,8 +95,9 @@ type Daemon struct {
 	// daemon rather than to an assembled executor: a reload rebuilds the
 	// builders and must not blind the room to the runs those builders are
 	// already in the middle of.
-	live *control.Live
-	API  *api.Server
+	live      *control.Live
+	compactor *evidence.Compactor
+	API       *api.Server
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -151,6 +152,19 @@ func New(path string) (*Daemon, error) {
 	d.escalator = &control.Escalator{
 		Room:   &control.Room{Store: s, Tenant: t, Actor: cfg.Runner},
 		Notify: control.NotifierFunc(control.LogNotice),
+	}
+	// Compaction is a standing chore beside the prune and the escalation
+	// sweep, and it is imperative Go for the reason those are: a compactor
+	// that quietly stopped is a store that grows until it is an incident.
+	// Nil Retention means it does nothing, which is the configured default.
+	d.compactor = &evidence.Compactor{
+		Log:   s.Log(),
+		Sink:  &evidence.DirSink{Dir: cfg.RetentionDir(), Log: s.Log()},
+		Actor: cfg.Runner,
+		Retention: evidence.Retention{
+			Keep: cfg.Retention.Keep, KeepFor: cfg.Retention.KeepForDuration(),
+			MinPrune: cfg.Retention.MinPrune,
+		},
 	}
 	d.API = &api.Server{
 		Store: s, Tenant: t, Routes: routes,
@@ -383,9 +397,41 @@ func (d *Daemon) Run(ctx context.Context) error {
 				if _, err := d.escalator.Sweep(workCtx); err != nil {
 					slog.Warn("escalation sweep", "err", err)
 				}
+				if sums, err := d.compactor.Sweep(workCtx, d.tenant, StandingScopes...); err != nil {
+					slog.Warn("compaction sweep", "err", err)
+				} else if len(sums) > 0 {
+					slog.Info("compacted", "scopes", len(sums))
+				}
 			}
 		}
 	}
+}
+
+// StandingScopes are the chains that grow without bound, and therefore the
+// ones the compaction sweep visits.
+//
+// Named rather than discovered, because the distinction is real and a scope
+// enumerator would blur it. A per-entity chain — workitem/<id>, ingress/<id>,
+// changeset/<id> — is bounded by the thing it is about: it stops when the
+// item settles, holds tens of records, and is exactly what an auditor
+// sampling that change asks for by subject. Compacting those would trade the
+// evidence most likely to be READ for space that the standing chains are
+// actually consuming, where one busy hour writes more rows than a hundred
+// work items ever will.
+//
+// What this leaves open is stated rather than implied: a factory that runs
+// for years accumulates unboundedly MANY bounded per-entity chains, which is
+// a different problem — a per-tenant archive of settled work — and it wants
+// an enumerator and a policy of its own rather than this list growing a
+// wildcard.
+var StandingScopes = []string{
+	"control/capacity",
+	"control/claims",
+	"control/config",
+	"control/escalations",
+	"control/review",
+	"index/ingress",
+	"index/pending",
 }
 
 // housekeepingEvery spaces the standing chores: every Nth tick, the mirror

@@ -62,6 +62,9 @@ budget:
   max_tokens_per_window: 2000000   # the volume brake, in tokens
   max_cost_per_window: 25.00       # the money brake, in dollars — what bills
   window: 1h
+retention:                         # absent, nothing is ever compacted
+  keep: 5000                       # newest records kept hot, per standing scope
+  keep_for: 72h                    # and nothing younger is pruned; both bind
 boxes:
   - name: shop
     agent: /path/to/claude-agent-acp   # or per-repo `build:` commands
