@@ -12,6 +12,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/agent/acp"
 	"github.com/ChristopherDavenport/project-box/internal/api"
+	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -180,7 +181,7 @@ func TestTheFactoryRunsWithNoAgentInIt(t *testing.T) {
 	// cost — there is no stream to report one — so the charge is made by
 	// hand, which is the honest shape of the claim: the brake is Go, and it
 	// does not need an agent to exist in order to bite.
-	d.meter.Charge(ctx, "manual", 2000, true)
+	d.meter.Charge(ctx, "manual", capacity.Spend{Total: 2000, Reported: true})
 	if !d.meter.Report().Refusing {
 		t.Fatalf("the meter is over its ceiling and not refusing: %+v", d.meter.Report())
 	}

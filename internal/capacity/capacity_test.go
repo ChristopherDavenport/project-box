@@ -36,11 +36,13 @@ func take(ctx context.Context, m *Meter, what string) error {
 	return nil
 }
 
-// TestTokenBudgetStopsTheWindow: the brake is denominated the way the invoice
-// is. Counting run STARTS cannot tell a cheap factory from an expensive one —
-// a start is one number whether the run behind it reads three files or the
-// whole repository — so the run count stays unlimited here and the tokens do
-// all the stopping.
+// TestTokenBudgetStopsTheWindow: the volume brake. Counting run STARTS cannot
+// tell a cheap factory from an expensive one — a start is one number whether
+// the run behind it reads three files or the whole repository — so the run
+// count stays unlimited here and the tokens do all the stopping.
+//
+// Volume and not the invoice, which this comment used to claim it was: see
+// TestACostCeilingBrakesWhatATokenCeilingCannot for the currency that bills.
 func TestTokenBudgetStopsTheWindow(t *testing.T) {
 	ctx := context.Background()
 	m, _ := meter(t, Budget{MaxConcurrent: 1, MaxTokensPerWindow: 10_000, Window: time.Hour})
@@ -48,11 +50,11 @@ func TestTokenBudgetStopsTheWindow(t *testing.T) {
 	if err := take(ctx, m, "wi-1"); err != nil {
 		t.Fatalf("first run refused: %v", err)
 	}
-	m.Charge(ctx, "wi-1", 4_000, true)
+	m.Charge(ctx, "wi-1", Spend{Total: 4_000, Reported: true})
 	if err := take(ctx, m, "wi-2"); err != nil {
 		t.Fatalf("under budget but refused: %v", err)
 	}
-	m.Charge(ctx, "wi-2", 7_000, true)
+	m.Charge(ctx, "wi-2", Spend{Total: 7_000, Reported: true})
 
 	// 11k spent against a 10k window.
 	if err := take(ctx, m, "wi-3"); !errors.Is(err, ErrBudget) {
@@ -74,7 +76,7 @@ func TestUnmeteredRunClosesTheWindow(t *testing.T) {
 	if err := take(ctx, m, "wi-1"); err != nil {
 		t.Fatalf("first run refused: %v", err)
 	}
-	m.Charge(ctx, "wi-1", 0, false) // the agent said nothing
+	m.Charge(ctx, "wi-1", Spend{}) // the agent said nothing
 
 	err := take(ctx, m, "wi-2")
 	if !errors.Is(err, ErrUnmetered) {
@@ -101,7 +103,7 @@ func TestUnmeteredStopsEvenWithoutATokenBudget(t *testing.T) {
 	if err := take(ctx, m, "wi-1"); err != nil {
 		t.Fatalf("first run refused: %v", err)
 	}
-	m.Charge(ctx, "wi-1", 0, false)
+	m.Charge(ctx, "wi-1", Spend{})
 	if err := take(ctx, m, "wi-2"); !errors.Is(err, ErrUnmetered) {
 		t.Fatalf("an unmeasurable factory kept running: %v", err)
 	}
@@ -118,7 +120,7 @@ func TestAllowUnmeteredIsAnExplicitChoice(t *testing.T) {
 		if err := take(ctx, m, "wi"); err != nil {
 			t.Fatalf("run %d refused after opting in: %v", i, err)
 		}
-		m.Charge(ctx, "wi", 0, false)
+		m.Charge(ctx, "wi", Spend{})
 	}
 	if r := m.Report(); r.Unmetered != 3 {
 		t.Fatalf("opting in should still COUNT what it could not measure: %d", r.Unmetered)
@@ -132,8 +134,8 @@ func TestWindowRolloverForgives(t *testing.T) {
 	m, now := meter(t, Budget{MaxConcurrent: 1, MaxTokensPerWindow: 5_000, Window: time.Hour})
 
 	take(ctx, m, "wi-1")
-	m.Charge(ctx, "wi-1", 9_000, true)
-	m.Charge(ctx, "wi-1", 0, false)
+	m.Charge(ctx, "wi-1", Spend{Total: 9_000, Reported: true})
+	m.Charge(ctx, "wi-1", Spend{})
 	if err := take(ctx, m, "wi-2"); err == nil {
 		t.Fatal("an exhausted, unmetered window admitted a run")
 	}

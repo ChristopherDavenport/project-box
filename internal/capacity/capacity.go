@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
@@ -35,6 +36,70 @@ var ErrBusy = errors.New("capacity: concurrency limit reached")
 // silently disengaged. Set [Budget.AllowUnmetered] to proceed anyway.
 var ErrUnmetered = errors.New("capacity: a run reported no cost — claims stopped until the window turns (set allow_unmetered to proceed blind)")
 
+// ErrUnpriced reports a run that said how many tokens it spent and not what
+// they cost, under a budget denominated in money.
+//
+// The same rule as [ErrUnmetered], one currency along. A cost ceiling that
+// silently counted an unpriced run as $0.00 would be the brake reading
+// unknown as zero, which is the failure the token side already refuses — and
+// it is likelier here, because a run whose tokens parse and whose cost does
+// not looks metered from every angle except the one that bills.
+var ErrUnpriced = errors.New("capacity: a run reported tokens but no cost, under a cost budget — claims stopped until the window turns (set allow_unmetered to proceed blind)")
+
+// Spend is what one run cost, in both currencies it is billed in.
+//
+// Tokens are not fungible. A cached read is roughly a tenth the price of a
+// fresh input token and an output token several times either, so two runs
+// with identical totals can differ on the invoice by more than an order of
+// magnitude — which makes a single total a number that cannot be priced, and
+// a brake denominated in it a brake that does not know what it is stopping.
+// The split is carried rather than summed for that reason, and it is carried
+// onto the record because a charge written as one integer can never be
+// re-priced afterwards.
+type Spend struct {
+	Input      int64 `json:"input,omitempty"`
+	Output     int64 `json:"output,omitempty"`
+	CacheRead  int64 `json:"cache_read,omitempty"`
+	CacheWrite int64 `json:"cache_write,omitempty"`
+	// Total is the run's own tally over the parts when it gave one, and wins
+	// over their sum: a total the agent stands behind is a stronger claim
+	// than a sum of the components this factory happens to recognise.
+	Total int64 `json:"tokens,omitempty"`
+	// CostMicros is what the run said it cost, in millionths of a dollar.
+	//
+	// Integer, and converted once at the seam where the agent's float
+	// arrives. Money that accumulates over a window must not drift, and a
+	// budget an operator cannot reproduce by adding up the charges is not one
+	// they can audit.
+	CostMicros int64 `json:"cost_micros,omitempty"`
+	// Reported is false when nothing said what the run cost at all. Absence
+	// is carried rather than collapsing into a zero total; see [ErrUnmetered].
+	Reported bool `json:"metered"`
+}
+
+// Tokens is every token the run is billed for, cache reads included —
+// cheaper, never free.
+func (s Spend) Tokens() int64 {
+	if s.Total > 0 {
+		return s.Total
+	}
+	return s.Input + s.Output + s.CacheRead + s.CacheWrite
+}
+
+// Priced reports the run having said what it cost in money. A metered run
+// that is not priced is the [ErrUnpriced] case: known in tokens, unknown in
+// the currency a cost ceiling is written in.
+func (s Spend) Priced() bool { return s.CostMicros > 0 }
+
+// USD renders micro-dollars as dollars, for display only — never for
+// accumulation.
+func USD(micros int64) float64 { return float64(micros) / 1e6 }
+
+// Micros converts a dollar figure to micro-dollars, rounding to the nearest.
+// The one place a float becomes money, so it is the one place the rounding
+// rule is written.
+func Micros(usd float64) int64 { return int64(math.Round(usd * 1e6)) }
+
 // Budget bounds a tenant's execution.
 type Budget struct {
 	// MaxConcurrent bounds simultaneous runs. Zero means one — an unset
@@ -43,15 +108,33 @@ type Budget struct {
 	// MaxPerWindow bounds run STARTS per window; zero means unlimited
 	// starts (concurrency still binds).
 	MaxPerWindow int
-	// MaxTokensPerWindow bounds what the window may SPEND, in tokens; zero
+	// MaxTokensPerWindow bounds what the window may spend in TOKENS; zero
 	// means unbounded.
 	//
 	// Counting starts is not counting cost. A start is one number whether the
 	// run behind it reads three files or the whole repository, so a budget
-	// denominated in starts cannot tell a cheap factory from an expensive
-	// one and cannot stop the expensive one. This is the number an invoice
-	// is denominated in, so it is the number the brake is denominated in.
+	// denominated in starts cannot tell a cheap factory from an expensive one
+	// and cannot stop the expensive one.
+	//
+	// This is a volume ceiling and not the invoice, which it was once
+	// described as and never was: a token is not a unit of money, and a
+	// window of cached reads and a window of output tokens priced tens of
+	// times apart both count the same here. It still bounds the thing volume
+	// is the right unit for — how much material the factory pushes through a
+	// provider in an hour. For the invoice, see MaxCostPerWindow.
 	MaxTokensPerWindow int64
+	// MaxCostPerWindow bounds what the window may spend in MONEY, in
+	// millionths of a dollar; zero means unbounded.
+	//
+	// This is the brake denominated the way the bill is. It is fed by what
+	// each run says it cost rather than by a price table here, because the
+	// rate card is the provider's and a copy of it in this repository would
+	// be wrong on the morning it changed with nothing to say so.
+	//
+	// The consequence is stated rather than implied: under a cost ceiling, a
+	// run that reports tokens and no cost closes the window exactly as an
+	// unmetered one does. See [ErrUnpriced].
+	MaxCostPerWindow int64
 	// AllowUnmetered lets the factory keep working after a run that would not
 	// say what it cost. It defaults to false, and the default is the point:
 	// an autonomous agent whose spend is invisible is a position nobody
@@ -81,7 +164,10 @@ type Meter struct {
 	started     int
 	refused     bool  // one refusal record per window, not one per poll
 	spent       int64 // tokens charged this window
+	cost        int64 // micro-dollars charged this window
+	split       Spend // the same tokens, by kind — what makes the total priceable
 	unmetered   int   // runs this window that finished without saying what they cost
+	unpriced    int   // runs this window that reported tokens and no money
 }
 
 // SetBudget swaps the budget (config reload). The window's spend is NOT
@@ -125,21 +211,20 @@ func (m *Meter) Restore(ctx context.Context) error {
 		case "spend":
 			m.started++
 		case "charge":
-			var c struct {
-				Tokens  int64 `json:"tokens"`
-				Metered bool  `json:"metered"`
-			}
-			if json.Unmarshal(rec.Body, &c) != nil {
+			// The charge body IS a Spend, so the record and the in-memory
+			// account cannot drift into two shapes. A record written before
+			// the split existed carries `tokens` and `metered` and nothing
+			// else, and still restores its total correctly — the components
+			// are simply absent, which is the honest reading of a charge that
+			// never recorded them.
+			var s Spend
+			if json.Unmarshal(rec.Body, &s) != nil {
 				// A charge that will not parse is spend we cannot account
 				// for, which is exactly what unmetered means.
 				m.unmetered++
 				continue
 			}
-			if c.Metered {
-				m.spent += c.Tokens
-			} else {
-				m.unmetered++
-			}
+			m.accrue(s)
 		}
 	}
 	return nil
@@ -204,6 +289,20 @@ func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 		}
 		return nil, ErrUnmetered
 	}
+	// Unpriced before over-cost, for the reason unmetered comes before
+	// over-tokens: a window holding a run whose money nobody reported has no
+	// trustworthy total in dollars either.
+	if m.unpriced > 0 && !m.Budget.AllowUnmetered {
+		first := !m.refused
+		m.refused = true
+		unpriced := m.unpriced
+		m.mu.Unlock()
+		if first {
+			m.record(ctx, "budget-refused", what,
+				fmt.Sprintf(`{"reason":"unpriced","unpriced_runs":%d,"window":%q}`, unpriced, m.Budget.Window))
+		}
+		return nil, ErrUnpriced
+	}
 	if m.Budget.MaxTokensPerWindow > 0 {
 		if m.spent >= m.Budget.MaxTokensPerWindow {
 			first := !m.refused
@@ -214,6 +313,20 @@ func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 				m.record(ctx, "budget-refused", what,
 					fmt.Sprintf(`{"reason":"tokens","spent":%d,"max_tokens_per_window":%d,"window":%q}`,
 						spent, m.Budget.MaxTokensPerWindow, m.Budget.Window))
+			}
+			return nil, ErrBudget
+		}
+	}
+	if m.Budget.MaxCostPerWindow > 0 {
+		if m.cost >= m.Budget.MaxCostPerWindow {
+			first := !m.refused
+			m.refused = true
+			cost := m.cost
+			m.mu.Unlock()
+			if first {
+				m.record(ctx, "budget-refused", what,
+					fmt.Sprintf(`{"reason":"cost","cost_micros":%d,"max_cost_per_window":%d,"window":%q}`,
+						cost, m.Budget.MaxCostPerWindow, m.Budget.Window))
 			}
 			return nil, ErrBudget
 		}
@@ -233,21 +346,71 @@ func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 // knows: the loop sees a commit and the pump sees a slot, so the number has
 // to travel back from the adapter rather than being inferred here.
 //
-// metered false means the run said nothing about its cost. That is recorded
-// as its own fact — never as a zero — and under a token budget it closes the
-// window to new claims; see [ErrUnmetered].
-func (m *Meter) Charge(ctx context.Context, what string, tokens int64, metered bool) {
+// An unreported spend is recorded as its own fact — never as a zero — and
+// under a token budget it closes the window to new claims; see
+// [ErrUnmetered]. A spend reported in tokens but not in money does the same
+// under a cost budget; see [ErrUnpriced].
+func (m *Meter) Charge(ctx context.Context, what string, s Spend) {
 	m.mu.Lock()
-	if metered {
-		m.spent += tokens
-	} else {
-		m.unmetered++
+	// Roll the window before accruing, the way Acquire and Report already do.
+	// Without this a charge lands in whatever window the meter last touched,
+	// and the next reader rolls it forward and zeroes the account — so a run
+	// that STARTED at 11:59 and reported at 12:01 had its whole cost silently
+	// discarded from memory while the chain recorded it correctly, leaving
+	// Restore and Report permanently disagreeing. It went unseen because
+	// Acquire happens to roll the window a moment before every charge in the
+	// ordinary case, and the case it does not cover is the long run: the
+	// expensive one.
+	if w := m.windowAt(m.now()); !w.Equal(m.windowStart) {
+		m.resetWindow(w)
 	}
-	spent, unmetered := m.spent, m.unmetered
+	m.accrue(s)
+	// `tokens` on the record is what this charge was ACCOUNTED at, never the
+	// agent's tally as distinct from the sum of its parts. The distinction
+	// matters in memory, where a tally the agent stands behind beats a sum of
+	// the components this runtime recognises; it must not reach the record,
+	// where the same key already means the charged total on every row written
+	// before the split existed. A run reporting parts and no tally would
+	// otherwise record `tokens` absent — zero to every later reader.
+	charged := s
+	charged.Total = s.Tokens()
+	window := struct {
+		Spend
+		SpentThisWindow     int64 `json:"spent_this_window"`
+		CostThisWindow      int64 `json:"cost_micros_this_window"`
+		UnmeteredThisWindow int   `json:"unmetered_this_window"`
+		UnpricedThisWindow  int   `json:"unpriced_this_window"`
+	}{charged, m.spent, m.cost, m.unmetered, m.unpriced}
 	m.mu.Unlock()
-	m.record(ctx, "charge", what,
-		fmt.Sprintf(`{"tokens":%d,"metered":%v,"spent_this_window":%d,"unmetered_this_window":%d}`,
-			tokens, metered, spent, unmetered))
+	body, err := json.Marshal(window)
+	if err != nil {
+		// A charge that will not serialize is a charge the window cannot be
+		// rebuilt from, which is what unmetered means on the way back in.
+		body = []byte(fmt.Sprintf(`{"metered":false,"error":%q}`, err.Error()))
+	}
+	m.record(ctx, "charge", what, string(body))
+}
+
+// accrue folds one spend into the window's account. Callers hold mu.
+//
+// Unpriced is only counted when a cost ceiling is set. Without one, money the
+// agent never mentioned is not a gap in an account nobody is keeping — and
+// counting it anyway would turn on a refusal for operators who never asked to
+// budget in dollars.
+func (m *Meter) accrue(s Spend) {
+	if !s.Reported {
+		m.unmetered++
+		return
+	}
+	m.spent += s.Tokens()
+	m.cost += s.CostMicros
+	m.split.Input += s.Input
+	m.split.Output += s.Output
+	m.split.CacheRead += s.CacheRead
+	m.split.CacheWrite += s.CacheWrite
+	if m.Budget.MaxCostPerWindow > 0 && !s.Priced() {
+		m.unpriced++
+	}
 }
 
 // Report is the window's account as an operator reads it.
@@ -256,7 +419,22 @@ func (m *Meter) Charge(ctx context.Context, what string, tokens int64, metered b
 // whenever that number is not zero, and a spend figure shown without it would
 // be the most reassuring thing on the screen and the least true.
 type Report struct {
-	Tokens        int64         `json:"tokens"`
+	Tokens int64 `json:"tokens"`
+	// Input, Output, CacheRead and CacheWrite are the same tokens by kind:
+	// the total says how much went through, and only the split says what it
+	// was worth. A window that is 90% cache reads and one that is 90% output
+	// read alike on Tokens alone and differ on the bill by an order of
+	// magnitude.
+	Input      int64 `json:"input"`
+	Output     int64 `json:"output"`
+	CacheRead  int64 `json:"cache_read"`
+	CacheWrite int64 `json:"cache_write"`
+	// CostMicros is the window's spend in millionths of a dollar, as the runs
+	// themselves reported it. Unpriced travels beside it for the reason
+	// Unmetered travels beside Tokens.
+	CostMicros    int64         `json:"cost_micros"`
+	MaxCostMicros int64         `json:"max_cost_micros"`
+	Unpriced      int           `json:"unpriced"`
 	Unmetered     int           `json:"unmetered"`
 	MaxTokens     int64         `json:"max_tokens"`
 	Running       int           `json:"running"`
@@ -289,6 +467,9 @@ func (m *Meter) Report() Report {
 	}
 	return Report{
 		Tokens: m.spent, Unmetered: m.unmetered, MaxTokens: m.Budget.MaxTokensPerWindow,
+		Input: m.split.Input, Output: m.split.Output,
+		CacheRead: m.split.CacheRead, CacheWrite: m.split.CacheWrite,
+		CostMicros: m.cost, MaxCostMicros: m.Budget.MaxCostPerWindow, Unpriced: m.unpriced,
 		Running: m.running, Started: m.started,
 		MaxConcurrent: maxC, MaxPerWindow: m.Budget.MaxPerWindow,
 		Window: m.Budget.Window, WindowSec: int64(m.Budget.Window.Seconds()),
@@ -311,7 +492,11 @@ func (m *Meter) wouldRefuse() bool {
 		return true
 	case m.unmetered > 0 && !m.Budget.AllowUnmetered:
 		return true
+	case m.unpriced > 0 && !m.Budget.AllowUnmetered:
+		return true
 	case m.Budget.MaxTokensPerWindow > 0 && m.spent >= m.Budget.MaxTokensPerWindow:
+		return true
+	case m.Budget.MaxCostPerWindow > 0 && m.cost >= m.Budget.MaxCostPerWindow:
 		return true
 	}
 	return false
@@ -321,7 +506,8 @@ func (m *Meter) wouldRefuse() bool {
 // Callers hold mu.
 func (m *Meter) resetWindow(start time.Time) {
 	m.windowStart, m.started, m.refused = start, 0, false
-	m.spent, m.unmetered = 0, 0
+	m.spent, m.cost, m.split = 0, 0, Spend{}
+	m.unmetered, m.unpriced = 0, 0
 }
 
 func (m *Meter) record(ctx context.Context, kind, subject, body string) {

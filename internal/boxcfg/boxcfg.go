@@ -14,6 +14,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
+	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -46,9 +47,28 @@ type Config struct {
 type Budget struct {
 	MaxConcurrent int `yaml:"max_concurrent"`
 	MaxPerWindow  int `yaml:"max_per_window"`
-	// MaxTokensPerWindow is the brake denominated the way the invoice is;
-	// zero means unbounded.
+	// MaxTokensPerWindow is the VOLUME brake — how many tokens an hour the
+	// factory may push through a provider; zero means unbounded.
+	//
+	// It was once described here as the brake denominated the way the invoice
+	// is, and it is not: a cached read bills at roughly a tenth of a fresh
+	// input token and an output token at several times either, so this number
+	// cannot tell a cheap window from an expensive one. For the invoice, set
+	// MaxCostPerWindow.
 	MaxTokensPerWindow int64 `yaml:"max_tokens_per_window"`
+	// MaxCostPerWindow is the MONEY brake, in dollars — `25.00` is
+	// twenty-five dollars an hour on a one-hour window. Zero means unbounded.
+	//
+	// Written in dollars because that is the unit an operator is deciding in,
+	// and converted once to integer micro-dollars at load: money that
+	// accumulates over a window must not drift, and a ceiling nobody can
+	// reproduce by adding up the charges is not one they can audit.
+	//
+	// Setting it also means a run that reports tokens and no cost stops
+	// claims until the window turns, exactly as an unreported run does under
+	// a token budget — see capacity.ErrUnpriced. Silence is never zero, in
+	// either currency.
+	MaxCostPerWindow float64 `yaml:"max_cost_per_window"`
 	// MaxTokensPerRun bounds ONE run, killing the session at the stream when
 	// it spends past this; zero means unbounded.
 	//
@@ -434,3 +454,7 @@ func (c Config) WindowDuration() time.Duration {
 	d, _ := time.ParseDuration(c.Budget.Window)
 	return d
 }
+
+// MaxCostMicros is the configured cost ceiling in micro-dollars — the one
+// place the operator's dollars become the integer the meter accumulates in.
+func (c Config) MaxCostMicros() int64 { return capacity.Micros(c.Budget.MaxCostPerWindow) }

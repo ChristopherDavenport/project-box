@@ -448,6 +448,7 @@ claim is decoration.
 | Graph ordering | diamond dependency runs in topo order; failed root parks leaves with cause | 10 |
 | A new stage needs no new stage | a propose/critique pair runs as two graph nodes under two roles — blocked until its dependency settles, each with its own claim, lease, evidence scope and settled record — with `Run` unchanged | 10 |
 | Budget refusal | work waits rather than overdrawing a tenant budget | 11 |
+| The brake knows what it is stopping | two windows of identical token volume, one cached and one fresh, get opposite verdicts from a cost ceiling; the split reaches the charge record and comes back out of it; a run reporting tokens and no money closes a cost window exactly as an unreported one closes a token window | 11 |
 | Seat continuity | second run receives predecessor's handoff; escalation parks with agent-attributed reason | 12 |
 | Mid-run handoff | a handed-off run resumes with its predecessor's notes and continues its committed work rather than redoing it; the item is re-dispatched without reaching the exception queue | 12 |
 | Handoff hops are bounded | each hop is an evidence record, and the limit parks with the reason named | 12 |
@@ -1241,6 +1242,40 @@ moves a chore onto the agent plane, not the quarter somebody notices it
 stopped. It also fixes #13's decomposer constraint in place before there is a
 decomposer to tempt anyone: a stage on every intake is a stage on the
 critical path of every intake.
+
+Issue #24 stopped the meter throwing away what it was told (2026-09-03). The
+adapter reported four token counters and a cost in money; `u.Total()`
+collapsed them one line before the meter, so the window could say how much
+volume went through and never what it was worth — and the charge record it
+wrote could never be re-priced by any later reader, which is the half §2 says
+cannot wait. `capacity.Spend` is the currency now, split and priced, and it
+rides the record, `Restore`, `/v1/status`, the room and `box status`.
+
+The comment on `max_tokens_per_window` claimed it was "the number an invoice
+is denominated in" and it never was: a cached read bills at roughly a tenth of
+a fresh input token and an output token at several times either, so two
+windows of identical volume differ on the bill by an order of magnitude and
+the brake could not tell them apart. It is the VOLUME brake now, described as
+one, beside `max_cost_per_window` — the money brake, in dollars, fed by what
+each run says it cost rather than by a rate card copied into this repository
+that would be wrong on the morning it changed with nothing to say so.
+Accumulated in integer micro-dollars, because a ceiling an operator cannot
+reproduce by adding up the charges is not one they can audit. `ErrUnpriced` is
+the fail-closed rule one currency along: under a cost ceiling, a run reporting
+tokens and no money closes the window exactly as an unreported run closes a
+token one — it looks metered from every angle except the one that bills.
+
+Two things surfaced underneath. `tokens` on the charge record is now what the
+charge was ACCOUNTED at rather than the agent's own tally, because the key
+already meant the charged total on every row written before the split and a
+run reporting parts without a tally would have written it absent — zero to
+every later reader. And `Charge` never rolled the accounting window, so a run
+that STARTED at 11:59 and reported at 12:01 had its whole cost discarded from
+memory while the chain recorded it correctly, leaving Report and Restore
+permanently disagreeing. Acquire and Report both roll and Charge did not,
+which is why it hid: a claim rolls the clock a moment before every charge
+except the one that straddles a boundary — the long run, which is the
+expensive one.
 
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
 an agent image and the live run that turns confinement on for the dogfood,
