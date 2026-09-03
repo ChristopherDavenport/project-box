@@ -6,6 +6,8 @@
 package boxcfg
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,9 +16,12 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -193,8 +198,136 @@ type Box struct {
 	// Harness is what the box's builders load: plugins, pinned skills, and
 	// the MCP servers they are actually granted.
 	Harness Harness `yaml:"harness"`
-	Seat    string  `yaml:"seat"`
-	Repos   []Repo  `yaml:"repos"`
+	// Capabilities is the box's CEILING — the most any kind declared under it
+	// may carry. Absent grants nothing, which is this system's rule everywhere
+	// and matters most here: the one dangerous authority in the factory is
+	// break-glass, and a config file that quietly conferred it by saying
+	// nothing would be the worst default available.
+	//
+	// Delegation intersects and never unions, so a kind declaring more than
+	// this is refused at load rather than narrowed. Silent narrowing leaves an
+	// operator believing something false about their factory, and the only way
+	// to discover which side won would be to have an emergency.
+	Capabilities kind.Capabilities `yaml:"capabilities"`
+	// Kinds are the governed declarations this box accepts work under, joined
+	// to and overriding the seeded ones. See [Kind].
+	Kinds []Kind `yaml:"kinds"`
+	Seat  string `yaml:"seat"`
+	Repos []Repo `yaml:"repos"`
+}
+
+// Kind is box.yaml's spelling of [kind.Declaration].
+//
+// An entry is EITHER a ref or an inline declaration, never both, and the
+// difference is governance rather than convenience. A ref names a repository,
+// a commit and a path exactly as a pinned skill does, and it is the only form
+// that may grant a capability: a declaration that says what an origination is
+// allowed to do has to pass through change control, for the same reason and by
+// the same test as an inline base layer meaning org-wide safety rules nobody
+// reviewed. An inline declaration may say how work decomposes, how it
+// escalates, and when it is finished — everything except authority.
+type Kind struct {
+	Name string `yaml:"name"`
+	// Ref pins the declaration to a governed source. Mutually exclusive with
+	// every field below it.
+	Ref *KindRef `yaml:"ref"`
+
+	Capabilities kind.Capabilities `yaml:"capabilities"`
+	Escalation   Escalation        `yaml:"escalation"`
+	Decompose    Decompose         `yaml:"decompose"`
+	Completion   kind.Completion   `yaml:"completion"`
+	Envelope     *Envelope         `yaml:"envelope"`
+}
+
+// KindRef pins a declaration to a tree.
+type KindRef struct {
+	Repo   string `yaml:"repo"`
+	Commit string `yaml:"commit"`
+	Path   string `yaml:"path"`
+}
+
+// Escalation is box.yaml's spelling of [kind.Escalation]; Objective is a
+// duration string because that is what an operator writes.
+type Escalation struct {
+	Severity         string `yaml:"severity"`
+	Objective        string `yaml:"objective"`
+	MaxReescalations int    `yaml:"max_reescalations"`
+	Route            string `yaml:"route"`
+}
+
+// Decompose is box.yaml's spelling of [kind.Decomposition].
+type Decompose struct {
+	Decomposer string      `yaml:"decomposer"`
+	Standing   bool        `yaml:"standing"`
+	Steps      []kind.Step `yaml:"steps"`
+}
+
+// Envelope is box.yaml's spelling of [agent.Envelope]. The class names are the
+// operator's own: nothing here ships a taxonomy or an order over one, because
+// the same finding is material non-public information in one estate and an
+// ordinary ticket in another.
+type Envelope struct {
+	Class     string   `yaml:"class"`
+	Endpoints []string `yaml:"endpoints"`
+	Context   []string `yaml:"context"`
+	Redaction string   `yaml:"redaction"`
+	Payload   string   `yaml:"payload"`
+}
+
+// Declaration converts one configured kind into the governed form, given the
+// source it was obtained from.
+func (k Kind) Declaration(src agent.Source) (kind.Declaration, error) {
+	d := kind.Declaration{
+		Name:         k.Name,
+		Capabilities: k.Capabilities,
+		Escalation: kind.Escalation{
+			Severity:         queue.Severity(k.Escalation.Severity),
+			MaxReescalations: k.Escalation.MaxReescalations,
+			Route:            k.Escalation.Route,
+		},
+		Decompose: kind.Decomposition{
+			Decomposer: k.Decompose.Decomposer,
+			Standing:   k.Decompose.Standing,
+			Steps:      k.Decompose.Steps,
+		},
+		Completion: k.Completion,
+		Source:     src,
+	}
+	if k.Escalation.Objective != "" {
+		obj, err := time.ParseDuration(k.Escalation.Objective)
+		if err != nil {
+			return kind.Declaration{}, fmt.Errorf("boxcfg: kind %s: escalation.objective: %w", k.Name, err)
+		}
+		d.Escalation.Objective = obj
+	}
+	if k.Escalation.Severity != "" && queue.Severity(k.Escalation.Severity).OrDefault() != queue.Severity(k.Escalation.Severity) {
+		return kind.Declaration{}, fmt.Errorf("boxcfg: kind %s: escalation.severity %q is not one of low, medium, high, critical — an unrecognised severity resolves to medium, and a floor that silently became medium is a floor nobody set",
+			k.Name, k.Escalation.Severity)
+	}
+	if k.Envelope != nil {
+		ctxClasses := make([]agent.Class, 0, len(k.Envelope.Context))
+		for _, c := range k.Envelope.Context {
+			ctxClasses = append(ctxClasses, agent.Class(c))
+		}
+		d.Envelope = &agent.Envelope{
+			Class:     agent.Class(k.Envelope.Class),
+			Endpoints: k.Envelope.Endpoints,
+			Context:   ctxClasses,
+			Redaction: agent.Redaction(k.Envelope.Redaction),
+			Payload:   agent.Payload(k.Envelope.Payload),
+		}
+	}
+	return d, nil
+}
+
+// InlineSource is the source a declaration written into box.yaml carries. Not
+// governed, by [agent.Source.Governed]'s own test, which is what refuses it a
+// capability: the file is on the operator's disk and its history is whatever
+// their deployment happens to keep, where a ref names a commit.
+func (k Kind) InlineSource(configPath string) agent.Source {
+	body, _ := yaml.Marshal(k)
+	sum := sha256.Sum256(body)
+	return agent.Source{Kind: agent.SourceFile, Path: configPath, Digest: hex.EncodeToString(sum[:])}
 }
 
 // Confine is box.yaml's spelling of [confine.Profile].
@@ -376,6 +509,9 @@ func (c *Config) validate() error {
 		if err := bx.Harness.validate(bx.Name); err != nil {
 			return err
 		}
+		if err := validateKinds(bx); err != nil {
+			return err
+		}
 		if bx.Confine != nil {
 			if len(bx.Agent) == 0 {
 				return fmt.Errorf("boxcfg: box %s: confine with no agent — a repo's build command runs on the daemon itself, and there is nothing here to put a container around", bx.Name)
@@ -419,6 +555,53 @@ func (c *Config) validate() error {
 			if r.Check == "" {
 				r.Check = "true"
 			}
+		}
+	}
+	return nil
+}
+
+// validateKinds checks the shape of a box's declarations at load, and the
+// governance rule for the inline ones.
+//
+// A ref'd declaration cannot be checked here — its content is in a repository
+// this package has no mirror for — so it is checked at assembly, where the
+// resolver is. What CAN be caught at load is caught at load: an operator who
+// wrote a capability into their config file should be told when they start the
+// daemon, not the first time an incident tries to break glass.
+func validateKinds(bx *Box) error {
+	seen := map[string]bool{}
+	for i := range bx.Kinds {
+		k := &bx.Kinds[i]
+		switch {
+		case k.Name == "":
+			return fmt.Errorf("boxcfg: box %s: kind %d has no name", bx.Name, i)
+		case seen[k.Name]:
+			return fmt.Errorf("boxcfg: box %s: kind %q is declared twice — the later would silently replace the earlier, and a capability grant is not a thing to resolve by ordering", bx.Name, k.Name)
+		}
+		seen[k.Name] = true
+		if k.Ref == nil {
+			decl, err := k.Declaration(k.InlineSource("box.yaml"))
+			if err != nil {
+				return err
+			}
+			if err := decl.Validate(bx.Capabilities); err != nil {
+				return fmt.Errorf("boxcfg: box %s: %w", bx.Name, err)
+			}
+			continue
+		}
+		if k.Capabilities.Any() || k.Escalation != (Escalation{}) || k.Decompose.Decomposer != "" ||
+			k.Decompose.Standing || len(k.Decompose.Steps) > 0 ||
+			k.Completion.Graph || len(k.Completion.Facts) > 0 || k.Envelope != nil {
+			return fmt.Errorf("boxcfg: box %s: kind %q has both a ref and inline fields — one of the two would be ignored, and which one is not a thing to leave to a reader of this file", bx.Name, k.Name)
+		}
+		switch {
+		case k.Ref.Repo == "":
+			return fmt.Errorf("boxcfg: box %s: kind %q has no ref.repo", bx.Name, k.Name)
+		case k.Ref.Path == "":
+			return fmt.Errorf("boxcfg: box %s: kind %q has no ref.path", bx.Name, k.Name)
+		case len(k.Ref.Commit) != commitLen:
+			return fmt.Errorf("boxcfg: box %s: kind %q is pinned to %q — a governed declaration needs a full %d-character commit, so what an origination was permitted to do is answerable later",
+				bx.Name, k.Name, k.Ref.Commit, commitLen)
 		}
 	}
 	return nil

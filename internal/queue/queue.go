@@ -141,6 +141,30 @@ type WorkItem struct {
 	// orphan work, and the queue is where that invariant is enforced rather
 	// than hoped for.
 	Ingress string `json:"ingress"`
+	// Plan is the content address of the decomposition that called for this
+	// item, and Node names it within that plan.
+	//
+	// The chain reads ingress -> plan -> work item, and the middle link is why
+	// the digest rides here rather than being looked up: when one origination
+	// becomes six items, the decision about WHICH six determined what got
+	// built and what was silently omitted, and a reference to the decomposer
+	// would not recover it — a decomposer over moving facts yields a different
+	// graph on Tuesday while every reference to it looks unchanged.
+	//
+	// Empty on items submitted before there was a decomposition stage. Those
+	// are readable and unrecoverable, which is the honest state for them: no
+	// query reconstructs a plan that was never made.
+	Plan string `json:"plan,omitempty"`
+	Node string `json:"node,omitempty"`
+	// Kind is the declaration this work was opened under, carried from the
+	// origination.
+	//
+	// A denormalization, deliberately. The escalation policy an exception is
+	// measured against belongs to its kind, and the sweep reads every parked
+	// item on every pass — resolving the kind through the ingress chain would
+	// put a chain read per exception on a standing chore, to recover a value
+	// that cannot change for the life of the item.
+	Kind string `json:"kind,omitempty"`
 	// Requester is the principal whose authority this work exercises,
 	// inherited from the ingress. It rides every evidence record as
 	// OnBehalfOf: an audit must separate a change a person made from one an

@@ -379,7 +379,11 @@ internal/
   admission/  ✓       required repository restrictions, checked before acting
   agent/      ✓       layered definitions, resolver, bundles
     acp/              runtime and stream interception
-  ingress/    ✓       campaigns, issues, incidents, routes, delivery dedup
+  ingress/    ✓       originations, routes, delivery dedup, completion facts
+  kind/       ✓       the governed declaration: capability, escalation,
+                      decomposition, completion, envelope; and its ceiling
+  plan/       ✓       the decomposition: decomposer seam, content-addressed
+                      plan record, graph → work items
   queue/              work items, claims, retries, dependencies
   knowledge/          scoped attributed records, retrieval, invalidation
   render/             service declarations → derived artifacts (charts, env
@@ -447,6 +451,13 @@ claim is decoration.
 | Optimistic lane safety | red main opens repair work; promotion refuses unsoaked commits; fencing identical in both lanes | 9 |
 | Repair wakes warm | a repair run's bundle contains its predecessor's handoff, and its agentref differs from the same repair with no predecessor | 9 |
 | Graph ordering | diamond dependency runs in topo order; failed root parks leaves with cause | 10 |
+| Every origination is decomposed | intake emits a graph for EVERY kind: an issue keeps the item id it always had, an incident emits restore-then-postmortem as an edge the queue blocks on, and a kind nobody declared admits nothing rather than falling back to a plan | 10 |
+| A plan is idempotent and recorded first | two ticks over one origination leave one plan and one graph; the plan is on the origination's chain before any of its items exist | 10 |
+| The planref is over the graph | the same graph in a different listing order produces the same ref; a changed task, edge, node or fact produces a different one; a fact's as-of never changes it | 10 |
+| Only a governed declaration grants authority | an inline declaration carrying a capability is refused at load; the same declaration pinned to a commit is accepted; and a kind claiming more than its Box's ceiling is refused rather than narrowed | 10 |
+| Authority follows the declaration, not the name | an incident declaration granting nothing cannot break glass, and an operator's own kind that was granted it can | 10 |
+| The default decomposer cannot become a judgement | a registry that puts a non-replayable planner behind the default name is refused at planning time; every shipped decomposer is replayable | 2, 10 |
+| An exception is measured against its own kind | two exceptions parked together under different declarations are told at different ages, with different bounds and different severity floors | 5, 10 |
 | A new stage needs no new stage | a propose/critique pair runs as two graph nodes under two roles — blocked until its dependency settles, each with its own claim, lease, evidence scope and settled record — with `Run` unchanged | 10 |
 | Budget refusal | work waits rather than overdrawing a tenant budget | 11 |
 | The brake knows what it is stopping | two windows of identical token volume, one cached and one fresh, get opposite verdicts from a cost ceiling; the split reaches the charge record and comes back out of it; a run reporting tokens and no money closes a cost window exactly as an unreported one closes a token window | 11 |
@@ -485,14 +496,16 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Agent layers content-addressed; text first, git for governance | identity is the digest; git governs, it does not define |
 | Multi-tenancy structural from commit one | the one thing that cannot be retrofitted; single-tenant is multi-tenant with one tenant |
 | Tenant carried explicitly, never derived from Box | an id that must be resolved before it is trusted is one an attacker can supply |
-| Three ingress kinds, closed set | no orphan work; the kind sets the authority envelope |
-| Break-glass requires an open incident | an emergency bypass with no incident is the finding an audit looks for |
+| The ingress kind is a governed declaration, not a Go constant | which kinds a Box accepts and what authority each carries vary by scope and environment, and a type system is the wrong place for that; a closed set does not prevent miscategorisation, it causes it |
+| Break-glass requires an open origination whose declaration carries it | an emergency bypass with nothing behind it is the finding an audit looks for; capability fields come from governed sources only, and a Box's ceiling bounds them |
 | Campaigns reconcile a predicate rather than enumerate | enumeration is wrong the moment a repository is added or retired |
+| Every origination decomposes into a recorded, content-addressed plan | the decomposition decides what gets built and what is omitted, and it sat between the first two links of the chain leaving no artifact |
+| The default decomposer is deterministic and agent-free | a stage on every intake is a stage on the critical path of every intake, so a judgement there makes work ADMISSION depend on an agent |
 | Human approval is a Gate, with a pending decision | "not yet" is not "no"; waiting is not parked |
 | Approvals bind to a commit, not a pull request | otherwise an agent lands content no reviewer saw |
 | The estate is observed, not declared | a hand-maintained repository list makes every campaign quietly partial |
 | Deploy artifacts are rendered, not authored | drift is only detectable against a canonical form |
-| Ingress kinds closed, routes open | many sources of work, still only three things they can open |
+| Kinds and routes are both configuration; a route opens exactly one kind | many sources of work, each with its own policy, and no source deciding severity implicitly at intake |
 | A GitHub App, not a PAT or OAuth app | an app is its own principal; a user token collapses actor and on-behalf-of |
 | Credentials minted per run from the context set | the forge token becomes a projection of the authz decision, not a second grant |
 | Repository creation defaults to requiring human approval | it is the one permission that cannot be repository-scoped |
@@ -1308,6 +1321,111 @@ discovered for that reason, and the gap is recorded rather than implied: a
 factory running for years accumulates unboundedly many bounded per-entity
 chains, which is an archive problem wanting its own enumerator and policy, not
 a wildcard in this list.
+
+Issue #13 collapsed the ingress kind into a governed declaration (2026-09-03),
+and it is the keystone the graph engine has been waiting for since Phase 10.
+`DependsOn` had exactly two non-test references — the struct field and the
+enforcement loop — so every graph that had ever existed here was built by a
+test. The decomposition stage is the author it was missing.
+
+Three kinds were Go constants with behaviour welded to them, and read together
+they were not three variants of one flow: an issue became exactly one item, a
+campaign bypassed intake and produced ChangeSets through its own engine, and an
+incident produced no work at all — an authority token whose completion rule
+("restored AND the postmortem has landed") lived in a doc comment because
+nothing in the system could hold two nodes and an edge. `internal/kind` is the
+declaration those four differences become — capability, escalation, graph,
+completion — plus #17's envelope as the fifth field, which is the governed home
+that issue recorded as missing.
+
+Two conditions make data-driven capabilities safe and both are asserted.
+Capability fields come from GOVERNED sources only: a declaration granting
+authority must be pinned to a repo, a commit and a path, tested by the same
+`agent.Source.Governed()` a skill pin uses, and an inline declaration in
+box.yaml may describe decomposition, escalation and completion but never
+authority. And a Box declares a CEILING that kinds intersect with — refused at
+load rather than silently narrowed, because the only way to discover which side
+won would be to have an emergency. The seeds ship and grant NOTHING, which is
+the rule working rather than a hole in it: a shipped incident that preempts
+would put the one dangerous authority in the system into a file nobody in the
+operator's organisation reviewed. A Box redeclaring a seeded name replaces it
+whole, because merging is how a default quietly becomes a standard nobody
+chose.
+
+`internal/plan` is the artifact that was missing between the first two links of
+the chain, which now reads `ingress -> plan -> work item -> run -> ...`. The
+plan is content-addressed over the GRAPH rather than the listing, so the same
+decomposition in a different order is the same ref — the precondition for #15's
+diff meaning anything. Facts carry an as-of that is recorded and NOT hashed:
+folding the read time in would make every replay a different plan and leave
+staleness unable to tell "the facts moved" from "time passed". Decomposers
+declare their own replayability, and `plan.Make` refuses a non-replayable one
+behind the DEFAULT name — #5's constraint as a mechanism rather than a
+sentence, since a stage on every intake is a stage on the critical path of
+every intake.
+
+Intake is universal now. An issue emits a one-node graph and KEEPS the id the
+queue always used, because the stage arrives on top of a running factory and
+`wi-<ingress>` is on live chains and in ids an operator has already read; the
+carve-out is tied to the identity node rather than to "one node", or a
+standing origination's wave of one would collide with the previous wave's.
+An incident emits restore-then-postmortem, and the queue blocks the postmortem
+on the restoration through the same `Claim` path Phase 10 property-tested. A
+campaign's wave is a recorded plan too, so its fan-out is finally an artifact
+instead of however many items happened to appear. Idempotency moved up a link:
+intake checks for the PLAN, not the item, because a decomposer over moving
+facts would produce a second graph on the next tick and orphan every item on
+the first from the decision that made it.
+
+The durability class is decided rather than deferred: a plan lives on
+`ingress/<id>`, which makes it a bounded per-entity chain of the same class as
+`workitem/<id>` and therefore already out of the compaction sweep by name. An
+ephemeral tier for identity plans was the alternative and is Gas Town's exact
+failure — a second class needs its own promotion rule, its own reaper, and its
+own answer to "was this the plan that produced the landed work", asked
+unavoidably after the plan would have been reaped.
+
+Two open questions are answered narrowly and one is not. A standing
+origination opens a NEW plan per wave, which is where re-planning lands for a
+reconciler; the seeds ship, and a Box declaration replaces rather than merges.
+Whether a stale plan should AMEND an in-flight graph is untouched, because
+amending means reconciling against work already claimed under the old plan and
+a guess would go on the record as a decision. Approval binding to a planref is
+#15's, and nothing here pre-empts it.
+
+A bug surfaced underneath and shipped as its own change, because it is a
+pre-existing `main` bug independent of this one. An origination's chain carries
+the origination and every authority it exercised, and THREE readers took the
+head and unmarshalled it as an origination. Two broke loudly and badly: a
+break-glass body carries `incident` as a string where the struct had a pointer,
+so the router refused every redelivery of that key afterwards and the pump's
+intake aborted its whole pass, for that tenant, permanently. The third broke
+silently — the room read into a narrow anonymous struct, which succeeded, and
+its queue rows lost their route and their key with nothing saying why.
+
+The type error in the first two was ACCIDENT and not protection: it depended on
+one key in one body colliding with a field of a different type. This change is
+what supplies the record that does not collide — a plan unmarshals cleanly into
+a zeroed Ingress that every caller would treat as real — so the accident was
+load-bearing right up to the commit that removed it. `ingress.Load` is the one
+fold, it selects on the record kind, and the router, the pump and the room all
+read through it.
+
+What is NOT closed, recorded rather than implied. The campaign engine is still
+unwired in the daemon — it was before this change too — so a campaign
+origination gets a declaration, a decomposer and no standing task to run it;
+that is a `box.yaml` schedule and an `Advance` chore, not a design gap. Nothing
+registers a judgement planner, so the agent-planner path exists as a seam and
+has never run. The issue named a THIRD capability — landing to an environment
+repository — and it is deliberately absent rather than declared and unread: the
+two that exist replace real string compares with real enforcement points, and a
+third with no reader would be an authority an operator could declare, see in
+their config, and get nothing from. Same call #3 made about a WORM receipt
+carrying no `RetainUntil`. The deploy plane still decides by lane and role, and
+moving that decision here is a change to `internal/ladder`. And
+`box provenance <sha>`
+answers by subject, so sha -> plan is reachable through the item and is not yet
+one query — the exportable form of that walk is #16's.
 
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
 an agent image and the live run that turns confinement on for the dogfood,

@@ -544,28 +544,34 @@ from the evidence chain, with the forge log agreeing about *when*.
 
 ## Ingress
 
-Three shapes, and every piece of work traces to exactly one of them. The
-invariant is worth stating plainly: **there is no orphan work.** "Why does this
-change exist" always has an answer, and the answer is always a campaign, an
-issue, or an incident.
+Every piece of work traces to exactly one origination. The invariant is worth
+stating plainly: **there is no orphan work.** "Why does this change exist"
+always has an answer, which makes the ingress the root of provenance rather
+than a vague "intent".
 
-That makes the ingress the root of provenance rather than a vague "intent".
+Three shapes ship as seeded declarations. They are the common ones, not the
+only ones — see "The kind is a governed declaration" below for why a closed set
+turned out to *cause* miscategorisation rather than prevent it.
 
 | | What it is | Completion | Authority |
 |---|---|---|---|
-| **Issue** | one discrete request — a bug, a feature, a task | acceptance criteria pass | ordinary |
-| **Campaign** | a program of change across many repositories | its predicate holds everywhere in scope | ordinary, throttled |
-| **Incident** | something is wrong now | service restored *and* postmortem landed | may invoke break-glass |
+| **Issue** | one discrete request — a bug, a feature, a task | its one-node graph settles done | as declared |
+| **Campaign** | a program of change across many repositories | its predicate holds everywhere in scope | as declared, throttled |
+| **Incident** | something is wrong now | service restored *and* postmortem landed | as declared |
 
-Automated origination folds into these rather than forming a fourth kind: a
-scheduled dependency bump is a standing campaign, and detected drift opens a
-low-severity incident. Keeping the set closed is what preserves the invariant.
+Automated origination often folds into these — a scheduled dependency bump is a
+standing campaign, and detected drift opens a low-severity incident — but where
+it genuinely does not, the answer is now a declaration rather than a Go change
+or a mis-filed issue. What preserves the invariant is that every ingress names
+a declaration and every item names an ingress, not that the set of names is
+fixed.
 
 ### Routes are configured, not coded
 
-The three kinds are a closed set; the **routes** that open them are not. A route
-is a configured path from an external event to an ingress — forge issues,
-webhooks, schedules, alerts, scanners, census findings, reconciler drift.
+The **routes** that open originations are configured, exactly as the kinds now
+are. A route is a configured path from an external event to an ingress — forge
+issues, webhooks, schedules, alerts, scanners, census findings, reconciler
+drift.
 
 A route opens exactly one kind. A scanner that sometimes files an issue and
 sometimes raises an incident is two routes, so each carries its own policy
@@ -587,15 +593,91 @@ Without this a flapping alert opens incidents until something falls over — and
 incidents are the one ingress kind that can reach for break-glass, which makes
 this a security property rather than a tidiness one.
 
-### The ingress kind sets the authority envelope
+### The kind is a governed declaration, not a Go constant
 
-This is the load-bearing part. **Break-glass requires an open incident.**
+Three kinds used to be constants with behaviour welded to them. Read together
+they were not three variants of one flow but **three code paths sharing a
+struct**: an issue became exactly one work item, a campaign bypassed intake
+entirely and produced ChangeSets through its own engine, and an incident
+produced no work at all — it was an authority token, and its own doc comment
+described a completion rule ("restored AND the postmortem has landed") that
+nothing in the system could represent.
 
-An emergency bypass with no incident record is exactly the finding an audit is
-looking for, so the coupling is a control rather than a convenience: every
-invocation inherits a why, a timeline, and a postmortem obligation, and
-"show me every break-glass invocation" resolves to a list of incidents. A
-campaign can never reach for elevated authority, however urgent it feels.
+Two string compares decided the authority. Which meant **"what authority does
+an incident carry" was a compile-time fact no reviewer ever saw.**
+
+A kind is now a declaration carrying five things, all of which were data
+masquerading as control flow:
+
+| Field | Was | Is |
+|---|---|---|
+| Capabilities | `Kind == KindIncident` in two files | what work opened under this kind may do |
+| Escalation | nothing; one objective for the whole factory | severity floor, objective, routing, re-escalation bound |
+| Graph | issue: implicit single node; campaign: bespoke engine; incident: prose | the tree this origination constructs, and the decomposer that constructs it |
+| Completion | doc comments | the predicate that says this origination is finished |
+| Envelope | a seam nothing filled | the data handling in force — see below |
+
+This is the project's own argument about layer sourcing, one level up: the
+mechanism stays permissive and policy does the restricting, because **type
+systems are the wrong place to express a rule that legitimately varies by
+scope and by environment.** Which kinds of work a Box accepts, what authority
+each carries, and how each decomposes vary by both.
+
+The gain is governance before it is extensibility. As a declaration, a change
+to what an origination may do passes through a ChangeSet and its gates like any
+other change — the consequence we already like about pinned skills. And a
+closed set does not prevent miscategorisation, it **causes** it: the fourth
+thing that shows up gets filed as an issue to avoid a code change, and issue's
+envelope quietly widens to accommodate it.
+
+#### Two conditions make data-driven capabilities safe
+
+An earlier draft kept the closed set as an explicit non-goal, on the grounds
+that the authority envelope is a security property. The property is real; the
+conclusion was too cautious. Both conditions already existed here in another
+form.
+
+**Capability fields come from governed sources only.** A declaration that
+grants a capability must be pinned to a repository, a commit and a path —
+exactly as a skill is, and tested by exactly the same `Source.Governed()`. An
+inline declaration in box.yaml may say how work decomposes, how it escalates
+and when it is finished; it may not grant authority. Same rule and same reason
+as an inline base layer meaning org-wide safety rules nobody reviewed.
+
+**A Box declares a ceiling, and kinds intersect with it.** Delegation
+intersects and never unions. A kind cannot grant authority its Box does not
+hold, which makes a maximal kind definition inert rather than dangerous — and
+the excess is **refused at load rather than silently narrowed**, because the
+only way to discover which side won would be to have an emergency.
+
+With those, the closed set was buying two string compares and a shape that
+pushes new work types into the wrong envelope.
+
+#### The seeds ship, and they grant nothing
+
+Issue, campaign and incident ship as seeded declarations, because a factory
+whose operator must author "issue" before submitting one is a factory nobody
+starts. Their source is inline, which means **none of them carries a
+capability** — not a limitation working around the governance rule, but the
+rule working. Shipping an incident that preempts by default would put the one
+dangerous authority in the system into a file nobody in the operator's
+organisation ever reviewed. A Box that wants a preempting incident pins its
+own, and the grant is a reviewable change.
+
+A Box declaration **replaces** a seed of the same name whole rather than
+merging with it. Merging is how a default quietly becomes a standard nobody
+chose: a field the operator never wrote would go on granting whatever the seed
+granted, and the diff would show nothing.
+
+### Break-glass still requires an open origination that carries it
+
+This is the load-bearing part, and the rule has not changed — only where it is
+written. An emergency bypass with no origination behind it is exactly the
+finding an audit is looking for, so the coupling is a control rather than a
+convenience: every invocation inherits a why, a timeline, and a completion
+obligation, and "show me every break-glass invocation" resolves to a list of
+originations. What is new is that which kinds carry the authority is a
+declaration a reviewer sees.
 
 ### And a data envelope: what the work may touch, and which endpoints see it
 
@@ -671,13 +753,99 @@ recorded rather than implied. The mechanism lives in the agent plane, where the
 intersection and the resolve-time refusal are. The redaction posture is
 declared and the telemetry path does not consult it. The second enforcement
 point — the stream, where tool policy is already enforced — has nothing
-envelope-shaped in it. And the declaration has no governed home: the ingress
-kind is a Go constant with behaviour welded to it rather than a declaration, so
-an envelope is supplied at the resolver's seam and no `box.yaml` configures
-one. It is the fifth field of the collapse the kind is waiting on, cheap there
-and archaeology afterwards — every run that executes before classification
-exists is unclassifiable retroactively, and no query recovers what class of
-data a past run was permitted to see.
+envelope-shaped in it.
+
+The declaration now has its governed home: it is the **fifth field of the kind
+declaration**, and it reaches the agent plane per run through the work item's
+kind. A per-builder field could only ever have expressed "this box handles one
+class of thing", since one builder serves a whole box and the envelope belongs
+to the origination. Two properties come with the home. An item whose kind is
+undeclared resolves to no envelope rather than to a fallback — falling back is
+how a run ends up permitted to see more than its origination declared — and a
+Box that has turned classification on still refuses such an item, because the
+composer's ceiling meets an undeclared envelope and says so.
+
+### Intake is universal: every origination emits a graph
+
+The decomposition was the most consequential judgement the factory left
+unrecorded. When one origination becomes six items, the decision about **which
+six** determined what got built, in what order, and what was silently omitted —
+and it sat between the first two links of the provenance chain leaving no
+artifact. An auditor sampling a change could reconstitute the agent and read
+the diff, and could not recover why this was the work.
+
+So every ingress runs a decomposition step and emits a graph. An ordinary issue
+emits a one-node graph. A campaign emits its predicate's fan-out. An incident
+emits restore-then-postmortem as the edge it has always described in prose.
+Campaigns stop being a kind that happens to fan out and become **one decomposer
+among several.**
+
+The resolved plan is content-addressed and that digest rides every item it
+produced:
+
+```
+ingress → plan → work item → run → changeset → commit sha → ...
+```
+
+Recording only WHICH decomposer ran is insufficient for the same reason
+recording an agent's refs is insufficient: a decomposer over moving facts
+yields a different graph on Tuesday while every reference to it looks
+unchanged.
+
+**The digest is over the graph, not over the listing.** Nodes and dependencies
+are canonicalized before hashing, so a decomposer that emits the same graph in
+a different order produces the same ref. That is what makes "the same
+declaration and the same facts produce an identical graph" a property a test
+can assert, and it is the precondition for a plan diff meaning anything — an
+ordering difference rendered as a diff is noise, and a diff that is mostly
+noise is one nobody reads.
+
+**Decomposers declare whether they are replayable.** A predicate over facts is:
+the same inputs re-derive the same graph, exactly like render determinism, and
+re-running it later to get a *different* graph is how a plan built on stale
+facts announces itself. An agent planner is not replayable, only
+reconstitutable, and its record carries the `agentref`. Claiming replay for the
+judgement case would be dishonest, so the field is explicit rather than
+assumed.
+
+**The default decomposer is deterministic and agent-free**, and that is
+enforced rather than documented: a stage on every intake is a stage on the
+critical path of every intake, so if the ordinary path needed an LLM call then
+work *admission* would depend on an agent being available — exactly what the
+no-agent invariant forbids. A declaration that names no decomposer gets the
+identity one, and if whatever is registered under that name is not replayable,
+planning refuses. Agent planners are opt-in per Box and per kind, which puts
+them back in a seat whose failure parks one item.
+
+#### The plan's durability class
+
+A plan lives on the origination's own chain, `ingress/<id>`. That makes it a
+**bounded per-entity chain** — the same class as `workitem/<id>` and
+`changeset/<id>`, and therefore already excluded from the compaction sweep by
+name. One plan per intake, bounded by originations rather than by ticks.
+
+The alternative was an ephemeral tier for identity plans, on the argument that
+a one-node plan over one issue is scratch. That is the failure to avoid, and
+it has a worked example: in Gas Town mail, agent state and workflow steps all
+became durable records until a compactor, a reaper and an ephemeral tier had to
+be built to rescue the ledger. A second durability class needs its own
+promotion rule, its own reaper, and its own answer to "was this plan the one
+that produced the landed work" — asked, unavoidably, after the plan would have
+been reaped. One record per origination is cheaper than the machinery that
+would decide which ones to keep.
+
+#### Re-planning: a new plan, never an amended one
+
+A reconciler decomposes repeatedly, so its declaration says its decomposition
+is **standing** and its standing task owns it — intake decomposing a campaign
+once would be the enumeration a campaign is defined by not doing. Each wave
+opens its own plan, and every item names the wave that called for it.
+
+That is deliberately the easy half of the question. Whether a plan whose facts
+went stale should **amend an in-flight graph** is the hard half and is not
+answered here: amending means reconciling a graph against work already claimed
+under the old one, and guessing at it would put the guess on the record as a
+decision.
 
 ### Campaigns reconcile, they do not enumerate
 
@@ -1137,13 +1305,17 @@ settled work — wanting its own enumerator and its own policy.
 ### The provenance chain
 
 ```
-ingress → work item → run → changeset → commit sha → image digest → env commit → revision
+ingress → plan → work item → run → changeset → commit sha → image digest → env commit → revision
 ```
 
 Recorded link by link, each link an authenticated record in the evidence
 chain. Type II auditors sample: they pick changes and demand complete evidence
 for each, so evidence must be queryable **by commit sha**. That is the query
 the design is built around.
+
+The `plan` link is the decomposition — see "Intake is universal" above. Every
+item traces to a plan and every plan to an ingress, which strengthens
+no-orphan-work rather than weakening it.
 
 ### Control mapping
 

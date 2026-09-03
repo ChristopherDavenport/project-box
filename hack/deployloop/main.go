@@ -19,6 +19,7 @@ import (
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
@@ -57,7 +58,7 @@ func main() {
 
 	router := &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "e2e-runner"}
 	ing, opened, err := router.Open(ctx,
-		ingress.Route{Name: "releases", Kind: ingress.RouteWebhook, Opens: ingress.KindIssue, Box: "shop", Requester: "chris"},
+		ingress.Route{Name: "releases", Kind: ingress.RouteWebhook, Opens: kind.SeedIssue, Box: "shop", Requester: "chris"},
 		ingress.Delivery{Key: *deliveryKey})
 	if err != nil {
 		log.Fatal(err)

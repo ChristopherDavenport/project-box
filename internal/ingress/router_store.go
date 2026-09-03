@@ -95,9 +95,9 @@ func (s *StoreRouter) Open(ctx context.Context, r Route, d Delivery) (Ingress, b
 
 // find reads an origination back through the one fold, rather than through a
 // second reader of the same chain. Two readers is how the head-read bug
-// survived: this one and the pump's each unmarshalled whatever record happened
-// to be newest, and both were wrong in the same way at the same time — which
-// reads as agreement.
+// survived: the router's copy and the pump's copy each unmarshalled whatever
+// record happened to be newest, and both were wrong in the same way at the
+// same time, which reads as agreement.
 func (s *StoreRouter) find(ctx context.Context, id string) (Ingress, bool, error) {
 	return Load(ctx, s.Store.Log(), s.Tenant, id)
 }

@@ -241,6 +241,19 @@ type QueueEntry struct {
 	Ingress string `json:"ingress,omitempty"`
 	Route   string `json:"route,omitempty"`
 	Key     string `json:"key,omitempty"`
+	// Kind is the declaration this work was opened under, and Plan the
+	// content address of the decomposition that called for it — the link the
+	// chain gained between the origination and its work.
+	//
+	// Shown because a fact one reader of the queue has and another does not is
+	// worse than one nobody has: an operator looking at six rows from one
+	// origination has no other way to ask whether they came from one decision
+	// or from six ticks of a decomposer over moving facts. Empty on items
+	// submitted before there was a decomposition stage, which is honest — no
+	// query reconstructs a plan that was never made.
+	Kind string `json:"kind,omitempty"`
+	Plan string `json:"plan,omitempty"`
+	Node string `json:"node,omitempty"`
 	// Task is the instruction's first line: enough to recognise the unit,
 	// never the whole prompt.
 	Task string `json:"task"`
@@ -534,6 +547,7 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 	}
 	e := QueueEntry{
 		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,
+		Kind: w.Kind, Plan: w.Plan, Node: w.Node,
 		Task: firstLine(w.Task), Note: w.Note, Severity: w.Severity,
 		Head: w.Head, Built: w.Built, Seat: ran.Seat, AgentRef: ran.AgentRef,
 		Stage: stage, DependsOn: w.DependsOn,
@@ -571,9 +585,10 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 		//
 		// Through the fold, not the head. This was the THIRD reader of an
 		// origination's chain to unmarshal whatever record happened to be
-		// newest, and the failure was quiet in the way the others were: a
-		// break-glass record is valid JSON with no route in it, so the row came
-		// back with an empty route and an empty key and nothing said why.
+		// newest, and the failure was quiet in the way the others were: a plan
+		// record and a break-glass record are both valid JSON with no route in
+		// them, so the row simply came back with an empty route and an empty
+		// key and nothing anywhere said why.
 		if ing, ok, err := ingress.Load(ctx, r.Store.Log(), r.Tenant, w.Ingress); err == nil && ok {
 			e.Route, e.Key = ing.Route, ing.Key
 		}

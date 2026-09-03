@@ -21,6 +21,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -93,7 +94,7 @@ func setup(t *testing.T, gateCmd []string) *env {
 }
 
 func issueRoute() ingress.Route {
-	return ingress.Route{Name: "forge-issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue, Box: "shop", Requester: "chris"}
+	return ingress.Route{Name: "forge-issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris"}
 }
 
 // TestIssueToLandedCommitUnattended is the Phase 3 exit criterion end to end:
@@ -798,7 +799,7 @@ func TestRepairCarriesTheAttemptItFollows(t *testing.T) {
 	ctx := context.Background()
 	e.loop.Lane = forge.LaneOptimistic
 	e.loop.Red = OpenRepair(e.router, ingress.Route{
-		Name: "red-main", Kind: ingress.RouteRedMain, Opens: ingress.KindIssue,
+		Name: "red-main", Kind: ingress.RouteRedMain, Opens: kind.SeedIssue,
 		Box: "shop", Repo: "app", Requester: "gargoyle",
 	}, 0)
 
@@ -917,7 +918,7 @@ func TestRepairChainIsBounded(t *testing.T) {
 	e := setup(t, []string{"true"})
 	ctx := context.Background()
 	route := ingress.Route{Name: "red-main", Kind: ingress.RouteRedMain,
-		Opens: ingress.KindIssue, Box: "shop", Requester: "gargoyle"}
+		Opens: kind.SeedIssue, Box: "shop", Requester: "gargoyle"}
 	red := OpenRepair(e.router, route, 2)
 
 	id, err := red(ctx, queue.WorkItem{ID: "wi-0"}, agent.Prior{Sha: "sha-a", Reason: "tests fail"})
