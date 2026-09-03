@@ -406,6 +406,7 @@ claim is decoration.
 | Compaction seam | a compacted scope still verifies — the hot side across the seam, the WORM side against the export — and a chopped, tampered, or re-aimed compacted chain still fails | 0 |
 | Delegation cannot escalate | an agent acting for a user is denied what that user lacks | 0 |
 | No implicit allow | a principal with an empty grant set can do nothing | 0 |
+| No agent on a critical path | with zero agents configured and no runtime assembled, the daemon still ticks, drains a change to a landing, parks a refused gate, ages and escalates it out of band, refuses over budget, verifies every scope it wrote, and runs both standing chores — and no ACP builder is assembled at all | 2, 11 |
 | Human vs automation | evidence distinguishes actor from on-behalf-of | 3 |
 | Agent determinism | same request + same material → same `agentref` | 2 |
 | Tool policy | a denied tool is denied at the stream, by a test that tries it | 2 |
@@ -1222,6 +1223,24 @@ What closes it:
 config against the real network and materializes it, which is the failure a
 fixture cannot catch: a force-pushed commit, a path that moved between
 releases, a private remote the credential channel cannot reach.
+
+Issue #5 turned an invariant into a test (2026-09-03). The rule is stolen
+verbatim from Gas Town's dog-execution model and stated now in ARCHITECTURE:
+reliability-critical paths are imperative Go, and an agent occupies only a
+seat whose failure parks work. We were already on the right side of it, which
+is exactly why it needed asserting — an agent-shaped dependency on a critical
+path does not fall over, it reads as QUIET, and their doctor, reaper,
+compactor and both backup dogs were silently broken for months on that
+distinction. `TestTheFactoryRunsWithNoAgentInIt` configures zero agents and
+no runtime and requires the whole factory anyway: a change drained to a
+landing, a refused gate parked, that exception aged and told out of band, the
+budget refusing, every scope verifying, and both standing chores completing.
+The half that will actually catch the erosion is structural — no ACP builder
+is assembled at all — because the moment worth failing at is the commit that
+moves a chore onto the agent plane, not the quarter somebody notices it
+stopped. It also fixes #13's decomposer constraint in place before there is a
+decomposer to tempt anyone: a stage on every intake is a stage on the
+critical path of every intake.
 
 Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
 an agent image and the live run that turns confinement on for the dogfood,

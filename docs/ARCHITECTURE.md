@@ -1025,6 +1025,44 @@ material is data to be read, never instructions to be followed — a weak contro
 on its own, which is why the pinning, the confinement, and the tool policy carry
 the real weight.
 
+### No reliability-critical path may depend on an agent
+
+**Reliability-critical paths are imperative Go. An agent occupies only a seat
+whose failure parks work.** The loop, the pump, the queue, the meter, the
+escalator, the prune sweep and the evidence chain are code; agents sit in the
+Builder seat, and an absent, broken or refusing agent produces an exception
+rather than a stopped factory.
+
+The rule is stolen, and it is worth saying where from. Gas Town's
+formula-driven maintenance dogs — doctor, reaper, compactor, both backups —
+were silently broken for months: the ticker fired, poured a molecule, and no
+agent existed to interpret it. Nothing errored. They were eventually rewritten
+as plain Go under the rule that a dog whose failure would cause a clown show
+must be imperative, and the transferable part is not the rewrite but the
+failure mode. An agent-shaped dependency on a critical path does not fall
+over. It **reads as quiet**, which is indistinguishable from working.
+
+We are on the right side of this today, but every pressure runs one way. The
+curation job and the continuity handoff both sit near paths that matter, and
+"just have an agent do it" is always the cheaper-looking option at the moment
+of writing — the erosion is invisible and incremental, which is precisely the
+class of claim PLAN §2 says to assert rather than comment.
+
+So it is a negative test rather than a paragraph:
+`TestTheFactoryRunsWithNoAgentInIt` configures zero agents and no runtime and
+requires the daemon to still tick, drain a change to a landing, park a refused
+gate, age and escalate that exception out of band, refuse over budget, seal
+and verify every scope, and run both standing chores to completion. It also
+asserts structurally that no ACP builder was assembled at all — the assertion
+that fires on the first commit moving a chore onto the agent plane, which is
+the only moment at which anyone would still remember why not to.
+
+This is also the constraint on decomposition. A stage on every intake is a
+stage on the critical path of every intake, so the default decomposer must be
+deterministic and agent-free — an issue needing no decomposition gets an
+identity plan. Agent planners are opt-in per Box and per route, which puts
+them back in a seat whose failure parks the one item that asked for one.
+
 ## Evidence
 
 ### What each layer provides
