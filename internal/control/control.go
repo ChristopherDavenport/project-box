@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -240,6 +241,19 @@ type QueueEntry struct {
 	Ingress string `json:"ingress,omitempty"`
 	Route   string `json:"route,omitempty"`
 	Key     string `json:"key,omitempty"`
+	// Kind is the declaration this work was opened under, and Plan the
+	// content address of the decomposition that called for it — the link the
+	// chain gained between the origination and its work.
+	//
+	// Shown because a fact one reader of the queue has and another does not is
+	// worse than one nobody has: an operator looking at six rows from one
+	// origination has no other way to ask whether they came from one decision
+	// or from six ticks of a decomposer over moving facts. Empty on items
+	// submitted before there was a decomposition stage, which is honest — no
+	// query reconstructs a plan that was never made.
+	Kind string `json:"kind,omitempty"`
+	Plan string `json:"plan,omitempty"`
+	Node string `json:"node,omitempty"`
 	// Task is the instruction's first line: enough to recognise the unit,
 	// never the whole prompt.
 	Task string `json:"task"`
@@ -533,6 +547,7 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 	}
 	e := QueueEntry{
 		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,
+		Kind: w.Kind, Plan: w.Plan, Node: w.Node,
 		Task: firstLine(w.Task), Note: w.Note, Severity: w.Severity,
 		Head: w.Head, Built: w.Built, Seat: ran.Seat, AgentRef: ran.AgentRef,
 		Stage: stage, DependsOn: w.DependsOn,
@@ -567,14 +582,15 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 	if w.Ingress != "" {
 		// Best effort: an item whose origination cannot be read is still a
 		// row worth showing, just a thinner one.
-		if head, err := r.Store.Log().Head(ctx, r.Tenant, "ingress/"+w.Ingress); err == nil && head.Seq > 0 {
-			var ing struct {
-				Route string `json:"route"`
-				Key   string `json:"key"`
-			}
-			if json.Unmarshal(head.Body, &ing) == nil {
-				e.Route, e.Key = ing.Route, ing.Key
-			}
+		//
+		// Through the fold, not the head. This was the THIRD reader of an
+		// origination's chain to unmarshal whatever record happened to be
+		// newest, and the failure was quiet in the way the others were: a plan
+		// record and a break-glass record are both valid JSON with no route in
+		// them, so the row simply came back with an empty route and an empty
+		// key and nothing anywhere said why.
+		if ing, ok, err := ingress.Load(ctx, r.Store.Log(), r.Tenant, w.Ingress); err == nil && ok {
+			e.Route, e.Key = ing.Route, ing.Key
 		}
 	}
 	return e, nil

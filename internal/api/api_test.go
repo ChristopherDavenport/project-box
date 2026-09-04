@@ -19,7 +19,9 @@ import (
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/pump"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
@@ -143,6 +145,8 @@ func rig(t *testing.T) *world {
 	router := &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "d"}
 	p := &pump.Pump{
 		Store: s, Tenant: tn, Runner: "d", Queue: q,
+		Kinds: kind.Seeded("shop"), Decomposers: plan.Default(),
+		Plans: &plan.Store{Log: s.Log(), Actor: "d"},
 		Meter: &capacity.Meter{Store: s, Tenant: tn, Actor: "d", Budget: capacity.Budget{MaxConcurrent: 2}},
 		Loops: map[string]*loop.Loop{"shop": {
 			Store: s, Runner: "d", Mirror: m, Repo: repo, Branch: "main",
@@ -157,7 +161,7 @@ func rig(t *testing.T) *world {
 		srv: &Server{
 			Store: s, Tenant: tn, Queue: q, Router: router,
 			Routes: map[string]ingress.Route{"issues": {
-				Name: "issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue, Box: "shop", Requester: "daemon",
+				Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "daemon",
 			}},
 			Box: "shop", Runner: "d", Started: time.Now(),
 		},

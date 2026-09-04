@@ -16,6 +16,7 @@ import (
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
@@ -105,7 +106,7 @@ func runItem(t *testing.T, s *sqlite.Store, lp *loop.Loop, router *ingress.Store
 func runItemCtx(t *testing.T, ctx context.Context, s *sqlite.Store, lp *loop.Loop, router *ingress.StoreRouter, key, task string) queue.WorkItem {
 	t.Helper()
 	ing, _, err := router.Open(ctx, ingress.Route{
-		Name: "issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue, Box: "shop", Requester: "chris",
+		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
 	}, ingress.Delivery{Key: key})
 	if err != nil {
 		t.Fatal(err)
@@ -235,7 +236,7 @@ func TestRepairWakesWithTheAttemptBeforeIt(t *testing.T) {
 		Checks: []string{"check"}, Reason: "check: fail (widget defaults to green)",
 	}
 	ing, _, err := router.Open(ctx, ingress.Route{
-		Name: "red-main", Kind: ingress.RouteRedMain, Opens: ingress.KindIssue,
+		Name: "red-main", Kind: ingress.RouteRedMain, Opens: kind.SeedIssue,
 		Box: "shop", Repo: "app", Requester: "gargoyle",
 	}, ingress.Delivery{Key: "red-" + first.Head, Payload: []byte(task), Prior: prior})
 	if err != nil {

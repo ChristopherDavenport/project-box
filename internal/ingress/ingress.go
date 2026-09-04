@@ -5,9 +5,12 @@
 // has an answer, which makes the ingress the root of provenance rather than a
 // vague notion of intent.
 //
-// The kind is not a label. It sets the authority envelope, the completion
-// semantics, and the priority — most consequentially, only an incident may
-// invoke break-glass.
+// The kind is not a label and it is no longer a Go constant either. It NAMES a
+// governed declaration — see [kind.Declaration] — which carries what work
+// opened under it may do, how its parked work escalates, the graph it
+// constructs, and the predicate that says it is finished. This package holds
+// the origination; the declaration holds the policy; neither compiles the
+// other in.
 package ingress
 
 import (
@@ -16,25 +19,36 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
-// Kind is the shape of an origination. The set is deliberately closed:
-// automated origination folds into these rather than forming a fourth kind, so
-// a scheduled dependency bump is a standing campaign and detected drift opens a
-// low-severity incident.
+// Kind names an origination's declaration. It is an open set: which kinds a
+// Box accepts is configuration, and the three the system seeds — issue,
+// campaign, incident — are declarations like any other rather than a closed
+// enum a fourth thing has to be squeezed into. A closed set does not prevent
+// miscategorisation, it causes it.
 type Kind string
 
+// Scope is the evidence chain one origination writes to. Exported because the
+// chain has more than one writer — the origination itself, its plans, and the
+// authority it exercised — and a second spelling of the scope name would
+// silently split a provenance chain in half.
+func Scope(id string) string { return "ingress/" + id }
+
+// Record kinds on an origination's chain.
+//
+// The chain carries two sorts of record and always has: the one that IS the
+// origination, and the narrative of what it authorized — a preemption, a
+// break-glass, a plan. So a reader must SELECT rather than merely unmarshal
+// the head, which is the same lesson the work item's fold already learned the
+// hard way. See [Load] for what reading the head unconditionally actually
+// did, and for why the way it failed was luck.
 const (
-	// KindIssue is one discrete request — a bug, a feature, a task. It finishes
-	// when its acceptance criteria pass.
-	KindIssue Kind = "issue"
-	// KindCampaign is a program of change across many repositories. It finishes
-	// when its predicate holds everywhere in scope.
-	KindCampaign Kind = "campaign"
-	// KindIncident is something wrong now. It finishes when service is restored
-	// *and* the postmortem has landed — restoration alone does not close it.
-	KindIncident Kind = "incident"
+	// RecordOpen carries the whole origination; it is written once.
+	RecordOpen = "ingress-open"
+	// RecordFact carries one completion fact being asserted.
+	RecordFact = "ingress-fact"
 )
 
 // Ingress is one origination of work.
@@ -81,20 +95,45 @@ type Ingress struct {
 	Opened time.Time
 	// Closed is zero while open.
 	Closed time.Time
-	// Campaign is set when Kind is KindCampaign, Incident when KindIncident.
-	// An issue needs neither.
+	// Campaign carries the parameters a campaign decomposer reads: the
+	// predicate, what is in scope, and the throttle. Parameters stay typed
+	// where completion state does not, and the split is principled — these are
+	// inputs with real invariants that a decomposer must be able to rely on,
+	// while "restored" and "postmortem" were completion STATE, which is
+	// exactly what a declaration's [kind.Completion] now names generically.
 	Campaign *Campaign
-	Incident *Incident
+	// Facts are the completion facts asserted about this origination, folded
+	// from its chain. An incident's declaration requires restored and
+	// postmortem; asserting either is a recorded act, not a field somebody
+	// set.
+	Facts map[string]string `json:"facts,omitempty"`
 }
 
-// MayBreakGlass reports whether this ingress can authorize an emergency bypass.
+// Fact answers one completion fact.
+func (i Ingress) Fact(name string) (string, bool) {
+	v, ok := i.Facts[name]
+	return v, ok && v != ""
+}
+
+// MayBreakGlass reports whether this origination can authorize an emergency
+// bypass.
 //
-// Only an open incident can. An emergency bypass with no incident behind it is
-// precisely the finding an audit looks for, so the coupling is a control: every
-// invocation inherits a why, a timeline, and a postmortem obligation, and
-// "show me every break-glass invocation" resolves to a list of incidents.
-func (i Ingress) MayBreakGlass() bool {
-	return i.Kind == KindIncident && i.Closed.IsZero()
+// The rule has not changed and its expression has: an OPEN origination whose
+// declaration grants break-glass. An emergency bypass with no origination
+// behind it is precisely the finding an audit looks for, so the coupling is a
+// control — every invocation inherits a why, a timeline, and a completion
+// obligation, and "show me every break-glass invocation" resolves to a list of
+// originations. What is new is that which kinds carry the authority is a
+// declaration a reviewer sees, rather than a string compare in a file nobody
+// reads until there is an emergency.
+func (i Ingress) MayBreakGlass(d kind.Declaration) bool {
+	return d.Capabilities.BreakGlass && i.Closed.IsZero()
+}
+
+// MayPreempt reports whether this origination can take a lease from a live
+// holder.
+func (i Ingress) MayPreempt(d kind.Declaration) bool {
+	return d.Capabilities.Preempt && i.Closed.IsZero()
 }
 
 // Campaign is a predicate over a Box's repositories, continuously evaluated.
@@ -132,28 +171,10 @@ type Rollout struct {
 	HaltAfter int
 }
 
-// Severity orders incidents against each other and against ordinary work.
-// Higher is more urgent.
-type Severity int
-
-// Incident carries what closing one requires.
-type Incident struct {
-	Severity Severity
-	// Restored is when service came back. Setting it does not close the
-	// incident.
-	Restored time.Time
-	// Postmortem references the evidence record that closes this out. An
-	// incident with a Restored time and no postmortem is still open, which is
-	// the point.
-	Postmortem string
-	// BrokeGlass records whether an emergency bypass was actually used, so the
-	// control room can list them without scanning the evidence chain.
-	BrokeGlass bool
-}
-
 // RouteKind is a way work enters. Adding a source of work should be
-// configuration, not a new code path, so the set is open where [Kind] is
-// closed — many routes, still only three things they can open.
+// configuration, not a new code path — and now that [Kind] names a declaration
+// rather than a constant, both sets are open. A route still opens exactly one
+// kind; what changed is that the operator decides what those kinds are.
 type RouteKind string
 
 const (

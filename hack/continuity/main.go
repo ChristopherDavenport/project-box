@@ -39,6 +39,7 @@ import (
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
@@ -180,7 +181,7 @@ func runChain(ctx context.Context, agentBin string, ch chain, arm string, trial 
 		rctx, cancel := context.WithTimeout(ctx, 6*time.Minute)
 		defer cancel()
 		ing, _, err := router.Open(rctx, ingress.Route{
-			Name: "exp", Kind: ingress.RouteIssue, Opens: ingress.KindIssue, Box: "exp", Requester: "experimenter",
+			Name: "exp", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "exp", Requester: "experimenter",
 		}, ingress.Delivery{Key: fmt.Sprintf("%s-%s-t%d-r%d", ch.name, arm, trial, n)})
 		if err != nil {
 			return queue.WorkItem{}, err
