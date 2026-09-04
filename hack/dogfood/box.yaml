@@ -98,4 +98,5 @@ boxes:
         role: service
         lane: gated
         route: issues
-        check: go build ./... && go test ./...
+        # One file, shared with CI: generate the bundle, build, test.
+        check: ./hack/check.sh

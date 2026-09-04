@@ -42,6 +42,7 @@ boxes:
         build: '$BUILD "api change"'
         check: 'test -f out.txt'
 YAML
+(cd "$ROOT" && go generate ./web)
 go build -o "$WORK/boxd" "$ROOT/cmd/boxd"
 go build -o "$WORK/boxgate" "$ROOT/cmd/boxgate"
 "$WORK/boxd" -config "$WORK/box.yaml" > "$WORK/boxd.log" 2>&1 & echo $! > "$WORK/boxd.pid"

@@ -29,6 +29,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      # The bundle is generated here, not committed: go:embed reads web/dist
+      # at build time, so node comes before the first go command. It was
+      # committed for a month; see web/embed.go for why that stopped.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: go generate ./web
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
@@ -36,40 +45,3 @@ jobs:
       - run: go test -race ./...
       - name: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
-
-  # web/dist is committed because go:embed makes it a SOURCE INPUT to the Go
-  # build: without it `go build`, `go install`, and the one-binary property all
-  # break, and CI would need node to test the daemon at all. That is the right
-  # trade and it stays.
-  #
-  # What was missing is the other half. A generated artifact nobody verifies is
-  # exactly the unverified claim this repo refuses everywhere else — src could
-  # drift from dist silently, and the shipped binary would serve a UI nobody
-  # reviewed, with a 190KB minified diff no reviewer can read standing in for
-  # the evidence. The build is byte-reproducible, so checking it is cheap.
-  #
-  # This is a separate job on purpose: the daemon's own gates above still need
-  # no node.
-  web-bundle:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - name: install
-        working-directory: web
-        run: npm ci
-      - name: rebuild the bundle
-        working-directory: web
-        run: npm run build
-      - name: dist must match src
-        run: |
-          if ! git diff --quiet -- web/dist; then
-            echo "web/dist does not match a rebuild from web/src."
-            echo "Run 'cd web && npm ci && npm run build' and commit the result."
-            git diff --stat -- web/dist
-            exit 1
-          fi
