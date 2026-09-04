@@ -435,6 +435,11 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		}
 		fmt.Printf("tenant=%s box=%s runner=%s stopped=%v pending=%d exceptions=%d up=%ds routes=%v\n",
 			st.Tenant, st.Box, st.Runner, st.Stopped, st.Pending, st.Exceptions, st.UptimeSec, st.Routes)
+		// The stop with its record: a bare stopped=true sent the operator
+		// to the activity feed to find out whether the stop was theirs.
+		if st.Claims.Stopped {
+			fmt.Printf("stopped by %s at %s: %s\n", st.Claims.Actor, st.Claims.At.Format(time.RFC3339), st.Claims.Reason)
+		}
 		// Which states that pending number is made of, and the pointer to the
 		// verb that lists them. A bare count is the whole complaint.
 		if b := st.Backlog; b.Total > 0 {

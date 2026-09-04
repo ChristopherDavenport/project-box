@@ -732,6 +732,24 @@ Playwright drove the real UI — submit through the JH form, the landing
 arriving on the live feed, then a reload on the running process and the
 new route appearing in the form with no restart.
 
+Design pass (2026-09-03). Dark mode had never applied: jh-core's dark tokens
+live on a `.jh-theme-dark` class, not on `:root`, and the page loaded the
+sheet under a media query without ever setting the class. Both sheets now
+load and `index.html` puts the class on `<html>` before first paint; the
+header offers System / Light / Dark, remembered per browser. The alerts
+were `type="banner"`, which jh-notification positions absolutely, so the
+overdue warning covered the navigation — they are inline alerts now. Every
+verb the API had is on the page it belongs to: stop/resume on a strip that
+also says who last pulled the cord, when, and why (`/v1/status` carries the
+control record, not just the bit); retry/resolve on each exception and on
+the item; reload on the dashboard — each asking for the reason the record
+needs. Records are described in words (`web/src/format.js`) instead of
+raw JSON or hashes; hashes are shortened with a copy affordance; the
+daemon's identity and uptime are on every page. Skip link, `aria-current`,
+a live region for the feed, the design system's focus ring and type/colour
+tokens throughout. Browser-verified in both themes; the room smoke now also
+proves the theme switch and the cord.
+
 A dockerd-hygiene pass (2026-08-31) pulled the operational lessons worth
 having before a fleet exists: build identity everywhere (internal/version,
 ldflags-stamped, --version on all three binaries and in /v1/status — a node

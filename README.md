@@ -200,6 +200,16 @@ changing `web/src/`:
 cd web && npm install && npm run build
 ```
 
+The room is themed with jh-core's tokens: the light set lives on `:root`, the
+dark set on a `.jh-theme-dark` class that `index.html` puts on `<html>` before
+first paint. The header's System / Light / Dark control chooses, the choice is
+remembered per browser, and System follows `prefers-color-scheme` live.
+
+Every verb the API offers is on the page it belongs to — stop and resume
+claims on the strip under the header, retry and resolve on each exception and
+on the item, reload configuration on the dashboard — and each asks for the
+reason the record needs before it acts.
+
 ## Resuming work
 
 `docs/PLAN.md` §10 says exactly where things stand and what is next; the
