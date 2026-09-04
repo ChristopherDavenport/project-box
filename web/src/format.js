@@ -324,7 +324,9 @@ export function describe(raw, titles = {}) {
     case 'ingress-open':
       return `Ingress opened${o?.route ? ` on ${o.route}` : ''}${o?.key ? ` for ${o.key}` : ''}`;
     case 'indexed':
-      return indexLine(r, text, name);
+      // On the chain the note is the body; on the live feed the body may be
+      // the indexed thing itself, with the note as a field of it.
+      return indexLine(r, text || o?.note || '', name);
     case 'compacted':
       return 'Chain compacted behind a verifiable seal';
     case 'review-sample':
@@ -346,14 +348,26 @@ export function describe(raw, titles = {}) {
 // listing in the operator's words, and name the item rather than its hash.
 function indexLine(r, note, name) {
   const list = r.scope.replace(/^index\//, '');
-  const n = note ? ` — ${firstLine(note)}` : '';
+  const who = name(r.subject);
+  // The pending index's note is the task itself, which is also the name:
+  // saying it twice reads as a stutter, not as more information.
+  const n = note && firstLine(note) !== who ? ` — ${firstLine(note)}` : '';
   switch (list) {
-    case 'pending': return `Queued: ${name(r.subject)}${n}`;
-    case 'exceptions': return `Parked: ${name(r.subject)}${n}`;
-    case 'landings': return `Landed: ${name(r.subject)}${n}`;
+    case 'pending': return `Queued: ${who}${n}`;
+    case 'exceptions': return `Parked: ${who}${n}`;
+    case 'landings': return `Landed: ${who}${n}`;
     case 'ingress': return `Ingress opened: ${note ? firstLine(note) : r.subject}`;
-    default: return `Filed under ${list}: ${name(r.subject)}${n}`;
+    default: return `Filed under ${list}: ${who}${n}`;
   }
+}
+
+/** toolDetail is what a tool call is doing, without repeating its name: the
+ *  adapter titles a read "Read <path>" and a shell call by its command line. */
+export function toolDetail(f) {
+  const t = String(f.text ?? '').trim();
+  if (!t || t === f.tool) return '';
+  const re = new RegExp('^' + String(f.tool ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s+', 'i');
+  return clip(t.replace(re, ''), 300);
 }
 
 /** itemOf is the work item a record is about, if it is about one. */

@@ -11,7 +11,7 @@ import {
 import { ActivityController } from './sse.js';
 import {
   age, title, taskURL, short, fmtTokens, fmtUSD, tokenSplit, breakdown, origin, place, hold, why,
-  describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip,
+  describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail,
 } from './format.js';
 import { base, toast, focusInto } from './ui.js';
 import { icon } from './icons.js';
@@ -397,7 +397,11 @@ customElements.define('box-work', BoxWork);
 function frameLine(f) {
   switch (f.kind) {
     case 'started': return 'agent started';
-    case 'tool': return f.tool || '(unnamed — nothing for policy to match)';
+    case 'tool': {
+      if (!f.tool) return '(unnamed — nothing for policy to match)';
+      const d = toolDetail(f);
+      return d ? html`<b>${f.tool}</b> ${d}` : f.tool;
+    }
     case 'denied': return `${f.tool} — refused by policy at the stream`;
     case 'escalate': return f.reason;
     case 'handoff': return f.reason;
@@ -427,9 +431,10 @@ export class BoxSessions extends LitElement {
     .layer { font: var(--jh-font-micro-medium); padding: 2px var(--jh-space-200); border-radius: var(--jh-border-radius-100);
              background: var(--jh-color-container-secondary-enabled); }
     h4 { margin: var(--jh-space-300) 0 var(--jh-space-100); font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
-    ol { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font: var(--jh-font-helper-regular); }
-    li { display: grid; grid-template-columns: 64px 72px 1fr; gap: var(--jh-space-200); padding: 3px 0;
+    ol { list-style: none; margin: 0; padding: 0; max-height: 480px; overflow-y: auto; font: var(--jh-font-helper-regular); }
+    li { display: grid; grid-template-columns: 64px 64px 1fr; gap: var(--jh-space-200); padding: 3px 0;
          border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    li .x b { font-weight: 600; }
     li .t { color: var(--jh-color-content-secondary-enabled); font-variant-numeric: tabular-nums; }
     li .k { font-weight: 600; }
     li .x { white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -508,13 +513,15 @@ export class BoxSessions extends LitElement {
           ? html`<div class="layers" aria-label="Agent layers">${s.layers.map((l) => html`
               <span class="layer" title=${`${l.source} ${l.digest}`}>${l.scope}:${l.name}</span>`)}</div>`
           : nothing}
-        <h4>Timeline</h4>
+        <h4>Timeline <span class="helper">— newest first</span></h4>
+        ${/* Newest at the top: the question is what the agent is doing NOW,
+             and history is what you scroll down into. */ ''}
         ${frames.length === 0
           ? (s.watching
               ? html`<p class="empty">Started; nothing said yet.</p>`
               : html`<p class="blind">No live stream here — another runner holds this, or the window has rolled.
                      Silence about the run, not an idle agent.</p>`)
-          : html`<ol aria-label="Agent timeline">${frames.map((f) => html`
+          : html`<ol aria-label="Agent timeline, newest first">${frames.slice().reverse().map((f) => html`
               <li class=${FRAME_APPEARANCE[f.kind] ?? ''}>
                 <span class="t"><box-when .at=${f.at}></box-when></span>
                 <span class="k">${f.kind}</span>
