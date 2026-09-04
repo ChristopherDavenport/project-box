@@ -7,8 +7,10 @@ package boxcfg
 
 import (
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -178,6 +180,26 @@ type Box struct {
 	// workspace, so the ability to put something in front of it is the
 	// difference between confinement being configurable and being a plan.
 	Agent Argv `yaml:"agent"`
+	// Model is what the box's builders run, by the value the agent lists for
+	// its model option — `sonnet`, `opus[1m]`, whatever the agent's own
+	// picker calls it. Applied through the protocol once the session is open
+	// and asserted back: a value the agent does not list, or answers with
+	// something else, fails the run before a prompt is sent, and the
+	// agent-session record says what it offered instead.
+	//
+	// Empty inherits the agent's default. For an agent that reads the
+	// machine's settings that is whatever the machine says — a choice nobody
+	// made and, before the session was recorded, nothing could show. The
+	// dogfood ran four rounds that way and turned out to be on the most
+	// expensive model with a million-token window.
+	Model string `yaml:"model"`
+	// Session is the rest of the session configuration, by the option id
+	// the agent lists: effort, a fast mode, a sub-agent. Same contract as
+	// Model — the agent's own values, applied and asserted, refused
+	// otherwise. `model` is not spelled here because it has the field above,
+	// and `mode` is not because the permission mode belongs to the tool
+	// policy and is set through session/set_mode.
+	Session map[string]string `yaml:"session"`
 	// Confine, when set, renders that wrapper instead of making the operator
 	// write it. Load folds it into Agent, so the daemon runs one argv and
 	// knows nothing about confinement — the seam stays exactly one thing.
@@ -375,6 +397,21 @@ func (c *Config) validate() error {
 		}
 		if err := bx.Harness.validate(bx.Name); err != nil {
 			return err
+		}
+		for _, k := range slices.Sorted(maps.Keys(bx.Session)) {
+			switch v := bx.Session[k]; {
+			case k == "":
+				return fmt.Errorf("boxcfg: box %s: a session option with an empty id", bx.Name)
+			case k == "model":
+				return fmt.Errorf("boxcfg: box %s: session.model — the model has its own field: model: %s", bx.Name, v)
+			case k == "mode":
+				return fmt.Errorf("boxcfg: box %s: session.mode — the permission mode is the tool policy's, set through session/set_mode, not a session option", bx.Name)
+			case v == "":
+				return fmt.Errorf("boxcfg: box %s: session.%s has no value", bx.Name, k)
+			}
+		}
+		if (bx.Model != "" || len(bx.Session) > 0) && len(bx.Agent) == 0 {
+			return fmt.Errorf("boxcfg: box %s: model/session with no agent — a build command opens no session to configure", bx.Name)
 		}
 		if bx.Confine != nil {
 			if len(bx.Agent) == 0 {

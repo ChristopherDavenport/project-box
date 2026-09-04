@@ -208,6 +208,8 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					Skills:    skillRefs(bx.Harness.Skills),
 					MCP:       mcpRefs(bx.Harness.MCP),
 					Resolver:  d.mirror,
+					Model:     bx.Model,
+					Session:   bx.Session,
 				}},
 				Seat:            &seat.Seat{Name: bx.Seat, Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
 				Mirror:          d.mirror,

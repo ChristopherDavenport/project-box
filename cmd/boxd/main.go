@@ -69,6 +69,7 @@ func run() error {
 	buildCmd := flag.String("build", "", "builder command run in the workspace (commits its own change)")
 	agentBin := flag.String("agent", "", "ACP agent binary (e.g. claude-agent-acp); overrides -build with a real agent")
 	seatName := flag.String("seat", "mason", "seat identity for the agent's continuity")
+	model := flag.String("model", "", "model the agent runs, by the value it lists; empty = the agent's own default")
 	checkCmd := flag.String("check", "go test ./...", "gate/check command")
 	otlp := flag.String("otlp", "", "collector endpoint (host:port); empty = telemetry off")
 	listen := flag.String("listen", "unix:boxd.sock", "the daemon's unix socket (network exposure is boxgate's job)")
@@ -126,6 +127,7 @@ func run() error {
 				Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},
 				Instructions: "You are a build agent in an automated factory. Make the requested change precisely and minimally.",
 				Tools:        agent.ToolPolicy{PermissionMode: "acceptEdits"},
+				Model:        *model,
 			}}},
 			Seat:   &seat.Seat{Name: *seatName, Base: &knowledge.Base{Store: s, Tenant: t}},
 			Mirror: m,

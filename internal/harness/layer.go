@@ -6,6 +6,8 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 )
@@ -46,6 +48,14 @@ type Source struct {
 	Resolver SkillResolver
 	// MCP are the servers this box grants.
 	MCP []agent.MCPRef
+	// Model is what the box's builders run, by the value the agent lists;
+	// empty leaves the agent's own default in force. Session is the rest of
+	// the session configuration by option id. Both are part of the surface
+	// for the same reason plugins are: they decide what the agent IS, and a
+	// bundle that did not carry them would call two different agents by one
+	// name.
+	Model   string
+	Session map[string]string
 }
 
 // Layers returns the base layers followed by the resolved harness layer.
@@ -60,9 +70,11 @@ func (s *Source) Layers(ctx context.Context, req agent.Request) ([]agent.Layer, 
 	layers = append(layers, s.Base...)
 
 	l := agent.Layer{
-		Name:  "harness",
-		Scope: agent.ScopeBox,
-		MCP:   s.MCP,
+		Name:    "harness",
+		Scope:   agent.ScopeBox,
+		MCP:     s.MCP,
+		Model:   s.Model,
+		Session: s.Session,
 	}
 	if s.Inherit {
 		plugins, err := Discovery{Dir: s.ConfigDir, MCP: s.PluginMCP}.Plugins()
@@ -81,7 +93,7 @@ func (s *Source) Layers(ctx context.Context, req agent.Request) ([]agent.Layer, 
 		}
 		l.Skills = skills
 	}
-	if len(l.Plugins) == 0 && len(l.Skills) == 0 && len(l.MCP) == 0 {
+	if len(l.Plugins) == 0 && len(l.Skills) == 0 && len(l.MCP) == 0 && l.Model == "" && len(l.Session) == 0 {
 		// Nothing to say. An empty layer would still change the agentref
 		// through its own digest, which would make "this box grants nothing"
 		// and "this box was never asked" different agents on the record.
@@ -122,6 +134,15 @@ func digest(l agent.Layer) string {
 		for _, t := range m.Tools {
 			put("tool:" + t)
 		}
+	}
+	// Only when stated, so a surface that says nothing about the session
+	// keeps the digest it always had: the change is in what it says, not in
+	// the scheme.
+	if l.Model != "" {
+		put("model:" + l.Model)
+	}
+	for _, k := range slices.Sorted(maps.Keys(l.Session)) {
+		put("session:" + k + "=" + l.Session[k])
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

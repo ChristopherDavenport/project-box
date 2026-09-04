@@ -1331,3 +1331,34 @@ Phases 7 and 8 remain blocked on external resources. Next code-shaped work:
 an agent image and the live run that turns confinement on for the dogfood,
 review sampling/sign-off endpoints for the control room, and OIDC as a
 boxgate variant.
+
+Dogfood round 4 and the session surface (2026-09-03/04). Round 4 landed #16
+on `factory` (PR #37) in one run: 28 minutes, 120 tool calls, 25.1M tokens
+of which 98.5% were cache reads at ~206K of context a call, $35.20 — and
+that one run consumed the subscription's five-hour window, so the next run
+(#22) hit "session limit" five minutes in and was parked as an exception.
+The factory could not have seen it coming and could not explain it
+afterwards: the model was inherited from the machine's settings (fable with
+the million-token window — chosen by nobody, recorded nowhere), the
+builders were told to read both design docs whole at turn one (172KB,
+re-read every turn: about a fifth of the bill), the task text was in every
+prompt twice, and the adapter's own rate-limit report went unread. The
+protocol had the answer already: session config options. The runtime now
+models ACP's session surface as the protocol defines it — modes, config
+options by id with the protocol's categories, available commands, usage
+with context occupancy, the full SessionUpdate union — applies a box's
+`model:` and `session:` through session/set_config_option and asserts each
+answer (a value the agent does not list fails the run before a prompt; the
+error names what it offers), and records what the agent answered as an
+`agent-session` record beside the `agent-run` digest: the model that ran,
+the mode, every option, every command. That last is what finally separates
+"the skill was granted" from "the skill was delivered" — a session/new
+probe showed the pinned skills reaching the session as box-skills:go and
+box-skills:sqlite, and the #16 agent invoking neither. The agent-result
+record carries peak context, the window, the model, and the account's own
+limit report. The dogfood box declares `model: sonnet`; CLAUDE.md replaces
+the read-both-docs contract with a brief that names sections. Whether Sonnet
+lands this repository's changes, and at what cost, is round 5's
+measurement. Deferred with the measurement: a brake denominated in the
+account's window (the rate-limit report is on the record now; the meter
+does not yet act on it), and whose credential the factory runs on.

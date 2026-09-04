@@ -151,7 +151,7 @@ export const KIND_APPEARANCE = {
   parked: 'negative', failed: 'negative', 'budget-refused': 'negative', stop: 'negative', denied: 'negative',
   escalated: 'negative', 'land-refused': 'negative', 'land-conflict': 'negative', 'rebase-refused': 'negative',
   'handoff-failed': 'negative', 'break-glass': 'negative', preempted: 'negative',
-  claimed: 'brand', 'agent-run': 'brand', retried: 'brand',
+  claimed: 'brand', 'agent-run': 'brand', 'agent-session': 'brand', retried: 'brand',
 };
 
 export const SEVERITY_APPEARANCE = { low: 'neutral', medium: 'neutral', high: 'negative', critical: 'negative' };
@@ -278,6 +278,18 @@ export function describe(raw, titles = {}) {
       bits.push(o.tools ? tools(o.tools) : `${o.tool_calls ?? 0} tools`);
       if (o.denied_tools) bits.push(`DENIED ${tools(o.denied_tools)}`);
       if (o.unknown_updates?.length) bits.push(`dialect drift: ${o.unknown_updates.join(', ')}`);
+      return bits.join(' · ');
+    }
+    case 'agent-session': {
+      // What the agent said it was once the session opened — the model that
+      // actually ran, the mode in force, every other option, and how many
+      // commands (skills among them) it offered. The agent-run record says
+      // what was asked, as a digest; this says what was answered.
+      if (!o) return firstLine(text);
+      const bits = [`model ${o.model || 'not exposed'}`];
+      if (o.modes?.current) bits.push(`mode ${o.modes.current}`);
+      for (const c of o.config ?? []) if (c.id !== 'model' && c.id !== 'mode') bits.push(`${c.id} ${c.current}`);
+      bits.push(`${(o.commands ?? []).length} commands offered`);
       return bits.join(' · ');
     }
     case 'charge': {

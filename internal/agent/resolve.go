@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 )
@@ -97,6 +98,9 @@ type Composer struct {
 //     stated, the role's restrictive default applies.
 //   - Model: the most specific non-empty value wins — a preference, not a
 //     safety property, so later layers may change it freely.
+//   - Session options merge per key the same way: the most specific
+//     non-empty value wins, and keys nobody sets are absent rather than
+//     empty, so the agent's own default stays in force AND on the record.
 //
 // The data envelope is not a merge rule, because it is not a layer field. It
 // is a bound the merged result is checked against: see [Envelope], and
@@ -195,6 +199,15 @@ func (c *Composer) Resolve(ctx context.Context, req Request) (Bundle, error) {
 		if l.Model != "" {
 			b.Model = l.Model
 		}
+		for k, v := range l.Session {
+			if v == "" {
+				continue
+			}
+			if b.Session == nil {
+				b.Session = map[string]string{}
+			}
+			b.Session[k] = v
+		}
 	}
 
 	b.Instructions = strings.Join(prose, "\n\n")
@@ -286,6 +299,9 @@ func (c *Composer) Explain(_ context.Context, b Bundle) ([]byte, error) {
 		envelope = b.Envelope.String()
 	}
 	fmt.Fprintf(&w, "envelope: %s\n", envelope)
+	for _, k := range slices.Sorted(maps.Keys(b.Session)) {
+		fmt.Fprintf(&w, "session.%s: %s\n", k, b.Session[k])
+	}
 	fmt.Fprintf(&w, "\nlayers (in application order):\n")
 	for _, l := range b.Layers {
 		fmt.Fprintf(&w, "  %-6s %-20s %s %s\n", l.Scope, l.Name, l.Source.Kind, l.Source.Digest)
@@ -336,6 +352,9 @@ func ref(b Bundle) string {
 	put(string(b.Role))
 	put(b.Box)
 	put(b.Model)
+	for _, k := range slices.Sorted(maps.Keys(b.Session)) {
+		put("session:" + k + "=" + b.Session[k])
+	}
 	put(b.Instructions)
 	put(b.Tools.PermissionMode)
 	for _, a := range b.Tools.Allow {
