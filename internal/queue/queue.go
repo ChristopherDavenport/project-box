@@ -179,8 +179,17 @@ type WorkItem struct {
 	// dependents with the cause named; execution order is nobody's plan,
 	// it emerges from claims against the graph.
 	DependsOn []string `json:"depends_on,omitempty"`
-	Task      string   `json:"task"`
-	State     State    `json:"state"`
+	// Sections names the regions of Repo this unit expresses itself in: what
+	// it leases before it builds, and what its builder is told to stay
+	// within. Empty is the whole repository — it leases every declared
+	// section, so a unit that names none and a unit that names one can
+	// never run at once.
+	Sections []string `json:"sections,omitempty"`
+	// Model is the tier the plan chose for this unit, when it chose one;
+	// empty inherits the section's, then the role's, then the box's.
+	Model string `json:"model,omitempty"`
+	Task  string `json:"task"`
+	State State  `json:"state"`
 	// Depth is how many times the factory has reopened this line of work on
 	// its own initiative, inherited from the ingress. Externally delivered
 	// work is 0; see loop.OpenRepair for what bounds it.

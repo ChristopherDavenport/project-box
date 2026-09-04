@@ -25,6 +25,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -126,6 +127,20 @@ func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
 			continue
 		}
 		seen[rec.Subject] = true
+		if ingress.IsID(rec.Subject) {
+			// An origination whose judgement failed before it had any item.
+			// Listed like an item — same columns, same verbs — because to
+			// the person it needs it IS one: work that stopped, with a
+			// reason, waiting on them.
+			ex, failed, err := r.failedPlan(ctx, rec.Subject, now, objective, told)
+			if err != nil {
+				return nil, err
+			}
+			if failed {
+				out = append(out, ex)
+			}
+			continue
+		}
 		item, parked, err := r.parked(ctx, rec.Subject)
 		if err != nil {
 			return nil, err
@@ -700,4 +715,32 @@ func (r *Room) SignOff(ctx context.Context, itemID, verdict, note string) error 
 		Subject: itemID, Actor: r.Actor, Body: body,
 	})
 	return err
+}
+
+// failedPlan renders an origination whose planning failed as an exception,
+// or reports that it no longer is one: retried, resolved, or since planned.
+func (r *Room) failedPlan(ctx context.Context, id string, now time.Time, objective time.Duration, told map[string][]time.Time) (Exception, bool, error) {
+	plans := &plan.Store{Log: r.Store.Log(), Actor: r.Actor}
+	st, err := plans.Standing(ctx, r.Tenant, id)
+	if err != nil {
+		return Exception{}, false, err
+	}
+	if st.State != "failed" {
+		return Exception{}, false, nil
+	}
+	ing, ok, err := plans.Origination(ctx, r.Tenant, id)
+	if err != nil || !ok {
+		return Exception{}, false, err
+	}
+	age := now.Sub(st.At)
+	return Exception{
+		WorkItem: queue.WorkItem{
+			ID: id, Tenant: r.Tenant, Box: ing.Box, Ingress: id, Kind: string(ing.Kind),
+			Requester: ing.Requester, Repo: ing.Repo, Task: plan.TaskOf(ing),
+			State: queue.StateParked, Note: "planning failed: " + st.Reason, Severity: queue.SeverityMedium,
+		},
+		Parked: st.At, AgeSec: int64(age.Seconds()),
+		Escalations: countAfter(told[id], st.At),
+		Overdue:     age >= objective,
+	}, true, nil
 }

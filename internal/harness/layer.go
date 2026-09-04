@@ -56,6 +56,34 @@ type Source struct {
 	// name.
 	Model   string
 	Session map[string]string
+	// Roles are per-role tiers. A role's model or session wins over the
+	// box's for that role's runs: the planner judges on one tier and the
+	// builder expresses on another, and the box's own is the default for
+	// every role that says nothing.
+	Roles map[agent.Role]Tier
+}
+
+// Tier is a model and session configuration for one role.
+type Tier struct {
+	Model   string
+	Session map[string]string
+}
+
+// tier resolves the surface's tier for a role: the role's own where stated,
+// the box's otherwise, per key for the session.
+func (s *Source) tier(role agent.Role) (string, map[string]string) {
+	model, session := s.Model, map[string]string{}
+	maps.Copy(session, s.Session)
+	if t, ok := s.Roles[role]; ok {
+		if t.Model != "" {
+			model = t.Model
+		}
+		maps.Copy(session, t.Session)
+	}
+	if len(session) == 0 {
+		session = nil
+	}
+	return model, session
 }
 
 // Layers returns the base layers followed by the resolved harness layer.
@@ -69,12 +97,13 @@ func (s *Source) Layers(ctx context.Context, req agent.Request) ([]agent.Layer, 
 	layers := make([]agent.Layer, 0, len(s.Base)+1)
 	layers = append(layers, s.Base...)
 
+	model, session := s.tier(req.Role)
 	l := agent.Layer{
 		Name:    "harness",
 		Scope:   agent.ScopeBox,
 		MCP:     s.MCP,
-		Model:   s.Model,
-		Session: s.Session,
+		Model:   model,
+		Session: session,
 	}
 	if s.Inherit {
 		plugins, err := Discovery{Dir: s.ConfigDir, MCP: s.PluginMCP}.Plugins()

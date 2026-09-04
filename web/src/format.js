@@ -152,6 +152,7 @@ export const KIND_APPEARANCE = {
   escalated: 'negative', 'land-refused': 'negative', 'land-conflict': 'negative', 'rebase-refused': 'negative',
   'handoff-failed': 'negative', 'break-glass': 'negative', preempted: 'negative',
   claimed: 'brand', 'agent-run': 'brand', 'agent-session': 'brand', retried: 'brand',
+  planned: 'positive', 'plan-failed': 'negative', 'plan-retried': 'brand', 'plan-resolved': 'positive',
 };
 
 export const SEVERITY_APPEARANCE = { low: 'neutral', medium: 'neutral', high: 'negative', critical: 'negative' };
@@ -280,6 +281,22 @@ export function describe(raw, titles = {}) {
       if (o.unknown_updates?.length) bits.push(`dialect drift: ${o.unknown_updates.join(', ')}`);
       return bits.join(' · ');
     }
+    case 'planned': {
+      // The decomposition: how many units, judged or derived, and where
+      // each is expressed. The plan is the artifact between ingress and
+      // work item, and it is the one that used to leave no record at all.
+      if (!o) return firstLine(text);
+      const n = (o.nodes ?? []).length;
+      const who = o.replayable ? o.decomposer : `${o.decomposer} (judgement)`;
+      const where = (o.nodes ?? []).map((u) => (u.sections?.length ? `${u.id} in ${u.sections.join('+')}` : u.id)).join(', ');
+      return `Planned ${n} unit${n === 1 ? '' : 's'} by ${who}${where ? ': ' + where : ''}`;
+    }
+    case 'plan-failed':
+      return `Planning failed — ${firstLine(text)}`;
+    case 'plan-retried':
+      return `Planning retried${text ? ' — ' + firstLine(text) : ''}`;
+    case 'plan-resolved':
+      return `Planning resolved${text ? ' — ' + firstLine(text) : ''}`;
     case 'agent-session': {
       // What the agent said it was once the session opened — the model that
       // actually ran, the mode in force, every other option, and how many

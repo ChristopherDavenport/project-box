@@ -66,6 +66,7 @@ var roleDefaultMode = map[Role]string{
 	RoleGate:     "plan",
 	RoleDeployer: "acceptEdits",
 	RoleCurator:  "acceptEdits",
+	RolePlanner:  "plan", // reads and judges; a plan is not a change
 }
 
 // Composer is the reference [Resolver].
@@ -130,6 +131,7 @@ func (c *Composer) Resolve(ctx context.Context, req Request) (Bundle, error) {
 			Name: "task", Scope: ScopeTask,
 			Source:       Source{Kind: SourceInline, Digest: hashText(req.Task)},
 			Instructions: req.Task,
+			Model:        req.Model,
 		})
 	}
 	if len(layers) == 0 {

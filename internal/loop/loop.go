@@ -250,6 +250,27 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		return q.Park(ctx, item, claim, queue.SeverityHigh, deny)
 	}
 
+	// WHERE this unit works, held before it builds. Two units in disjoint
+	// sections of one repository run at once; two in the same section take
+	// turns; a unit that names no section is the whole repository and waits
+	// for every section to be free. A wait, not a park: nobody needs to look
+	// at a unit whose turn has not come, and next tick it tries again.
+	//
+	// This is what makes fan-out safe rather than merely possible. The land
+	// window already serializes the branch and replays a moved base, so two
+	// units were never going to corrupt each other — they were going to
+	// conflict, and a conflicting replay is rebuilt by an agent, which is the
+	// most expensive thing the factory does. The lease spends a tick to save
+	// a session.
+	releaseSections, busy, err := l.leaseSections(ctx, item)
+	if err != nil {
+		return q.Park(ctx, item, claim, queue.SeverityMedium, err.Error())
+	}
+	if busy != "" {
+		return q.Wait(ctx, item, claim, busy)
+	}
+	defer releaseSections()
+
 	leaser := l.Store.Leaser(l.Runner)
 	ref := "refs/heads/" + l.Branch
 	// The workspace's lease, not the branch's. A build is a whole agent
@@ -883,4 +904,56 @@ func indexByte(s string, b byte) int {
 		}
 	}
 	return -1
+}
+
+// SectionRef is the lease ref a section of a repository is held under.
+func SectionRef(name string) string { return "section/" + name }
+
+// leaseSections takes the section leases a unit needs, in one order for every
+// taker so two units cannot deadlock over two sections. It returns a release
+// for what it holds; a non-empty busy names the section somebody else holds,
+// and who, and means nothing is held. An error names a section the plan and
+// the repository disagree about.
+func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release func(), busy string, err error) {
+	for _, n := range item.Sections {
+		if _, ok := l.Repo.Section(n); !ok {
+			return nil, "", fmt.Errorf("section %q is not declared by repository %s (declared: %v) — the plan and the repository disagree about where this unit works",
+				n, l.Repo.Name, l.Repo.SectionNames())
+		}
+	}
+	names := item.Sections
+	if len(names) == 0 {
+		names = l.Repo.SectionNames() // the whole repository is every section
+	}
+	if len(names) == 0 {
+		return func() {}, "", nil
+	}
+	names = slices.Clone(names)
+	slices.Sort(names)
+	leaser := l.Store.Leaser(l.Runner)
+	var held []forge.Lease
+	release = func() {
+		for _, h := range held {
+			leaser.Release(ctx, h)
+		}
+	}
+	for _, n := range names {
+		lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+			Tenant: item.Tenant, Repo: l.Repo.Name, Ref: SectionRef(n), Run: item.ID, TTL: l.TTL,
+		})
+		if errors.Is(err, forge.ErrHeld) {
+			holder := ""
+			if cur, ok, ierr := leaser.Inspect(ctx, item.Tenant, l.Repo.Name, SectionRef(n)); ierr == nil && ok {
+				holder = " by " + cur.Run
+			}
+			release()
+			return nil, fmt.Sprintf("section %s of %s is held%s", n, l.Repo.Name, holder), nil
+		}
+		if err != nil {
+			release()
+			return nil, "", err
+		}
+		held = append(held, lease)
+	}
+	return release, "", nil
 }

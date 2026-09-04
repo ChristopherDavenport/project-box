@@ -60,3 +60,6 @@ section your change touches, by heading:
 - Commit; never push. Landing is the factory's job. If the issue is a
   question, a decision, or already satisfied, escalate with the reason rather
   than inventing a change.
+- If your prompt names a section, stay in its paths and run its check while
+  iterating; the full check runs at the gate. A change that needs another
+  section is a change to the plan: escalate and say which section.

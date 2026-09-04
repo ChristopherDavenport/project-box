@@ -93,3 +93,30 @@ func TestDogfoodDeclaresItsModel(t *testing.T) {
 		t.Error("no model: the builders would run whatever ~/.claude says, and the record would not say what that was")
 	}
 }
+
+// TestDogfoodExpressesWorkInSections: the dogfood is where fan-out and
+// scoping are measured, so it declares where its own work is expressed and
+// plans every issue by judgement. The section list is free to move; the
+// mechanism being exercised is not.
+func TestDogfoodExpressesWorkInSections(t *testing.T) {
+	c, err := Load(dogfoodConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bx := c.Boxes[0]
+	if len(bx.Repos[0].Sections) < 3 {
+		t.Errorf("sections = %d: the dogfood exists to run units side by side, and one region cannot", len(bx.Repos[0].Sections))
+	}
+	planned := false
+	for _, k := range bx.Kinds {
+		if k.Name == "issue" && k.Decompose.Decomposer == "planner" {
+			planned = true
+		}
+	}
+	if !planned {
+		t.Error("issues are not planned by judgement: every unit would be the whole repository on one tier")
+	}
+	if _, ok := bx.Roles["planner"]; !ok {
+		t.Error("no planner tier: the dial to raise first when plans come back wrong is not on the record")
+	}
+}
