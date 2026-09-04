@@ -135,6 +135,15 @@ func (c *Client) Provenance(ctx context.Context, sha string) ([]evidence.Record,
 	return out, c.do(ctx, "GET", "/v1/provenance/"+sha, nil, &out)
 }
 
+// ProvenanceChain is the audit query assembled: every span verified, every
+// gap named. What `box provenance` prints, so the CLI and the room read the
+// same facts — a fact one reader has and another does not is worse than one
+// nobody has.
+func (c *Client) ProvenanceChain(ctx context.Context, sha string) (ProvenanceView, error) {
+	var out ProvenanceView
+	return out, c.do(ctx, "GET", "/v1/provenance/"+sha+"/chain", nil, &out)
+}
+
 // OpenIngress is the delegation verb.
 func (c *Client) OpenIngress(ctx context.Context, route, key, payload string) (OpenIngressResponse, error) {
 	var out OpenIngressResponse

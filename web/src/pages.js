@@ -3,10 +3,11 @@
 // agent saying, what needs a person, what happened to this unit, what is
 // recorded about this commit, and how do I hand it more work.
 import { LitElement, html, css, nothing } from 'lit';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { Task } from '@lit/task';
 import {
-  getStatus, getItems, getExceptions, getItem, getItemEvidence, getProvenance, getSessions, getSession,
-  openIngress, reload, retryItem, resolveItem,
+  getStatus, getItems, getExceptions, getItem, getItemEvidence, getProvenanceChain, provenanceExportURL,
+  getSessions, getSession, openIngress, reload, retryItem, resolveItem,
 } from './api.js';
 import { ActivityController } from './sse.js';
 import {
@@ -757,46 +758,92 @@ export class BoxItem extends LitElement {
 }
 customElements.define('box-item', BoxItem);
 
-/** Provenance: the audit query — everything recorded about one commit. */
+/** Provenance: the audit query — the chain one commit is a link of, every
+ *  span verified, every gap named. The ordered list is the representation of
+ *  record; the diagram arrives from the server already laid out (the browser
+ *  renders, it does not lay out) and sits on top, hidden from screen
+ *  readers. The export link is the same chain as one self-contained file. */
 export class BoxProvenance extends LitElement {
   static properties = { sha: { attribute: false } };
   static styles = [base, css`
     :host { display: block; }
     .sha { margin: 0 0 var(--jh-space-300); }
+    .diagram { overflow-x: auto; margin: var(--jh-space-300) 0; color: var(--jh-color-content-primary-enabled); }
+    .gap { margin-bottom: var(--jh-space-300); }
+    .span { margin: var(--jh-space-400) 0 0; }
+    .span h3 { margin: 0 0 var(--jh-space-100); font: var(--jh-font-body-md-semibold); }
+    .verify { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .verify.broken { color: var(--jh-color-content-danger-enabled); font-weight: 600; }
+    .worm { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
     ol { list-style: none; margin: 0; padding: 0; }
     li { display: grid; grid-template-columns: minmax(92px, max-content) 1fr max-content; gap: var(--jh-space-300);
          align-items: baseline; padding: var(--jh-space-200) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    li.context { opacity: 0.65; }
     .by { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
     .t { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); white-space: nowrap; }
+    .actions { margin-top: var(--jh-space-400); }
   `];
   _task = new Task(this, {
-    task: async ([sha], { signal }) => (sha ? getProvenance(sha, signal) : []),
+    task: async ([sha], { signal }) => (sha ? getProvenanceChain(sha, signal) : null),
     args: () => [this.sha],
   });
 
+  // The whole span, exactly as the export shows it: a chain proves nothing
+  // from the middle, so the surrounding records render too, muted — the
+  // links naming the commit carry the weight.
+  _span(span) {
+    const named = new Set(span.names ?? []);
+    return html`
+      <section class="span">
+        <h3>${span.scope}</h3>
+        ${span.verify
+          ? html`<p class="verify broken">Chain broken: ${span.verify}</p>`
+          : span.whole
+            ? html`<p class="verify">${span.total} record(s) — chain verifies end to end.</p>`
+            : html`<p class="verify">Standing scope — ${span.total} record(s) verify; showing the ${span.records?.length ?? 0} naming this commit.</p>`}
+        ${span.compacted ? html`<p class="worm">Crosses into WORM: records ${span.compacted.from}–${span.compacted.through} at ${span.compacted.export?.uri}${span.compacted.export?.retain_until && span.compacted.export.retain_until !== '0001-01-01T00:00:00Z' ? html`, retention locked until <box-when .at=${span.compacted.export.retain_until} abs></box-when>` : ', no retention lock (local sink)'}</p>` : nothing}
+        <ol aria-label=${`Records in ${span.scope}`}>
+          ${(span.records ?? []).map((r) => {
+            const item = itemOf(r);
+            return html`
+              <li class=${named.has(r.Seq) ? '' : 'context'}>
+                ${kindTag(r.Kind)}
+                <div>
+                  <div>${describe(r)}${item ? html` · <a href=${'/items/' + item}>open the item</a>` : nothing}</div>
+                  <div class="by">${r.Actor}${r.OnBehalfOf ? ` for ${r.OnBehalfOf}` : ''} · ${r.Scope} #${r.Seq}${named.has(r.Seq) ? ' · names this commit' : ''}</div>
+                </div>
+                <span class="t"><box-when .at=${r.At}></box-when></span>
+              </li>`;
+          })}
+        </ol>
+      </section>`;
+  }
+
   render() {
     return html`
-      <jh-card header-title="Provenance" header-subtitle="Everything recorded about one commit, across every chain that names it" padding="medium">
+      <jh-card header-title="Provenance" header-subtitle="The chain this commit is a link of — every span verified, every gap named" padding="medium">
         <p class="sha">Commit <box-hash label="commit" .value=${this.sha} chars="16"></box-hash></p>
         ${this._task.render({
           pending: () => loading('provenance'),
           error: failed,
-          complete: (recs) => (recs?.length ?? 0) === 0
-            ? html`<p class="empty">Nothing is recorded about this commit. Either it did not come through this factory, or it has not landed yet.</p>`
-            : html`<ol aria-label="Provenance records">
-                ${recs.map((r) => {
-                  const item = itemOf(r);
-                  return html`
-                    <li>
-                      ${kindTag(r.Kind)}
-                      <div>
-                        <div>${describe(r)}${item ? html` · <a href=${'/items/' + item}>open the item</a>` : nothing}</div>
-                        <div class="by">${r.Actor} · ${r.Scope} #${r.Seq}</div>
-                      </div>
-                      <span class="t"><box-when .at=${r.At}></box-when></span>
-                    </li>`;
-                })}
-              </ol>`,
+          complete: (view) => {
+            const chain = view?.chain ?? {};
+            if ((chain.spans?.length ?? 0) === 0) {
+              return html`<p class="empty">Nothing is recorded about this commit. Either it did not come through this factory, or it has not landed yet.</p>`;
+            }
+            return html`
+              ${(chain.gaps ?? []).map((g) => html`
+                <jh-notification class="gap" appearance="negative" type="alert" hide-dismiss-button>
+                  <strong>Missing ${g.link}</strong> — ${g.why}
+                </jh-notification>`)}
+              ${view.svg ? html`<div class="diagram" aria-hidden="true">${unsafeHTML(view.svg)}</div>` : nothing}
+              ${chain.spans.map((s) => this._span(s))}
+              <div class="actions">
+                <jh-button appearance="secondary" size="small" label="Evidence artifact"
+                  href=${provenanceExportURL(this.sha)} target="_blank"></jh-button>
+                <span class="helper">One self-contained file: the same chain with its full records, verifiable offline — save it to hand an auditor complete evidence.</span>
+              </div>`;
+          },
         })}
       </jh-card>`;
   }

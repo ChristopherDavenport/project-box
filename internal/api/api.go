@@ -118,6 +118,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/items/{id}/session", s.session)
 	mux.HandleFunc("GET /v1/sessions", s.sessions)
 	mux.HandleFunc("GET /v1/provenance/{sha}", s.provenance)
+	mux.HandleFunc("GET /v1/provenance/{sha}/chain", s.provenanceChain)
+	mux.HandleFunc("GET /v1/provenance/{sha}/export", s.provenanceExport)
 	mux.HandleFunc("GET /v1/activity", s.activity)
 	mux.HandleFunc("GET /v1/events", s.events)
 	mux.HandleFunc("POST /v1/ingress", s.openIngress)
