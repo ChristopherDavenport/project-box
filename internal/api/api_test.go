@@ -225,6 +225,12 @@ func TestDelegateOverTheWire(t *testing.T) {
 	if err := c.Stop(ctx, "investigating"); err != nil {
 		t.Fatal(err)
 	}
+	// And the stop is a fact with a name on it, not a bit: the room shows
+	// who pressed it and why without a trip through the activity feed.
+	st, err = c.Status(ctx)
+	if err != nil || !st.Stopped || !st.Claims.Stopped || st.Claims.Reason != "investigating" || st.Claims.Actor != "chris" || st.Claims.At.IsZero() {
+		t.Fatalf("status after stop should carry the record: %+v %v", st.Claims, err)
+	}
 	if _, err := c.OpenIngress(ctx, "issues", "issue-10", "more work"); err != nil {
 		t.Fatal(err) // intent is still writable...
 	}

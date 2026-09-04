@@ -12,6 +12,18 @@ export function bootstrapToken() {
   }
 }
 
+/** ApiError carries the server's machine code beside its message, so a view
+ *  can match `code` — the contract — and show `message` — the prose. */
+export class ApiError extends Error {
+  constructor(message, { status, code, method, path } = {}) {
+    super(message);
+    this.status = status;
+    this.code = code ?? 'internal';
+    this.method = method;
+    this.path = path;
+  }
+}
+
 async function req(method, path, body) {
   const res = await fetch(path, {
     method,
@@ -21,8 +33,28 @@ async function req(method, path, body) {
   });
   if (!res.ok) {
     let msg = `${method} ${path}: ${res.status}`;
-    try { msg = (await res.json()).error ?? msg; } catch { /* keep status text */ }
-    throw new Error(msg);
+    let code;
+    try {
+      const e = await res.json();
+      msg = e.error ?? msg;
+      code = e.code;
+    } catch { /* keep status text */ }
+    throw new ApiError(msg, { status: res.status, code, method, path });
+  }
+  return res.json();
+}
+
+async function fetchJSON(path, signal) {
+  const res = await fetch(path, { signal, credentials: 'same-origin' });
+  if (!res.ok) {
+    let msg = `${path}: ${res.status}`;
+    let code;
+    try {
+      const e = await res.json();
+      msg = e.error ?? msg;
+      code = e.code;
+    } catch { /* keep status text */ }
+    throw new ApiError(msg, { status: res.status, code, method: 'GET', path });
   }
   return res.json();
 }
@@ -37,13 +69,12 @@ export const getProvenance = (sha, signal) => fetchJSON(`/v1/provenance/${encode
 export const getActivity = (signal) => fetchJSON('/v1/activity', signal);
 export const getSessions = (signal) => fetchJSON('/v1/sessions', signal);
 export const getSession = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/session`, signal);
+
+// The verbs. Every one that changes the factory carries a reason, because
+// every one becomes a record and a record needs one.
 export const openIngress = (route, key, payload) => req('POST', '/v1/ingress', { route, key, payload });
 export const stop = (reason) => req('POST', '/v1/stop', { reason });
 export const resume = (reason) => req('POST', '/v1/resume', { reason });
+export const resolveItem = (id, reason) => req('POST', `/v1/items/${encodeURIComponent(id)}/resolve`, { reason });
+export const retryItem = (id, reason) => req('POST', `/v1/items/${encodeURIComponent(id)}/retry`, { reason });
 export const reload = () => req('POST', '/v1/reload', {});
-
-async function fetchJSON(path, signal) {
-  const res = await fetch(path, { signal, credentials: 'same-origin' });
-  if (!res.ok) throw new Error(`${path}: ${res.status}`);
-  return res.json();
-}

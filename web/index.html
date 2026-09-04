@@ -3,13 +3,36 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Box Control Room</title>
+  <meta name="color-scheme" content="light dark">
+  <title>Box control room</title>
+  <!-- jh-core ships the light tokens on :root and the dark tokens on
+       .jh-theme-dark, so both sheets load and a class on <html> is the
+       switch. Loading the dark sheet under a media query, as this page once
+       did, applied nothing: the class was never set anywhere. -->
   <link rel="stylesheet" href="/jh-theme-light.css">
-  <link rel="stylesheet" href="/jh-theme-dark.css" media="(prefers-color-scheme: dark)">
+  <link rel="stylesheet" href="/jh-theme-dark.css">
+  <script>
+    // The theme before first paint, so a dark-mode reader never sees a white
+    // flash. The choice is per browser (localStorage); "system" follows
+    // prefers-color-scheme. src/theme.js owns this once the app is up.
+    (function () {
+      var t = 'system';
+      try { t = localStorage.getItem('box-theme') || 'system'; } catch (e) {}
+      var dark = t === 'dark' || (t !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches);
+      document.documentElement.classList.toggle('jh-theme-dark', dark);
+      document.documentElement.style.colorScheme = dark ? 'dark' : 'light';
+    })();
+  </script>
   <style>
-    body { margin: 0; background: var(--jh-color-container-primary-enabled, #fff);
-           color: var(--jh-color-content-primary-enabled, #111);
-           font-family: system-ui, sans-serif; }
+    html { background: var(--jh-color-container-page, #f3f4f6); }
+    body {
+      margin: 0;
+      background: var(--jh-color-container-page, #f3f4f6);
+      color: var(--jh-color-content-primary-enabled, #111);
+      font: var(--jh-font-body-regular-1, 400 14px/20px system-ui, sans-serif);
+    }
+    box-app:not(:defined) { display: block; padding: 24px; color: var(--jh-color-content-secondary-enabled, #555); }
+    box-app:not(:defined)::before { content: 'Loading the control room…'; }
   </style>
   <script type="module" src="/app.js"></script>
 </head>

@@ -1,6 +1,50 @@
 import { getActivity } from './api.js';
 
-// ActivityController: a reactive controller owning the SSE subscription —
+// One EventSource for the factory feed, shared by every subscriber on the
+// page. The header's live indicator, the claims strip and the view all want
+// the same stream; opening one connection each spent the browser's per-origin
+// budget on copies of a feed that is identical by definition.
+//
+// Item-scoped subscriptions stay their own connection: the server filters
+// them, and on a busy daemon the difference is between a stream a card
+// renders and one it discards.
+const feed = { es: null, subs: new Set(), connected: false };
+
+function open() {
+  feed.es = new EventSource('/v1/events');
+  feed.es.addEventListener('hello', () => {
+    feed.connected = true;
+    for (const s of feed.subs) s.onState?.(true);
+  });
+  feed.es.addEventListener('session', (e) => {
+    const f = JSON.parse(e.data);
+    for (const s of feed.subs) s.onSession?.(f);
+  });
+  feed.es.addEventListener('activity', (e) => {
+    const a = JSON.parse(e.data);
+    for (const s of feed.subs) s.onEvent?.(a);
+  });
+  feed.es.onerror = () => {
+    feed.connected = false;
+    for (const s of feed.subs) s.onState?.(false);
+  };
+}
+
+function subscribe(sub) {
+  feed.subs.add(sub);
+  if (!feed.es) open();
+  else sub.onState?.(feed.connected);
+  return () => {
+    feed.subs.delete(sub);
+    if (feed.subs.size === 0) {
+      feed.es?.close();
+      feed.es = null;
+      feed.connected = false;
+    }
+  };
+}
+
+// ActivityController: a reactive controller owning a subscription —
 // lifecycle-aware setup and teardown, per the Lit controller pattern for
 // ongoing resources.
 export class ActivityController {
@@ -9,8 +53,7 @@ export class ActivityController {
 
   // onEvent fires for every activity record as it lands, so a view that
   // renders derived state — the queue, one item's timeline — can refresh
-  // itself instead of making the operator reload the page to see the factory
-  // move.
+  // itself instead of making the operator reload the page.
   //
   // onSession fires for the other half: the frames a running agent is
   // producing right now. They arrive on their own event name because they are
@@ -18,9 +61,7 @@ export class ActivityController {
   // record is on the chain and will be there tomorrow, a session frame is a
   // window on a run and is gone when it rolls.
   //
-  // `item` scopes the whole subscription to one unit, server-side. A card
-  // following one run has no use for the factory's feed, and on a busy daemon
-  // the difference is between a stream a page renders and one it discards.
+  // `item` scopes the whole subscription to one unit, server-side.
   constructor(host, { limit = 100, onEvent, onSession, item } = {}) {
     this._host = host;
     this._limit = limit;
@@ -31,35 +72,37 @@ export class ActivityController {
   }
 
   hostConnected() {
-    if (!this._item) {
+    const sub = {
+      onState: (up) => { this.connected = up; this._host.requestUpdate(); },
+      onSession: (f) => this._onSession?.(f),
+      onEvent: (a) => {
+        // New reference, never a mutation: Lit change detection is `!==`.
+        this.events = [...this.events, a].slice(-this._limit);
+        this._host.requestUpdate();
+        this._onEvent?.(a);
+      },
+    };
+    if (this._item) {
+      this._es = new EventSource(`/v1/events?item=${encodeURIComponent(this._item)}`);
+      this._es.addEventListener('hello', () => sub.onState(true));
+      this._es.addEventListener('session', (e) => sub.onSession(JSON.parse(e.data)));
+      this._es.addEventListener('activity', (e) => sub.onEvent(JSON.parse(e.data)));
+      this._es.onerror = () => sub.onState(false);
+      return;
+    }
+    if (this._limit > 1) {
       getActivity().then((initial) => {
         this.events = (initial ?? []).slice(-this._limit);
         this._host.requestUpdate();
       }).catch(() => { /* the stream below still tells the story */ });
     }
-    this._es = new EventSource(this._item ? `/v1/events?item=${encodeURIComponent(this._item)}` : '/v1/events');
-    this._es.addEventListener('hello', () => {
-      this.connected = true;
-      this._host.requestUpdate();
-    });
-    this._es.addEventListener('session', (e) => {
-      this._onSession?.(JSON.parse(e.data));
-    });
-    this._es.addEventListener('activity', (e) => {
-      const a = JSON.parse(e.data);
-      // New reference, never a mutation: Lit change detection is `!==`.
-      this.events = [...this.events, a].slice(-this._limit);
-      this._host.requestUpdate();
-      this._onEvent?.(a);
-    });
-    this._es.onerror = () => {
-      this.connected = false;
-      this._host.requestUpdate();
-    };
+    this._unsub = subscribe(sub);
   }
 
   hostDisconnected() {
     this._es?.close();
     this._es = undefined;
+    this._unsub?.();
+    this._unsub = undefined;
   }
 }

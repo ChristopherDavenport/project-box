@@ -1,8 +1,82 @@
-var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeShadow)&&"adoptedStyleSheets"in Document.prototype&&"replace"in CSSStyleSheet.prototype,Gt=Symbol(),jo=new WeakMap,at=class{constructor(t,e,o){if(this._$cssResult$=!0,o!==Gt)throw Error("CSSResult is not constructable. Use `unsafeCSS` or `css` instead.");this.cssText=t,this.t=e}get styleSheet(){let t=this.o,e=this.t;if(zt&&t===void 0){let o=e!==void 0&&e.length===1;o&&(t=jo.get(e)),t===void 0&&((this.o=t=new CSSStyleSheet).replaceSync(this.cssText),o&&jo.set(e,t))}return t}toString(){return this.cssText}},$o=r=>new at(typeof r=="string"?r:r+"",void 0,Gt),A=(r,...t)=>{let e=r.length===1?r[0]:t.reduce((o,i,s)=>o+(a=>{if(a._$cssResult$===!0)return a.cssText;if(typeof a=="number")return a;throw Error("Value passed to 'css' function must be a 'css' function result: "+a+". Use 'unsafeCSS' to pass non-literal values, but take care to ensure page security.")})(i)+r[s+1],r[0]);return new at(e,r,Gt)},xo=(r,t)=>{if(zt)r.adoptedStyleSheets=t.map(e=>e instanceof CSSStyleSheet?e:e.styleSheet);else for(let e of t){let o=document.createElement("style"),i=Et.litNonce;i!==void 0&&o.setAttribute("nonce",i),o.textContent=e.cssText,r.appendChild(o)}},Yt=zt?r=>r:r=>r instanceof CSSStyleSheet?(t=>{let e="";for(let o of t.cssRules)e+=o.cssText;return $o(e)})(r):r;var{is:Br,defineProperty:qr,getOwnPropertyDescriptor:Vr,getOwnPropertyNames:Wr,getOwnPropertySymbols:Kr,getPrototypeOf:Fr}=Object,Ct=globalThis,_o=Ct.trustedTypes,Zr=_o?_o.emptyScript:"",Gr=Ct.reactiveElementPolyfillSupport,nt=(r,t)=>r,Qt={toAttribute(r,t){switch(t){case Boolean:r=r?Zr:null;break;case Object:case Array:r=r==null?r:JSON.stringify(r)}return r},fromAttribute(r,t){let e=r;switch(t){case Boolean:e=r!==null;break;case Number:e=r===null?null:Number(r);break;case Object:case Array:try{e=JSON.parse(r)}catch{e=null}}return e}},Tt=(r,t)=>!Br(r,t),wo={attribute:!0,type:String,converter:Qt,reflect:!1,useDefault:!1,hasChanged:Tt};Symbol.metadata??=Symbol("metadata"),Ct.litPropertyMetadata??=new WeakMap;var T=class extends HTMLElement{static addInitializer(t){this._$Ei(),(this.l??=[]).push(t)}static get observedAttributes(){return this.finalize(),this._$Eh&&[...this._$Eh.keys()]}static createProperty(t,e=wo){if(e.state&&(e.attribute=!1),this._$Ei(),this.prototype.hasOwnProperty(t)&&((e=Object.create(e)).wrapped=!0),this.elementProperties.set(t,e),!e.noAccessor){let o=Symbol(),i=this.getPropertyDescriptor(t,o,e);i!==void 0&&qr(this.prototype,t,i)}}static getPropertyDescriptor(t,e,o){let{get:i,set:s}=Vr(this.prototype,t)??{get(){return this[e]},set(a){this[e]=a}};return{get:i,set(a){let c=i?.call(this);s?.call(this,a),this.requestUpdate(t,c,o)},configurable:!0,enumerable:!0}}static getPropertyOptions(t){return this.elementProperties.get(t)??wo}static _$Ei(){if(this.hasOwnProperty(nt("elementProperties")))return;let t=Fr(this);t.finalize(),t.l!==void 0&&(this.l=[...t.l]),this.elementProperties=new Map(t.elementProperties)}static finalize(){if(this.hasOwnProperty(nt("finalized")))return;if(this.finalized=!0,this._$Ei(),this.hasOwnProperty(nt("properties"))){let e=this.properties,o=[...Wr(e),...Kr(e)];for(let i of o)this.createProperty(i,e[i])}let t=this[Symbol.metadata];if(t!==null){let e=litPropertyMetadata.get(t);if(e!==void 0)for(let[o,i]of e)this.elementProperties.set(o,i)}this._$Eh=new Map;for(let[e,o]of this.elementProperties){let i=this._$Eu(e,o);i!==void 0&&this._$Eh.set(i,e)}this.elementStyles=this.finalizeStyles(this.styles)}static finalizeStyles(t){let e=[];if(Array.isArray(t)){let o=new Set(t.flat(1/0).reverse());for(let i of o)e.unshift(Yt(i))}else t!==void 0&&e.push(Yt(t));return e}static _$Eu(t,e){let o=e.attribute;return o===!1?void 0:typeof o=="string"?o:typeof t=="string"?t.toLowerCase():void 0}constructor(){super(),this._$Ep=void 0,this.isUpdatePending=!1,this.hasUpdated=!1,this._$Em=null,this._$Ev()}_$Ev(){this._$ES=new Promise(t=>this.enableUpdating=t),this._$AL=new Map,this._$E_(),this.requestUpdate(),this.constructor.l?.forEach(t=>t(this))}addController(t){(this._$EO??=new Set).add(t),this.renderRoot!==void 0&&this.isConnected&&t.hostConnected?.()}removeController(t){this._$EO?.delete(t)}_$E_(){let t=new Map,e=this.constructor.elementProperties;for(let o of e.keys())this.hasOwnProperty(o)&&(t.set(o,this[o]),delete this[o]);t.size>0&&(this._$Ep=t)}createRenderRoot(){let t=this.shadowRoot??this.attachShadow(this.constructor.shadowRootOptions);return xo(t,this.constructor.elementStyles),t}connectedCallback(){this.renderRoot??=this.createRenderRoot(),this.enableUpdating(!0),this._$EO?.forEach(t=>t.hostConnected?.())}enableUpdating(t){}disconnectedCallback(){this._$EO?.forEach(t=>t.hostDisconnected?.())}attributeChangedCallback(t,e,o){this._$AK(t,o)}_$ET(t,e){let o=this.constructor.elementProperties.get(t),i=this.constructor._$Eu(t,o);if(i!==void 0&&o.reflect===!0){let s=(o.converter?.toAttribute!==void 0?o.converter:Qt).toAttribute(e,o.type);this._$Em=t,s==null?this.removeAttribute(i):this.setAttribute(i,s),this._$Em=null}}_$AK(t,e){let o=this.constructor,i=o._$Eh.get(t);if(i!==void 0&&this._$Em!==i){let s=o.getPropertyOptions(i),a=typeof s.converter=="function"?{fromAttribute:s.converter}:s.converter?.fromAttribute!==void 0?s.converter:Qt;this._$Em=i;let c=a.fromAttribute(e,s.type);this[i]=c??this._$Ej?.get(i)??c,this._$Em=null}}requestUpdate(t,e,o,i=!1,s){if(t!==void 0){let a=this.constructor;if(i===!1&&(s=this[t]),o??=a.getPropertyOptions(t),!((o.hasChanged??Tt)(s,e)||o.useDefault&&o.reflect&&s===this._$Ej?.get(t)&&!this.hasAttribute(a._$Eu(t,o))))return;this.C(t,e,o)}this.isUpdatePending===!1&&(this._$ES=this._$EP())}C(t,e,{useDefault:o,reflect:i,wrapped:s},a){o&&!(this._$Ej??=new Map).has(t)&&(this._$Ej.set(t,a??e??this[t]),s!==!0||a!==void 0)||(this._$AL.has(t)||(this.hasUpdated||o||(e=void 0),this._$AL.set(t,e)),i===!0&&this._$Em!==t&&(this._$Eq??=new Set).add(t))}async _$EP(){this.isUpdatePending=!0;try{await this._$ES}catch(e){Promise.reject(e)}let t=this.scheduleUpdate();return t!=null&&await t,!this.isUpdatePending}scheduleUpdate(){return this.performUpdate()}performUpdate(){if(!this.isUpdatePending)return;if(!this.hasUpdated){if(this.renderRoot??=this.createRenderRoot(),this._$Ep){for(let[i,s]of this._$Ep)this[i]=s;this._$Ep=void 0}let o=this.constructor.elementProperties;if(o.size>0)for(let[i,s]of o){let{wrapped:a}=s,c=this[i];a!==!0||this._$AL.has(i)||c===void 0||this.C(i,void 0,s,c)}}let t=!1,e=this._$AL;try{t=this.shouldUpdate(e),t?(this.willUpdate(e),this._$EO?.forEach(o=>o.hostUpdate?.()),this.update(e)):this._$EM()}catch(o){throw t=!1,this._$EM(),o}t&&this._$AE(e)}willUpdate(t){}_$AE(t){this._$EO?.forEach(e=>e.hostUpdated?.()),this.hasUpdated||(this.hasUpdated=!0,this.firstUpdated(t)),this.updated(t)}_$EM(){this._$AL=new Map,this.isUpdatePending=!1}get updateComplete(){return this.getUpdateComplete()}getUpdateComplete(){return this._$ES}shouldUpdate(t){return!0}update(t){this._$Eq&&=this._$Eq.forEach(e=>this._$ET(e,this[e])),this._$EM()}updated(t){}firstUpdated(t){}};T.elementStyles=[],T.shadowRootOptions={mode:"open"},T[nt("elementProperties")]=new Map,T[nt("finalized")]=new Map,Gr?.({ReactiveElement:T}),(Ct.reactiveElementVersions??=[]).push("2.1.2");var ie=globalThis,ko=r=>r,Lt=ie.trustedTypes,Ao=Lt?Lt.createPolicy("lit-html",{createHTML:r=>r}):void 0,Lo="$lit$",R=`lit$${Math.random().toFixed(9).slice(2)}$`,Po="?"+R,Yr=`<${Po}>`,M=document,ht=()=>M.createComment(""),ct=r=>r===null||typeof r!="object"&&typeof r!="function",se=Array.isArray,Qr=r=>se(r)||typeof r?.[Symbol.iterator]=="function",Xt=`[ 	
-\f\r]`,lt=/<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g,So=/-->/g,Eo=/>/g,H=RegExp(`>|${Xt}(?:([^\\s"'>=/]+)(${Xt}*=${Xt}*(?:[^ 	
-\f\r"'\`<>=]|("|')|))|$)`,"g"),zo=/'/g,Co=/"/g,Ro=/^(?:script|style|textarea|title)$/i,ae=r=>(t,...e)=>({_$litType$:r,strings:t,values:e}),h=ae(1),zi=ae(2),Ci=ae(3),I=Symbol.for("lit-noChange"),g=Symbol.for("lit-nothing"),To=new WeakMap,D=M.createTreeWalker(M,129);function Uo(r,t){if(!se(r)||!r.hasOwnProperty("raw"))throw Error("invalid template strings array");return Ao!==void 0?Ao.createHTML(t):t}var Xr=(r,t)=>{let e=r.length-1,o=[],i,s=t===2?"<svg>":t===3?"<math>":"",a=lt;for(let c=0;c<e;c++){let n=r[c],l,u,p=-1,v=0;for(;v<n.length&&(a.lastIndex=v,u=a.exec(n),u!==null);)v=a.lastIndex,a===lt?u[1]==="!--"?a=So:u[1]!==void 0?a=Eo:u[2]!==void 0?(Ro.test(u[2])&&(i=RegExp("</"+u[2],"g")),a=H):u[3]!==void 0&&(a=H):a===H?u[0]===">"?(a=i??lt,p=-1):u[1]===void 0?p=-2:(p=a.lastIndex-u[2].length,l=u[1],a=u[3]===void 0?H:u[3]==='"'?Co:zo):a===Co||a===zo?a=H:a===So||a===Eo?a=lt:(a=H,i=void 0);let m=a===H&&r[c+1].startsWith("/>")?" ":"";s+=a===lt?n+Yr:p>=0?(o.push(l),n.slice(0,p)+Lo+n.slice(p)+R+m):n+R+(p===-2?c:m)}return[Uo(r,s+(r[e]||"<?>")+(t===2?"</svg>":t===3?"</math>":"")),o]},dt=class r{constructor({strings:t,_$litType$:e},o){let i;this.parts=[];let s=0,a=0,c=t.length-1,n=this.parts,[l,u]=Xr(t,e);if(this.el=r.createElement(l,o),D.currentNode=this.el.content,e===2||e===3){let p=this.el.content.firstChild;p.replaceWith(...p.childNodes)}for(;(i=D.nextNode())!==null&&n.length<c;){if(i.nodeType===1){if(i.hasAttributes())for(let p of i.getAttributeNames())if(p.endsWith(Lo)){let v=u[a++],m=i.getAttribute(p).split(R),k=/([.?@])?(.*)/.exec(v);n.push({type:1,index:s,name:k[2],strings:m,ctor:k[1]==="."?te:k[1]==="?"?ee:k[1]==="@"?oe:X}),i.removeAttribute(p)}else p.startsWith(R)&&(n.push({type:6,index:s}),i.removeAttribute(p));if(Ro.test(i.tagName)){let p=i.textContent.split(R),v=p.length-1;if(v>0){i.textContent=Lt?Lt.emptyScript:"";for(let m=0;m<v;m++)i.append(p[m],ht()),D.nextNode(),n.push({type:2,index:++s});i.append(p[v],ht())}}}else if(i.nodeType===8)if(i.data===Po)n.push({type:2,index:s});else{let p=-1;for(;(p=i.data.indexOf(R,p+1))!==-1;)n.push({type:7,index:s}),p+=R.length-1}s++}}static createElement(t,e){let o=M.createElement("template");return o.innerHTML=t,o}};function Q(r,t,e=r,o){if(t===I)return t;let i=o!==void 0?e._$Co?.[o]:e._$Cl,s=ct(t)?void 0:t._$litDirective$;return i?.constructor!==s&&(i?._$AO?.(!1),s===void 0?i=void 0:(i=new s(r),i._$AT(r,e,o)),o!==void 0?(e._$Co??=[])[o]=i:e._$Cl=i),i!==void 0&&(t=Q(r,i._$AS(r,t.values),i,o)),t}var Jt=class{constructor(t,e){this._$AV=[],this._$AN=void 0,this._$AD=t,this._$AM=e}get parentNode(){return this._$AM.parentNode}get _$AU(){return this._$AM._$AU}u(t){let{el:{content:e},parts:o}=this._$AD,i=(t?.creationScope??M).importNode(e,!0);D.currentNode=i;let s=D.nextNode(),a=0,c=0,n=o[0];for(;n!==void 0;){if(a===n.index){let l;n.type===2?l=new pt(s,s.nextSibling,this,t):n.type===1?l=new n.ctor(s,n.name,n.strings,this,t):n.type===6&&(l=new re(s,this,t)),this._$AV.push(l),n=o[++c]}a!==n?.index&&(s=D.nextNode(),a++)}return D.currentNode=M,i}p(t){let e=0;for(let o of this._$AV)o!==void 0&&(o.strings!==void 0?(o._$AI(t,o,e),e+=o.strings.length-2):o._$AI(t[e])),e++}},pt=class r{get _$AU(){return this._$AM?._$AU??this._$Cv}constructor(t,e,o,i){this.type=2,this._$AH=g,this._$AN=void 0,this._$AA=t,this._$AB=e,this._$AM=o,this.options=i,this._$Cv=i?.isConnected??!0}get parentNode(){let t=this._$AA.parentNode,e=this._$AM;return e!==void 0&&t?.nodeType===11&&(t=e.parentNode),t}get startNode(){return this._$AA}get endNode(){return this._$AB}_$AI(t,e=this){t=Q(this,t,e),ct(t)?t===g||t==null||t===""?(this._$AH!==g&&this._$AR(),this._$AH=g):t!==this._$AH&&t!==I&&this._(t):t._$litType$!==void 0?this.$(t):t.nodeType!==void 0?this.T(t):Qr(t)?this.k(t):this._(t)}O(t){return this._$AA.parentNode.insertBefore(t,this._$AB)}T(t){this._$AH!==t&&(this._$AR(),this._$AH=this.O(t))}_(t){this._$AH!==g&&ct(this._$AH)?this._$AA.nextSibling.data=t:this.T(M.createTextNode(t)),this._$AH=t}$(t){let{values:e,_$litType$:o}=t,i=typeof o=="number"?this._$AC(t):(o.el===void 0&&(o.el=dt.createElement(Uo(o.h,o.h[0]),this.options)),o);if(this._$AH?._$AD===i)this._$AH.p(e);else{let s=new Jt(i,this),a=s.u(this.options);s.p(e),this.T(a),this._$AH=s}}_$AC(t){let e=To.get(t.strings);return e===void 0&&To.set(t.strings,e=new dt(t)),e}k(t){se(this._$AH)||(this._$AH=[],this._$AR());let e=this._$AH,o,i=0;for(let s of t)i===e.length?e.push(o=new r(this.O(ht()),this.O(ht()),this,this.options)):o=e[i],o._$AI(s),i++;i<e.length&&(this._$AR(o&&o._$AB.nextSibling,i),e.length=i)}_$AR(t=this._$AA.nextSibling,e){for(this._$AP?.(!1,!0,e);t!==this._$AB;){let o=ko(t).nextSibling;ko(t).remove(),t=o}}setConnected(t){this._$AM===void 0&&(this._$Cv=t,this._$AP?.(t))}},X=class{get tagName(){return this.element.tagName}get _$AU(){return this._$AM._$AU}constructor(t,e,o,i,s){this.type=1,this._$AH=g,this._$AN=void 0,this.element=t,this.name=e,this._$AM=i,this.options=s,o.length>2||o[0]!==""||o[1]!==""?(this._$AH=Array(o.length-1).fill(new String),this.strings=o):this._$AH=g}_$AI(t,e=this,o,i){let s=this.strings,a=!1;if(s===void 0)t=Q(this,t,e,0),a=!ct(t)||t!==this._$AH&&t!==I,a&&(this._$AH=t);else{let c=t,n,l;for(t=s[0],n=0;n<s.length-1;n++)l=Q(this,c[o+n],e,n),l===I&&(l=this._$AH[n]),a||=!ct(l)||l!==this._$AH[n],l===g?t=g:t!==g&&(t+=(l??"")+s[n+1]),this._$AH[n]=l}a&&!i&&this.j(t)}j(t){t===g?this.element.removeAttribute(this.name):this.element.setAttribute(this.name,t??"")}},te=class extends X{constructor(){super(...arguments),this.type=3}j(t){this.element[this.name]=t===g?void 0:t}},ee=class extends X{constructor(){super(...arguments),this.type=4}j(t){this.element.toggleAttribute(this.name,!!t&&t!==g)}},oe=class extends X{constructor(t,e,o,i,s){super(t,e,o,i,s),this.type=5}_$AI(t,e=this){if((t=Q(this,t,e,0)??g)===I)return;let o=this._$AH,i=t===g&&o!==g||t.capture!==o.capture||t.once!==o.once||t.passive!==o.passive,s=t!==g&&(o===g||i);i&&this.element.removeEventListener(this.name,this,o),s&&this.element.addEventListener(this.name,this,t),this._$AH=t}handleEvent(t){typeof this._$AH=="function"?this._$AH.call(this.options?.host??this.element,t):this._$AH.handleEvent(t)}},re=class{constructor(t,e,o){this.element=t,this.type=6,this._$AN=void 0,this._$AM=e,this.options=o}get _$AU(){return this._$AM._$AU}_$AI(t){Q(this,t)}};var Jr=ie.litHtmlPolyfillSupport;Jr?.(dt,pt),(ie.litHtmlVersions??=[]).push("3.3.3");var Oo=(r,t,e)=>{let o=e?.renderBefore??t,i=o._$litPart$;if(i===void 0){let s=e?.renderBefore??null;o._$litPart$=i=new pt(t.insertBefore(ht(),s),s,void 0,e??{})}return i._$AI(r),i};var ne=globalThis,x=class extends T{constructor(){super(...arguments),this.renderOptions={host:this},this._$Do=void 0}createRenderRoot(){let t=super.createRenderRoot();return this.renderOptions.renderBefore??=t.firstChild,t}update(t){let e=this.render();this.hasUpdated||(this.renderOptions.isConnected=this.isConnected),super.update(t),this._$Do=Oo(e,this.renderRoot,this.renderOptions)}connectedCallback(){super.connectedCallback(),this._$Do?.setConnected(!0)}disconnectedCallback(){super.disconnectedCallback(),this._$Do?.setConnected(!1)}render(){return I}};x._$litElement$=!0,x.finalized=!0,ne.litElementHydrateSupport?.({LitElement:x});var ti=ne.litElementPolyfillSupport;ti?.({LitElement:x});(ne.litElementVersions??=[]).push("4.2.2");var No=new WeakMap,Ho=r=>{if((e=>e.pattern!==void 0)(r))return r.pattern;let t=No.get(r);return t===void 0&&No.set(r,t=new URLPattern({pathname:r.path})),t},ut=class{constructor(t,e,o){this.routes=[],this.o=[],this.t={},this.i=i=>{if(i.routes===this)return;let s=i.routes;this.o.push(s),s.h=this,i.stopImmediatePropagation(),i.onDisconnect=()=>{this.o?.splice(this.o.indexOf(s)>>>0,1)};let a=Do(this.t);a!==void 0&&s.goto(a)},(this.l=t).addController(this),this.routes=[...e],this.fallback=o?.fallback}link(t){if(t?.startsWith("/"))return t;if(t?.startsWith("."))throw Error("Not implemented");return t??=this.u,(this.h?.link()??"")+t}async goto(t){let e;if(this.routes.length===0&&this.fallback===void 0)e=t,this.u="",this.t={0:e};else{let o=this.p(t);if(o===void 0)throw Error("No route found for "+t);let i=Ho(o).exec({pathname:t}),s=i?.pathname.groups??{};if(e=Do(s),typeof o.enter=="function"&&await o.enter(s)===!1)return;this.v=o,this.t=s,this.u=e===void 0?t:t.substring(0,t.length-e.length)}if(e!==void 0)for(let o of this.o)o.goto(e);this.l.requestUpdate()}outlet(){return this.v?.render?.(this.t)}get params(){return this.t}p(t){let e=this.routes.find(o=>Ho(o).test({pathname:t}));return e||this.fallback===void 0?e:this.fallback?{...this.fallback,path:"/*"}:void 0}hostConnected(){this.l.addEventListener(J.eventName,this.i);let t=new J(this);this.l.dispatchEvent(t),this._=t.onDisconnect}hostDisconnected(){this._?.(),this.h=void 0}},Do=r=>{let t;for(let e of Object.keys(r))/\d+/.test(e)&&(t===void 0||e>t)&&(t=e);return t&&r[t]},J=class r extends Event{constructor(t){super(r.eventName,{bubbles:!0,composed:!0,cancelable:!1}),this.routes=t}};J.eventName="lit-routes-connected";var ei=location.origin||location.protocol+"//"+location.host,bt=class extends ut{constructor(){super(...arguments),this.m=t=>{let e=t.button!==0||t.metaKey||t.ctrlKey||t.shiftKey;if(t.defaultPrevented||e)return;let o=t.composedPath().find(a=>a.tagName==="A");if(o===void 0||o.target!==""||o.hasAttribute("download")||o.getAttribute("rel")==="external")return;let i=o.href;if(i===""||i.startsWith("mailto:"))return;let s=window.location;o.origin===ei&&(t.preventDefault(),i!==s.href&&(window.history.pushState({},"",i),this.goto(o.pathname)))},this.R=t=>{this.goto(window.location.pathname)}}hostConnected(){super.hostConnected(),window.addEventListener("click",this.m),window.addEventListener("popstate",this.R),this.goto(window.location.pathname)}hostDisconnected(){super.hostDisconnected(),window.removeEventListener("click",this.m),window.removeEventListener("popstate",this.R)}};function Mo(){let r=new URL(location.href),t=r.searchParams.get("token");t&&(document.cookie=`box_token=${encodeURIComponent(t)}; path=/; SameSite=Strict`,r.searchParams.delete("token"),history.replaceState({},"",r.toString()))}async function le(r,t,e){let o=await fetch(t,{method:r,headers:e?{"Content-Type":"application/json"}:void 0,body:e?JSON.stringify(e):void 0,credentials:"same-origin"});if(!o.ok){let i=`${r} ${t}: ${o.status}`;try{i=(await o.json()).error??i}catch{}throw new Error(i)}return o.json()}var he=r=>U("/v1/status",r),ce=(r,t)=>U("/v1/items"+(r?.length?`?state=${encodeURIComponent(r.join(","))}`:""),t),Io=r=>U("/v1/exceptions",r),Bo=(r,t)=>U(`/v1/items/${encodeURIComponent(r)}`,t),qo=(r,t)=>U(`/v1/items/${encodeURIComponent(r)}/evidence`,t),Vo=(r,t)=>U(`/v1/provenance/${encodeURIComponent(r)}`,t),Wo=r=>U("/v1/activity",r),Ko=r=>U("/v1/sessions",r);var Fo=(r,t,e)=>le("POST","/v1/ingress",{route:r,key:t,payload:e}),Zo=r=>le("POST","/v1/stop",{reason:r}),Go=r=>le("POST","/v1/resume",{reason:r});async function U(r,t){let e=await fetch(r,{signal:t,credentials:"same-origin"});if(!e.ok)throw new Error(`${r}: ${e.status}`);return e.json()}var Pt=window,Rt=Pt.ShadowRoot&&(Pt.ShadyCSS===void 0||Pt.ShadyCSS.nativeShadow)&&"adoptedStyleSheets"in Document.prototype&&"replace"in CSSStyleSheet.prototype,de=Symbol(),Yo=new WeakMap,vt=class{constructor(t,e,o){if(this._$cssResult$=!0,o!==de)throw Error("CSSResult is not constructable. Use `unsafeCSS` or `css` instead.");this.cssText=t,this.t=e}get styleSheet(){let t=this.o,e=this.t;if(Rt&&t===void 0){let o=e!==void 0&&e.length===1;o&&(t=Yo.get(e)),t===void 0&&((this.o=t=new CSSStyleSheet).replaceSync(this.cssText),o&&Yo.set(e,t))}return t}toString(){return this.cssText}},Qo=r=>new vt(typeof r=="string"?r:r+"",void 0,de),y=(r,...t)=>{let e=r.length===1?r[0]:t.reduce((o,i,s)=>o+(a=>{if(a._$cssResult$===!0)return a.cssText;if(typeof a=="number")return a;throw Error("Value passed to 'css' function must be a 'css' function result: "+a+". Use 'unsafeCSS' to pass non-literal values, but take care to ensure page security.")})(i)+r[s+1],r[0]);return new vt(e,r,de)},pe=(r,t)=>{Rt?r.adoptedStyleSheets=t.map(e=>e instanceof CSSStyleSheet?e:e.styleSheet):t.forEach(e=>{let o=document.createElement("style"),i=Pt.litNonce;i!==void 0&&o.setAttribute("nonce",i),o.textContent=e.cssText,r.appendChild(o)})},Ut=Rt?r=>r:r=>r instanceof CSSStyleSheet?(t=>{let e="";for(let o of t.cssRules)e+=o.cssText;return Qo(e)})(r):r;var ue,Ot=window,Xo=Ot.trustedTypes,oi=Xo?Xo.emptyScript:"",Jo=Ot.reactiveElementPolyfillSupport,ve={toAttribute(r,t){switch(t){case Boolean:r=r?oi:null;break;case Object:case Array:r=r==null?r:JSON.stringify(r)}return r},fromAttribute(r,t){let e=r;switch(t){case Boolean:e=r!==null;break;case Number:e=r===null?null:Number(r);break;case Object:case Array:try{e=JSON.parse(r)}catch{e=null}}return e}},tr=(r,t)=>t!==r&&(t==t||r==r),be={attribute:!0,type:String,converter:ve,reflect:!1,hasChanged:tr},ge="finalized",L=class extends HTMLElement{constructor(){super(),this._$Ei=new Map,this.isUpdatePending=!1,this.hasUpdated=!1,this._$El=null,this._$Eu()}static addInitializer(t){var e;this.finalize(),((e=this.h)!==null&&e!==void 0?e:this.h=[]).push(t)}static get observedAttributes(){this.finalize();let t=[];return this.elementProperties.forEach((e,o)=>{let i=this._$Ep(o,e);i!==void 0&&(this._$Ev.set(i,o),t.push(i))}),t}static createProperty(t,e=be){if(e.state&&(e.attribute=!1),this.finalize(),this.elementProperties.set(t,e),!e.noAccessor&&!this.prototype.hasOwnProperty(t)){let o=typeof t=="symbol"?Symbol():"__"+t,i=this.getPropertyDescriptor(t,o,e);i!==void 0&&Object.defineProperty(this.prototype,t,i)}}static getPropertyDescriptor(t,e,o){return{get(){return this[e]},set(i){let s=this[t];this[e]=i,this.requestUpdate(t,s,o)},configurable:!0,enumerable:!0}}static getPropertyOptions(t){return this.elementProperties.get(t)||be}static finalize(){if(this.hasOwnProperty(ge))return!1;this[ge]=!0;let t=Object.getPrototypeOf(this);if(t.finalize(),t.h!==void 0&&(this.h=[...t.h]),this.elementProperties=new Map(t.elementProperties),this._$Ev=new Map,this.hasOwnProperty("properties")){let e=this.properties,o=[...Object.getOwnPropertyNames(e),...Object.getOwnPropertySymbols(e)];for(let i of o)this.createProperty(i,e[i])}return this.elementStyles=this.finalizeStyles(this.styles),!0}static finalizeStyles(t){let e=[];if(Array.isArray(t)){let o=new Set(t.flat(1/0).reverse());for(let i of o)e.unshift(Ut(i))}else t!==void 0&&e.push(Ut(t));return e}static _$Ep(t,e){let o=e.attribute;return o===!1?void 0:typeof o=="string"?o:typeof t=="string"?t.toLowerCase():void 0}_$Eu(){var t;this._$E_=new Promise(e=>this.enableUpdating=e),this._$AL=new Map,this._$Eg(),this.requestUpdate(),(t=this.constructor.h)===null||t===void 0||t.forEach(e=>e(this))}addController(t){var e,o;((e=this._$ES)!==null&&e!==void 0?e:this._$ES=[]).push(t),this.renderRoot!==void 0&&this.isConnected&&((o=t.hostConnected)===null||o===void 0||o.call(t))}removeController(t){var e;(e=this._$ES)===null||e===void 0||e.splice(this._$ES.indexOf(t)>>>0,1)}_$Eg(){this.constructor.elementProperties.forEach((t,e)=>{this.hasOwnProperty(e)&&(this._$Ei.set(e,this[e]),delete this[e])})}createRenderRoot(){var t;let e=(t=this.shadowRoot)!==null&&t!==void 0?t:this.attachShadow(this.constructor.shadowRootOptions);return pe(e,this.constructor.elementStyles),e}connectedCallback(){var t;this.renderRoot===void 0&&(this.renderRoot=this.createRenderRoot()),this.enableUpdating(!0),(t=this._$ES)===null||t===void 0||t.forEach(e=>{var o;return(o=e.hostConnected)===null||o===void 0?void 0:o.call(e)})}enableUpdating(t){}disconnectedCallback(){var t;(t=this._$ES)===null||t===void 0||t.forEach(e=>{var o;return(o=e.hostDisconnected)===null||o===void 0?void 0:o.call(e)})}attributeChangedCallback(t,e,o){this._$AK(t,o)}_$EO(t,e,o=be){var i;let s=this.constructor._$Ep(t,o);if(s!==void 0&&o.reflect===!0){let a=(((i=o.converter)===null||i===void 0?void 0:i.toAttribute)!==void 0?o.converter:ve).toAttribute(e,o.type);this._$El=t,a==null?this.removeAttribute(s):this.setAttribute(s,a),this._$El=null}}_$AK(t,e){var o;let i=this.constructor,s=i._$Ev.get(t);if(s!==void 0&&this._$El!==s){let a=i.getPropertyOptions(s),c=typeof a.converter=="function"?{fromAttribute:a.converter}:((o=a.converter)===null||o===void 0?void 0:o.fromAttribute)!==void 0?a.converter:ve;this._$El=s,this[s]=c.fromAttribute(e,a.type),this._$El=null}}requestUpdate(t,e,o){let i=!0;t!==void 0&&(((o=o||this.constructor.getPropertyOptions(t)).hasChanged||tr)(this[t],e)?(this._$AL.has(t)||this._$AL.set(t,e),o.reflect===!0&&this._$El!==t&&(this._$EC===void 0&&(this._$EC=new Map),this._$EC.set(t,o))):i=!1),!this.isUpdatePending&&i&&(this._$E_=this._$Ej())}async _$Ej(){this.isUpdatePending=!0;try{await this._$E_}catch(e){Promise.reject(e)}let t=this.scheduleUpdate();return t!=null&&await t,!this.isUpdatePending}scheduleUpdate(){return this.performUpdate()}performUpdate(){var t;if(!this.isUpdatePending)return;this.hasUpdated,this._$Ei&&(this._$Ei.forEach((i,s)=>this[s]=i),this._$Ei=void 0);let e=!1,o=this._$AL;try{e=this.shouldUpdate(o),e?(this.willUpdate(o),(t=this._$ES)===null||t===void 0||t.forEach(i=>{var s;return(s=i.hostUpdate)===null||s===void 0?void 0:s.call(i)}),this.update(o)):this._$Ek()}catch(i){throw e=!1,this._$Ek(),i}e&&this._$AE(o)}willUpdate(t){}_$AE(t){var e;(e=this._$ES)===null||e===void 0||e.forEach(o=>{var i;return(i=o.hostUpdated)===null||i===void 0?void 0:i.call(o)}),this.hasUpdated||(this.hasUpdated=!0,this.firstUpdated(t)),this.updated(t)}_$Ek(){this._$AL=new Map,this.isUpdatePending=!1}get updateComplete(){return this.getUpdateComplete()}getUpdateComplete(){return this._$E_}shouldUpdate(t){return!0}update(t){this._$EC!==void 0&&(this._$EC.forEach((e,o)=>this._$EO(o,this[o],e)),this._$EC=void 0),this._$Ek()}updated(t){}firstUpdated(t){}};L[ge]=!0,L.elementProperties=new Map,L.elementStyles=[],L.shadowRootOptions={mode:"open"},Jo?.({ReactiveElement:L}),((ue=Ot.reactiveElementVersions)!==null&&ue!==void 0?ue:Ot.reactiveElementVersions=[]).push("1.6.3");var me,Nt=window,tt=Nt.trustedTypes,er=tt?tt.createPolicy("lit-html",{createHTML:r=>r}):void 0,ye="$lit$",O=`lit$${(Math.random()+"").slice(9)}$`,lr="?"+O,ri=`<${lr}>`,V=document,mt=()=>V.createComment(""),ft=r=>r===null||typeof r!="object"&&typeof r!="function",hr=Array.isArray,ii=r=>hr(r)||typeof r?.[Symbol.iterator]=="function",fe=`[ 	
-\f\r]`,gt=/<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g,or=/-->/g,rr=/>/g,B=RegExp(`>|${fe}(?:([^\\s"'>=/]+)(${fe}*=${fe}*(?:[^ 	
-\f\r"'\`<>=]|("|')|))|$)`,"g"),ir=/'/g,sr=/"/g,cr=/^(?:script|style|textarea|title)$/i,dr=r=>(t,...e)=>({_$litType$:r,strings:t,values:e}),d=dr(1),ts=dr(2),W=Symbol.for("lit-noChange"),j=Symbol.for("lit-nothing"),ar=new WeakMap,q=V.createTreeWalker(V,129,null,!1);function pr(r,t){if(!Array.isArray(r)||!r.hasOwnProperty("raw"))throw Error("invalid template strings array");return er!==void 0?er.createHTML(t):t}var si=(r,t)=>{let e=r.length-1,o=[],i,s=t===2?"<svg>":"",a=gt;for(let c=0;c<e;c++){let n=r[c],l,u,p=-1,v=0;for(;v<n.length&&(a.lastIndex=v,u=a.exec(n),u!==null);)v=a.lastIndex,a===gt?u[1]==="!--"?a=or:u[1]!==void 0?a=rr:u[2]!==void 0?(cr.test(u[2])&&(i=RegExp("</"+u[2],"g")),a=B):u[3]!==void 0&&(a=B):a===B?u[0]===">"?(a=i??gt,p=-1):u[1]===void 0?p=-2:(p=a.lastIndex-u[2].length,l=u[1],a=u[3]===void 0?B:u[3]==='"'?sr:ir):a===sr||a===ir?a=B:a===or||a===rr?a=gt:(a=B,i=void 0);let m=a===B&&r[c+1].startsWith("/>")?" ":"";s+=a===gt?n+ri:p>=0?(o.push(l),n.slice(0,p)+ye+n.slice(p)+O+m):n+O+(p===-2?(o.push(void 0),c):m)}return[pr(r,s+(r[e]||"<?>")+(t===2?"</svg>":"")),o]},yt=class r{constructor({strings:t,_$litType$:e},o){let i;this.parts=[];let s=0,a=0,c=t.length-1,n=this.parts,[l,u]=si(t,e);if(this.el=r.createElement(l,o),q.currentNode=this.el.content,e===2){let p=this.el.content,v=p.firstChild;v.remove(),p.append(...v.childNodes)}for(;(i=q.nextNode())!==null&&n.length<c;){if(i.nodeType===1){if(i.hasAttributes()){let p=[];for(let v of i.getAttributeNames())if(v.endsWith(ye)||v.startsWith(O)){let m=u[a++];if(p.push(v),m!==void 0){let k=i.getAttribute(m.toLowerCase()+ye).split(O),w=/([.?@])?(.*)/.exec(m);n.push({type:1,index:s,name:w[2],strings:k,ctor:w[1]==="."?$e:w[1]==="?"?xe:w[1]==="@"?_e:ot})}else n.push({type:6,index:s})}for(let v of p)i.removeAttribute(v)}if(cr.test(i.tagName)){let p=i.textContent.split(O),v=p.length-1;if(v>0){i.textContent=tt?tt.emptyScript:"";for(let m=0;m<v;m++)i.append(p[m],mt()),q.nextNode(),n.push({type:2,index:++s});i.append(p[v],mt())}}}else if(i.nodeType===8)if(i.data===lr)n.push({type:2,index:s});else{let p=-1;for(;(p=i.data.indexOf(O,p+1))!==-1;)n.push({type:7,index:s}),p+=O.length-1}s++}}static createElement(t,e){let o=V.createElement("template");return o.innerHTML=t,o}};function et(r,t,e=r,o){var i,s,a,c;if(t===W)return t;let n=o!==void 0?(i=e._$Co)===null||i===void 0?void 0:i[o]:e._$Cl,l=ft(t)?void 0:t._$litDirective$;return n?.constructor!==l&&((s=n?._$AO)===null||s===void 0||s.call(n,!1),l===void 0?n=void 0:(n=new l(r),n._$AT(r,e,o)),o!==void 0?((a=(c=e)._$Co)!==null&&a!==void 0?a:c._$Co=[])[o]=n:e._$Cl=n),n!==void 0&&(t=et(r,n._$AS(r,t.values),n,o)),t}var je=class{constructor(t,e){this._$AV=[],this._$AN=void 0,this._$AD=t,this._$AM=e}get parentNode(){return this._$AM.parentNode}get _$AU(){return this._$AM._$AU}u(t){var e;let{el:{content:o},parts:i}=this._$AD,s=((e=t?.creationScope)!==null&&e!==void 0?e:V).importNode(o,!0);q.currentNode=s;let a=q.nextNode(),c=0,n=0,l=i[0];for(;l!==void 0;){if(c===l.index){let u;l.type===2?u=new jt(a,a.nextSibling,this,t):l.type===1?u=new l.ctor(a,l.name,l.strings,this,t):l.type===6&&(u=new we(a,this,t)),this._$AV.push(u),l=i[++n]}c!==l?.index&&(a=q.nextNode(),c++)}return q.currentNode=V,s}v(t){let e=0;for(let o of this._$AV)o!==void 0&&(o.strings!==void 0?(o._$AI(t,o,e),e+=o.strings.length-2):o._$AI(t[e])),e++}},jt=class r{constructor(t,e,o,i){var s;this.type=2,this._$AH=j,this._$AN=void 0,this._$AA=t,this._$AB=e,this._$AM=o,this.options=i,this._$Cp=(s=i?.isConnected)===null||s===void 0||s}get _$AU(){var t,e;return(e=(t=this._$AM)===null||t===void 0?void 0:t._$AU)!==null&&e!==void 0?e:this._$Cp}get parentNode(){let t=this._$AA.parentNode,e=this._$AM;return e!==void 0&&t?.nodeType===11&&(t=e.parentNode),t}get startNode(){return this._$AA}get endNode(){return this._$AB}_$AI(t,e=this){t=et(this,t,e),ft(t)?t===j||t==null||t===""?(this._$AH!==j&&this._$AR(),this._$AH=j):t!==this._$AH&&t!==W&&this._(t):t._$litType$!==void 0?this.g(t):t.nodeType!==void 0?this.$(t):ii(t)?this.T(t):this._(t)}k(t){return this._$AA.parentNode.insertBefore(t,this._$AB)}$(t){this._$AH!==t&&(this._$AR(),this._$AH=this.k(t))}_(t){this._$AH!==j&&ft(this._$AH)?this._$AA.nextSibling.data=t:this.$(V.createTextNode(t)),this._$AH=t}g(t){var e;let{values:o,_$litType$:i}=t,s=typeof i=="number"?this._$AC(t):(i.el===void 0&&(i.el=yt.createElement(pr(i.h,i.h[0]),this.options)),i);if(((e=this._$AH)===null||e===void 0?void 0:e._$AD)===s)this._$AH.v(o);else{let a=new je(s,this),c=a.u(this.options);a.v(o),this.$(c),this._$AH=a}}_$AC(t){let e=ar.get(t.strings);return e===void 0&&ar.set(t.strings,e=new yt(t)),e}T(t){hr(this._$AH)||(this._$AH=[],this._$AR());let e=this._$AH,o,i=0;for(let s of t)i===e.length?e.push(o=new r(this.k(mt()),this.k(mt()),this,this.options)):o=e[i],o._$AI(s),i++;i<e.length&&(this._$AR(o&&o._$AB.nextSibling,i),e.length=i)}_$AR(t=this._$AA.nextSibling,e){var o;for((o=this._$AP)===null||o===void 0||o.call(this,!1,!0,e);t&&t!==this._$AB;){let i=t.nextSibling;t.remove(),t=i}}setConnected(t){var e;this._$AM===void 0&&(this._$Cp=t,(e=this._$AP)===null||e===void 0||e.call(this,t))}},ot=class{constructor(t,e,o,i,s){this.type=1,this._$AH=j,this._$AN=void 0,this.element=t,this.name=e,this._$AM=i,this.options=s,o.length>2||o[0]!==""||o[1]!==""?(this._$AH=Array(o.length-1).fill(new String),this.strings=o):this._$AH=j}get tagName(){return this.element.tagName}get _$AU(){return this._$AM._$AU}_$AI(t,e=this,o,i){let s=this.strings,a=!1;if(s===void 0)t=et(this,t,e,0),a=!ft(t)||t!==this._$AH&&t!==W,a&&(this._$AH=t);else{let c=t,n,l;for(t=s[0],n=0;n<s.length-1;n++)l=et(this,c[o+n],e,n),l===W&&(l=this._$AH[n]),a||(a=!ft(l)||l!==this._$AH[n]),l===j?t=j:t!==j&&(t+=(l??"")+s[n+1]),this._$AH[n]=l}a&&!i&&this.j(t)}j(t){t===j?this.element.removeAttribute(this.name):this.element.setAttribute(this.name,t??"")}},$e=class extends ot{constructor(){super(...arguments),this.type=3}j(t){this.element[this.name]=t===j?void 0:t}},ai=tt?tt.emptyScript:"",xe=class extends ot{constructor(){super(...arguments),this.type=4}j(t){t&&t!==j?this.element.setAttribute(this.name,ai):this.element.removeAttribute(this.name)}},_e=class extends ot{constructor(t,e,o,i,s){super(t,e,o,i,s),this.type=5}_$AI(t,e=this){var o;if((t=(o=et(this,t,e,0))!==null&&o!==void 0?o:j)===W)return;let i=this._$AH,s=t===j&&i!==j||t.capture!==i.capture||t.once!==i.once||t.passive!==i.passive,a=t!==j&&(i===j||s);s&&this.element.removeEventListener(this.name,this,i),a&&this.element.addEventListener(this.name,this,t),this._$AH=t}handleEvent(t){var e,o;typeof this._$AH=="function"?this._$AH.call((o=(e=this.options)===null||e===void 0?void 0:e.host)!==null&&o!==void 0?o:this.element,t):this._$AH.handleEvent(t)}},we=class{constructor(t,e,o){this.element=t,this.type=6,this._$AN=void 0,this._$AM=e,this.options=o}get _$AU(){return this._$AM._$AU}_$AI(t){et(this,t)}};var nr=Nt.litHtmlPolyfillSupport;nr?.(yt,jt),((me=Nt.litHtmlVersions)!==null&&me!==void 0?me:Nt.litHtmlVersions=[]).push("2.8.0");var ur=(r,t,e)=>{var o,i;let s=(o=e?.renderBefore)!==null&&o!==void 0?o:t,a=s._$litPart$;if(a===void 0){let c=(i=e?.renderBefore)!==null&&i!==void 0?i:null;s._$litPart$=a=new jt(t.insertBefore(mt(),c),c,void 0,e??{})}return a._$AI(r),a};var ke,Ae;var f=class extends L{constructor(){super(...arguments),this.renderOptions={host:this},this._$Do=void 0}createRenderRoot(){var t,e;let o=super.createRenderRoot();return(t=(e=this.renderOptions).renderBefore)!==null&&t!==void 0||(e.renderBefore=o.firstChild),o}update(t){let e=this.render();this.hasUpdated||(this.renderOptions.isConnected=this.isConnected),super.update(t),this._$Do=ur(e,this.renderRoot,this.renderOptions)}connectedCallback(){var t;super.connectedCallback(),(t=this._$Do)===null||t===void 0||t.setConnected(!0)}disconnectedCallback(){var t;super.disconnectedCallback(),(t=this._$Do)===null||t===void 0||t.setConnected(!1)}render(){return W}};f.finalized=!0,f._$litElement$=!0,(ke=globalThis.litElementHydrateSupport)===null||ke===void 0||ke.call(globalThis,{LitElement:f});var br=globalThis.litElementPolyfillSupport;br?.({LitElement:f});((Ae=globalThis.litElementVersions)!==null&&Ae!==void 0?Ae:globalThis.litElementVersions=[]).push("3.3.3");var b=r=>r??j;var Se=class extends f{#t;#e;static get styles(){return y`
+var Ve=globalThis,Ze=Ve.ShadowRoot&&(Ve.ShadyCSS===void 0||Ve.ShadyCSS.nativeShadow)&&"adoptedStyleSheets"in Document.prototype&&"replace"in CSSStyleSheet.prototype,ft=Symbol(),or=new WeakMap,$e=class{constructor(e,t,o){if(this._$cssResult$=!0,o!==ft)throw Error("CSSResult is not constructable. Use `unsafeCSS` or `css` instead.");this.cssText=e,this.t=t}get styleSheet(){let e=this.o,t=this.t;if(Ze&&e===void 0){let o=t!==void 0&&t.length===1;o&&(e=or.get(t)),e===void 0&&((this.o=e=new CSSStyleSheet).replaceSync(this.cssText),o&&or.set(t,e))}return e}toString(){return this.cssText}},rr=r=>new $e(typeof r=="string"?r:r+"",void 0,ft),$=(r,...e)=>{let t=r.length===1?r[0]:e.reduce((o,i,a)=>o+(s=>{if(s._$cssResult$===!0)return s.cssText;if(typeof s=="number")return s;throw Error("Value passed to 'css' function must be a 'css' function result: "+s+". Use 'unsafeCSS' to pass non-literal values, but take care to ensure page security.")})(i)+r[a+1],r[0]);return new $e(t,r,ft)},ir=(r,e)=>{if(Ze)r.adoptedStyleSheets=e.map(t=>t instanceof CSSStyleSheet?t:t.styleSheet);else for(let t of e){let o=document.createElement("style"),i=Ve.litNonce;i!==void 0&&o.setAttribute("nonce",i),o.textContent=t.cssText,r.appendChild(o)}},yt=Ze?r=>r:r=>r instanceof CSSStyleSheet?(e=>{let t="";for(let o of e.cssRules)t+=o.cssText;return rr(t)})(r):r;var{is:Oi,defineProperty:Ni,getOwnPropertyDescriptor:Ui,getOwnPropertyNames:Mi,getOwnPropertySymbols:Di,getPrototypeOf:Hi}=Object,We=globalThis,ar=We.trustedTypes,Ii=ar?ar.emptyScript:"",Bi=We.reactiveElementPolyfillSupport,xe=(r,e)=>r,jt={toAttribute(r,e){switch(e){case Boolean:r=r?Ii:null;break;case Object:case Array:r=r==null?r:JSON.stringify(r)}return r},fromAttribute(r,e){let t=r;switch(e){case Boolean:t=r!==null;break;case Number:t=r===null?null:Number(r);break;case Object:case Array:try{t=JSON.parse(r)}catch{t=null}}return t}},Fe=(r,e)=>!Oi(r,e),sr={attribute:!0,type:String,converter:jt,reflect:!1,useDefault:!1,hasChanged:Fe};Symbol.metadata??=Symbol("metadata"),We.litPropertyMetadata??=new WeakMap;var M=class extends HTMLElement{static addInitializer(e){this._$Ei(),(this.l??=[]).push(e)}static get observedAttributes(){return this.finalize(),this._$Eh&&[...this._$Eh.keys()]}static createProperty(e,t=sr){if(t.state&&(t.attribute=!1),this._$Ei(),this.prototype.hasOwnProperty(e)&&((t=Object.create(t)).wrapped=!0),this.elementProperties.set(e,t),!t.noAccessor){let o=Symbol(),i=this.getPropertyDescriptor(e,o,t);i!==void 0&&Ni(this.prototype,e,i)}}static getPropertyDescriptor(e,t,o){let{get:i,set:a}=Ui(this.prototype,e)??{get(){return this[t]},set(s){this[t]=s}};return{get:i,set(s){let h=i?.call(this);a?.call(this,s),this.requestUpdate(e,h,o)},configurable:!0,enumerable:!0}}static getPropertyOptions(e){return this.elementProperties.get(e)??sr}static _$Ei(){if(this.hasOwnProperty(xe("elementProperties")))return;let e=Hi(this);e.finalize(),e.l!==void 0&&(this.l=[...e.l]),this.elementProperties=new Map(e.elementProperties)}static finalize(){if(this.hasOwnProperty(xe("finalized")))return;if(this.finalized=!0,this._$Ei(),this.hasOwnProperty(xe("properties"))){let t=this.properties,o=[...Mi(t),...Di(t)];for(let i of o)this.createProperty(i,t[i])}let e=this[Symbol.metadata];if(e!==null){let t=litPropertyMetadata.get(e);if(t!==void 0)for(let[o,i]of t)this.elementProperties.set(o,i)}this._$Eh=new Map;for(let[t,o]of this.elementProperties){let i=this._$Eu(t,o);i!==void 0&&this._$Eh.set(i,t)}this.elementStyles=this.finalizeStyles(this.styles)}static finalizeStyles(e){let t=[];if(Array.isArray(e)){let o=new Set(e.flat(1/0).reverse());for(let i of o)t.unshift(yt(i))}else e!==void 0&&t.push(yt(e));return t}static _$Eu(e,t){let o=t.attribute;return o===!1?void 0:typeof o=="string"?o:typeof e=="string"?e.toLowerCase():void 0}constructor(){super(),this._$Ep=void 0,this.isUpdatePending=!1,this.hasUpdated=!1,this._$Em=null,this._$Ev()}_$Ev(){this._$ES=new Promise(e=>this.enableUpdating=e),this._$AL=new Map,this._$E_(),this.requestUpdate(),this.constructor.l?.forEach(e=>e(this))}addController(e){(this._$EO??=new Set).add(e),this.renderRoot!==void 0&&this.isConnected&&e.hostConnected?.()}removeController(e){this._$EO?.delete(e)}_$E_(){let e=new Map,t=this.constructor.elementProperties;for(let o of t.keys())this.hasOwnProperty(o)&&(e.set(o,this[o]),delete this[o]);e.size>0&&(this._$Ep=e)}createRenderRoot(){let e=this.shadowRoot??this.attachShadow(this.constructor.shadowRootOptions);return ir(e,this.constructor.elementStyles),e}connectedCallback(){this.renderRoot??=this.createRenderRoot(),this.enableUpdating(!0),this._$EO?.forEach(e=>e.hostConnected?.())}enableUpdating(e){}disconnectedCallback(){this._$EO?.forEach(e=>e.hostDisconnected?.())}attributeChangedCallback(e,t,o){this._$AK(e,o)}_$ET(e,t){let o=this.constructor.elementProperties.get(e),i=this.constructor._$Eu(e,o);if(i!==void 0&&o.reflect===!0){let a=(o.converter?.toAttribute!==void 0?o.converter:jt).toAttribute(t,o.type);this._$Em=e,a==null?this.removeAttribute(i):this.setAttribute(i,a),this._$Em=null}}_$AK(e,t){let o=this.constructor,i=o._$Eh.get(e);if(i!==void 0&&this._$Em!==i){let a=o.getPropertyOptions(i),s=typeof a.converter=="function"?{fromAttribute:a.converter}:a.converter?.fromAttribute!==void 0?a.converter:jt;this._$Em=i;let h=s.fromAttribute(t,a.type);this[i]=h??this._$Ej?.get(i)??h,this._$Em=null}}requestUpdate(e,t,o,i=!1,a){if(e!==void 0){let s=this.constructor;if(i===!1&&(a=this[e]),o??=s.getPropertyOptions(e),!((o.hasChanged??Fe)(a,t)||o.useDefault&&o.reflect&&a===this._$Ej?.get(e)&&!this.hasAttribute(s._$Eu(e,o))))return;this.C(e,t,o)}this.isUpdatePending===!1&&(this._$ES=this._$EP())}C(e,t,{useDefault:o,reflect:i,wrapped:a},s){o&&!(this._$Ej??=new Map).has(e)&&(this._$Ej.set(e,s??t??this[e]),a!==!0||s!==void 0)||(this._$AL.has(e)||(this.hasUpdated||o||(t=void 0),this._$AL.set(e,t)),i===!0&&this._$Em!==e&&(this._$Eq??=new Set).add(e))}async _$EP(){this.isUpdatePending=!0;try{await this._$ES}catch(t){Promise.reject(t)}let e=this.scheduleUpdate();return e!=null&&await e,!this.isUpdatePending}scheduleUpdate(){return this.performUpdate()}performUpdate(){if(!this.isUpdatePending)return;if(!this.hasUpdated){if(this.renderRoot??=this.createRenderRoot(),this._$Ep){for(let[i,a]of this._$Ep)this[i]=a;this._$Ep=void 0}let o=this.constructor.elementProperties;if(o.size>0)for(let[i,a]of o){let{wrapped:s}=a,h=this[i];s!==!0||this._$AL.has(i)||h===void 0||this.C(i,void 0,a,h)}}let e=!1,t=this._$AL;try{e=this.shouldUpdate(t),e?(this.willUpdate(t),this._$EO?.forEach(o=>o.hostUpdate?.()),this.update(t)):this._$EM()}catch(o){throw e=!1,this._$EM(),o}e&&this._$AE(t)}willUpdate(e){}_$AE(e){this._$EO?.forEach(t=>t.hostUpdated?.()),this.hasUpdated||(this.hasUpdated=!0,this.firstUpdated(e)),this.updated(e)}_$EM(){this._$AL=new Map,this.isUpdatePending=!1}get updateComplete(){return this.getUpdateComplete()}getUpdateComplete(){return this._$ES}shouldUpdate(e){return!0}update(e){this._$Eq&&=this._$Eq.forEach(t=>this._$ET(t,this[t])),this._$EM()}updated(e){}firstUpdated(e){}};M.elementStyles=[],M.shadowRootOptions={mode:"open"},M[xe("elementProperties")]=new Map,M[xe("finalized")]=new Map,Bi?.({ReactiveElement:M}),(We.reactiveElementVersions??=[]).push("2.1.2");var St=globalThis,nr=r=>r,Ke=St.trustedTypes,lr=Ke?Ke.createPolicy("lit-html",{createHTML:r=>r}):void 0,br="$lit$",q=`lit$${Math.random().toFixed(9).slice(2)}$`,vr="?"+q,qi=`<${vr}>`,Q=document,_e=()=>Q.createComment(""),ke=r=>r===null||typeof r!="object"&&typeof r!="function",Et=Array.isArray,Vi=r=>Et(r)||typeof r?.[Symbol.iterator]=="function",$t=`[ 	
+\f\r]`,we=/<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g,cr=/-->/g,hr=/>/g,Y=RegExp(`>|${$t}(?:([^\\s"'>=/]+)(${$t}*=${$t}*(?:[^ 	
+\f\r"'\`<>=]|("|')|))|$)`,"g"),dr=/'/g,pr=/"/g,mr=/^(?:script|style|textarea|title)$/i,zt=r=>(e,...t)=>({_$litType$:r,strings:e,values:t}),n=zt(1),Ra=zt(2),Pa=zt(3),X=Symbol.for("lit-noChange"),p=Symbol.for("lit-nothing"),ur=new WeakMap,G=Q.createTreeWalker(Q,129);function gr(r,e){if(!Et(r)||!r.hasOwnProperty("raw"))throw Error("invalid template strings array");return lr!==void 0?lr.createHTML(e):e}var Zi=(r,e)=>{let t=r.length-1,o=[],i,a=e===2?"<svg>":e===3?"<math>":"",s=we;for(let h=0;h<t;h++){let l=r[h],c,b,u=-1,m=0;for(;m<l.length&&(s.lastIndex=m,b=s.exec(l),b!==null);)m=s.lastIndex,s===we?b[1]==="!--"?s=cr:b[1]!==void 0?s=hr:b[2]!==void 0?(mr.test(b[2])&&(i=RegExp("</"+b[2],"g")),s=Y):b[3]!==void 0&&(s=Y):s===Y?b[0]===">"?(s=i??we,u=-1):b[1]===void 0?u=-2:(u=s.lastIndex-b[2].length,c=b[1],s=b[3]===void 0?Y:b[3]==='"'?pr:dr):s===pr||s===dr?s=Y:s===cr||s===hr?s=we:(s=Y,i=void 0);let f=s===Y&&r[h+1].startsWith("/>")?" ":"";a+=s===we?l+qi:u>=0?(o.push(c),l.slice(0,u)+br+l.slice(u)+q+f):l+q+(u===-2?h:f)}return[gr(r,a+(r[t]||"<?>")+(e===2?"</svg>":e===3?"</math>":"")),o]},Ae=class r{constructor({strings:e,_$litType$:t},o){let i;this.parts=[];let a=0,s=0,h=e.length-1,l=this.parts,[c,b]=Zi(e,t);if(this.el=r.createElement(c,o),G.currentNode=this.el.content,t===2||t===3){let u=this.el.content.firstChild;u.replaceWith(...u.childNodes)}for(;(i=G.nextNode())!==null&&l.length<h;){if(i.nodeType===1){if(i.hasAttributes())for(let u of i.getAttributeNames())if(u.endsWith(br)){let m=b[s++],f=i.getAttribute(u).split(q),L=/([.?@])?(.*)/.exec(m);l.push({type:1,index:a,name:L[2],strings:f,ctor:L[1]==="."?wt:L[1]==="?"?_t:L[1]==="@"?kt:pe}),i.removeAttribute(u)}else u.startsWith(q)&&(l.push({type:6,index:a}),i.removeAttribute(u));if(mr.test(i.tagName)){let u=i.textContent.split(q),m=u.length-1;if(m>0){i.textContent=Ke?Ke.emptyScript:"";for(let f=0;f<m;f++)i.append(u[f],_e()),G.nextNode(),l.push({type:2,index:++a});i.append(u[m],_e())}}}else if(i.nodeType===8)if(i.data===vr)l.push({type:2,index:a});else{let u=-1;for(;(u=i.data.indexOf(q,u+1))!==-1;)l.push({type:7,index:a}),u+=q.length-1}a++}}static createElement(e,t){let o=Q.createElement("template");return o.innerHTML=e,o}};function de(r,e,t=r,o){if(e===X)return e;let i=o!==void 0?t._$Co?.[o]:t._$Cl,a=ke(e)?void 0:e._$litDirective$;return i?.constructor!==a&&(i?._$AO?.(!1),a===void 0?i=void 0:(i=new a(r),i._$AT(r,t,o)),o!==void 0?(t._$Co??=[])[o]=i:t._$Cl=i),i!==void 0&&(e=de(r,i._$AS(r,e.values),i,o)),e}var xt=class{constructor(e,t){this._$AV=[],this._$AN=void 0,this._$AD=e,this._$AM=t}get parentNode(){return this._$AM.parentNode}get _$AU(){return this._$AM._$AU}u(e){let{el:{content:t},parts:o}=this._$AD,i=(e?.creationScope??Q).importNode(t,!0);G.currentNode=i;let a=G.nextNode(),s=0,h=0,l=o[0];for(;l!==void 0;){if(s===l.index){let c;l.type===2?c=new Se(a,a.nextSibling,this,e):l.type===1?c=new l.ctor(a,l.name,l.strings,this,e):l.type===6&&(c=new At(a,this,e)),this._$AV.push(c),l=o[++h]}s!==l?.index&&(a=G.nextNode(),s++)}return G.currentNode=Q,i}p(e){let t=0;for(let o of this._$AV)o!==void 0&&(o.strings!==void 0?(o._$AI(e,o,t),t+=o.strings.length-2):o._$AI(e[t])),t++}},Se=class r{get _$AU(){return this._$AM?._$AU??this._$Cv}constructor(e,t,o,i){this.type=2,this._$AH=p,this._$AN=void 0,this._$AA=e,this._$AB=t,this._$AM=o,this.options=i,this._$Cv=i?.isConnected??!0}get parentNode(){let e=this._$AA.parentNode,t=this._$AM;return t!==void 0&&e?.nodeType===11&&(e=t.parentNode),e}get startNode(){return this._$AA}get endNode(){return this._$AB}_$AI(e,t=this){e=de(this,e,t),ke(e)?e===p||e==null||e===""?(this._$AH!==p&&this._$AR(),this._$AH=p):e!==this._$AH&&e!==X&&this._(e):e._$litType$!==void 0?this.$(e):e.nodeType!==void 0?this.T(e):Vi(e)?this.k(e):this._(e)}O(e){return this._$AA.parentNode.insertBefore(e,this._$AB)}T(e){this._$AH!==e&&(this._$AR(),this._$AH=this.O(e))}_(e){this._$AH!==p&&ke(this._$AH)?this._$AA.nextSibling.data=e:this.T(Q.createTextNode(e)),this._$AH=e}$(e){let{values:t,_$litType$:o}=e,i=typeof o=="number"?this._$AC(e):(o.el===void 0&&(o.el=Ae.createElement(gr(o.h,o.h[0]),this.options)),o);if(this._$AH?._$AD===i)this._$AH.p(t);else{let a=new xt(i,this),s=a.u(this.options);a.p(t),this.T(s),this._$AH=a}}_$AC(e){let t=ur.get(e.strings);return t===void 0&&ur.set(e.strings,t=new Ae(e)),t}k(e){Et(this._$AH)||(this._$AH=[],this._$AR());let t=this._$AH,o,i=0;for(let a of e)i===t.length?t.push(o=new r(this.O(_e()),this.O(_e()),this,this.options)):o=t[i],o._$AI(a),i++;i<t.length&&(this._$AR(o&&o._$AB.nextSibling,i),t.length=i)}_$AR(e=this._$AA.nextSibling,t){for(this._$AP?.(!1,!0,t);e!==this._$AB;){let o=nr(e).nextSibling;nr(e).remove(),e=o}}setConnected(e){this._$AM===void 0&&(this._$Cv=e,this._$AP?.(e))}},pe=class{get tagName(){return this.element.tagName}get _$AU(){return this._$AM._$AU}constructor(e,t,o,i,a){this.type=1,this._$AH=p,this._$AN=void 0,this.element=e,this.name=t,this._$AM=i,this.options=a,o.length>2||o[0]!==""||o[1]!==""?(this._$AH=Array(o.length-1).fill(new String),this.strings=o):this._$AH=p}_$AI(e,t=this,o,i){let a=this.strings,s=!1;if(a===void 0)e=de(this,e,t,0),s=!ke(e)||e!==this._$AH&&e!==X,s&&(this._$AH=e);else{let h=e,l,c;for(e=a[0],l=0;l<a.length-1;l++)c=de(this,h[o+l],t,l),c===X&&(c=this._$AH[l]),s||=!ke(c)||c!==this._$AH[l],c===p?e=p:e!==p&&(e+=(c??"")+a[l+1]),this._$AH[l]=c}s&&!i&&this.j(e)}j(e){e===p?this.element.removeAttribute(this.name):this.element.setAttribute(this.name,e??"")}},wt=class extends pe{constructor(){super(...arguments),this.type=3}j(e){this.element[this.name]=e===p?void 0:e}},_t=class extends pe{constructor(){super(...arguments),this.type=4}j(e){this.element.toggleAttribute(this.name,!!e&&e!==p)}},kt=class extends pe{constructor(e,t,o,i,a){super(e,t,o,i,a),this.type=5}_$AI(e,t=this){if((e=de(this,e,t,0)??p)===X)return;let o=this._$AH,i=e===p&&o!==p||e.capture!==o.capture||e.once!==o.once||e.passive!==o.passive,a=e!==p&&(o===p||i);i&&this.element.removeEventListener(this.name,this,o),a&&this.element.addEventListener(this.name,this,e),this._$AH=e}handleEvent(e){typeof this._$AH=="function"?this._$AH.call(this.options?.host??this.element,e):this._$AH.handleEvent(e)}},At=class{constructor(e,t,o){this.element=e,this.type=6,this._$AN=void 0,this._$AM=t,this.options=o}get _$AU(){return this._$AM._$AU}_$AI(e){de(this,e)}};var Wi=St.litHtmlPolyfillSupport;Wi?.(Ae,Se),(St.litHtmlVersions??=[]).push("3.3.3");var fr=(r,e,t)=>{let o=t?.renderBefore??e,i=o._$litPart$;if(i===void 0){let a=t?.renderBefore??null;o._$litPart$=i=new Se(e.insertBefore(_e(),a),a,void 0,t??{})}return i._$AI(r),i};var Ct=globalThis,j=class extends M{constructor(){super(...arguments),this.renderOptions={host:this},this._$Do=void 0}createRenderRoot(){let e=super.createRenderRoot();return this.renderOptions.renderBefore??=e.firstChild,e}update(e){let t=this.render();this.hasUpdated||(this.renderOptions.isConnected=this.isConnected),super.update(e),this._$Do=fr(t,this.renderRoot,this.renderOptions)}connectedCallback(){super.connectedCallback(),this._$Do?.setConnected(!0)}disconnectedCallback(){super.disconnectedCallback(),this._$Do?.setConnected(!1)}render(){return X}};j._$litElement$=!0,j.finalized=!0,Ct.litElementHydrateSupport?.({LitElement:j});var Fi=Ct.litElementPolyfillSupport;Fi?.({LitElement:j});(Ct.litElementVersions??=[]).push("4.2.2");var yr=new WeakMap,jr=r=>{if((t=>t.pattern!==void 0)(r))return r.pattern;let e=yr.get(r);return e===void 0&&yr.set(r,e=new URLPattern({pathname:r.path})),e},Ee=class{constructor(e,t,o){this.routes=[],this.o=[],this.t={},this.i=i=>{if(i.routes===this)return;let a=i.routes;this.o.push(a),a.h=this,i.stopImmediatePropagation(),i.onDisconnect=()=>{this.o?.splice(this.o.indexOf(a)>>>0,1)};let s=$r(this.t);s!==void 0&&a.goto(s)},(this.l=e).addController(this),this.routes=[...t],this.fallback=o?.fallback}link(e){if(e?.startsWith("/"))return e;if(e?.startsWith("."))throw Error("Not implemented");return e??=this.u,(this.h?.link()??"")+e}async goto(e){let t;if(this.routes.length===0&&this.fallback===void 0)t=e,this.u="",this.t={0:t};else{let o=this.p(e);if(o===void 0)throw Error("No route found for "+e);let i=jr(o).exec({pathname:e}),a=i?.pathname.groups??{};if(t=$r(a),typeof o.enter=="function"&&await o.enter(a)===!1)return;this.v=o,this.t=a,this.u=t===void 0?e:e.substring(0,e.length-t.length)}if(t!==void 0)for(let o of this.o)o.goto(t);this.l.requestUpdate()}outlet(){return this.v?.render?.(this.t)}get params(){return this.t}p(e){let t=this.routes.find(o=>jr(o).test({pathname:e}));return t||this.fallback===void 0?t:this.fallback?{...this.fallback,path:"/*"}:void 0}hostConnected(){this.l.addEventListener(ue.eventName,this.i);let e=new ue(this);this.l.dispatchEvent(e),this._=e.onDisconnect}hostDisconnected(){this._?.(),this.h=void 0}},$r=r=>{let e;for(let t of Object.keys(r))/\d+/.test(t)&&(e===void 0||t>e)&&(e=t);return e&&r[e]},ue=class r extends Event{constructor(e){super(r.eventName,{bubbles:!0,composed:!0,cancelable:!1}),this.routes=e}};ue.eventName="lit-routes-connected";var Ki=location.origin||location.protocol+"//"+location.host,ze=class extends Ee{constructor(){super(...arguments),this.m=e=>{let t=e.button!==0||e.metaKey||e.ctrlKey||e.shiftKey;if(e.defaultPrevented||t)return;let o=e.composedPath().find(s=>s.tagName==="A");if(o===void 0||o.target!==""||o.hasAttribute("download")||o.getAttribute("rel")==="external")return;let i=o.href;if(i===""||i.startsWith("mailto:"))return;let a=window.location;o.origin===Ki&&(e.preventDefault(),i!==a.href&&(window.history.pushState({},"",i),this.goto(o.pathname)))},this.R=e=>{this.goto(window.location.pathname)}}hostConnected(){super.hostConnected(),window.addEventListener("click",this.m),window.addEventListener("popstate",this.R),this.goto(window.location.pathname)}hostDisconnected(){super.hostDisconnected(),window.removeEventListener("click",this.m),window.removeEventListener("popstate",this.R)}};function xr(){let r=new URL(location.href),e=r.searchParams.get("token");e&&(document.cookie=`box_token=${encodeURIComponent(e)}; path=/; SameSite=Strict`,r.searchParams.delete("token"),history.replaceState({},"",r.toString()))}var Ye=class extends Error{constructor(e,{status:t,code:o,method:i,path:a}={}){super(e),this.status=t,this.code=o??"internal",this.method=i,this.path=a}};async function be(r,e,t){let o=await fetch(e,{method:r,headers:t?{"Content-Type":"application/json"}:void 0,body:t?JSON.stringify(t):void 0,credentials:"same-origin"});if(!o.ok){let i=`${r} ${e}: ${o.status}`,a;try{let s=await o.json();i=s.error??i,a=s.code}catch{}throw new Ye(i,{status:o.status,code:a,method:r,path:e})}return o.json()}async function D(r,e){let t=await fetch(r,{signal:e,credentials:"same-origin"});if(!t.ok){let o=`${r}: ${t.status}`,i;try{let a=await t.json();o=a.error??o,i=a.code}catch{}throw new Ye(o,{status:t.status,code:i,method:"GET",path:r})}return t.json()}var Ce=r=>D("/v1/status",r),Tt=(r,e)=>D("/v1/items"+(r?.length?`?state=${encodeURIComponent(r.join(","))}`:""),e),wr=r=>D("/v1/exceptions",r),_r=(r,e)=>D(`/v1/items/${encodeURIComponent(r)}`,e),kr=(r,e)=>D(`/v1/items/${encodeURIComponent(r)}/evidence`,e),Ar=(r,e)=>D(`/v1/provenance/${encodeURIComponent(r)}`,e),Sr=r=>D("/v1/activity",r),Er=r=>D("/v1/sessions",r),zr=(r,e)=>D(`/v1/items/${encodeURIComponent(r)}/session`,e),Cr=(r,e,t)=>be("POST","/v1/ingress",{route:r,key:e,payload:t}),Tr=r=>be("POST","/v1/stop",{reason:r}),Lr=r=>be("POST","/v1/resume",{reason:r}),Lt=(r,e)=>be("POST",`/v1/items/${encodeURIComponent(r)}/resolve`,{reason:e}),Rt=(r,e)=>be("POST",`/v1/items/${encodeURIComponent(r)}/retry`,{reason:e}),Rr=()=>be("POST","/v1/reload",{});var w={es:null,subs:new Set,connected:!1};function Yi(){w.es=new EventSource("/v1/events"),w.es.addEventListener("hello",()=>{w.connected=!0;for(let r of w.subs)r.onState?.(!0)}),w.es.addEventListener("session",r=>{let e=JSON.parse(r.data);for(let t of w.subs)t.onSession?.(e)}),w.es.addEventListener("activity",r=>{let e=JSON.parse(r.data);for(let t of w.subs)t.onEvent?.(e)}),w.es.onerror=()=>{w.connected=!1;for(let r of w.subs)r.onState?.(!1)}}function Gi(r){return w.subs.add(r),w.es?r.onState?.(w.connected):Yi(),()=>{w.subs.delete(r),w.subs.size===0&&(w.es?.close(),w.es=null,w.connected=!1)}}var N=class{events=[];connected=!1;constructor(e,{limit:t=100,onEvent:o,onSession:i,item:a}={}){this._host=e,this._limit=t,this._onEvent=o,this._onSession=i,this._item=a,e.addController(this)}hostConnected(){let e={onState:t=>{this.connected=t,this._host.requestUpdate()},onSession:t=>this._onSession?.(t),onEvent:t=>{this.events=[...this.events,t].slice(-this._limit),this._host.requestUpdate(),this._onEvent?.(t)}};if(this._item){this._es=new EventSource(`/v1/events?item=${encodeURIComponent(this._item)}`),this._es.addEventListener("hello",()=>e.onState(!0)),this._es.addEventListener("session",t=>e.onSession(JSON.parse(t.data))),this._es.addEventListener("activity",t=>e.onEvent(JSON.parse(t.data))),this._es.onerror=()=>e.onState(!1);return}this._limit>1&&Sr().then(t=>{this.events=(t??[]).slice(-this._limit),this._host.requestUpdate()}).catch(()=>{}),this._unsub=Gi(e)}hostDisconnected(){this._es?.close(),this._es=void 0,this._unsub?.(),this._unsub=void 0}};var Ge="box-theme",Pt=[{id:"system",label:"System",icon:"desktop"},{id:"light",label:"Light",icon:"lightbulb"},{id:"dark",label:"Dark",icon:"contrast"}],Pr=matchMedia("(prefers-color-scheme: dark)");function Te(){try{let r=localStorage.getItem(Ge);if(Pt.some(e=>e.id===r))return r}catch{}return"system"}function Qi(r=Te()){return r==="dark"||r==="system"&&Pr.matches}function Ot(r=Te()){let e=Qi(r);document.documentElement.classList.toggle("jh-theme-dark",e),document.documentElement.style.colorScheme=e?"dark":"light",window.dispatchEvent(new CustomEvent("box-theme",{detail:{theme:r,dark:e}}))}function Or(r){try{r==="system"?localStorage.removeItem(Ge):localStorage.setItem(Ge,r)}catch{}Ot(r)}Pr.addEventListener("change",()=>{Te()==="system"&&Ot("system")});window.addEventListener("storage",r=>{r.key===Ge&&Ot()});var Xi=r=>n`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path fill-rule="evenodd" clip-rule="evenodd" d=${r}></path></svg>`,Ji={desktop:"M3.25 4.5A.75.75 0 0 1 4 3.75h16a.75.75 0 0 1 .75.75v12a.75.75 0 0 1-.75.75h-4.96l.671 2.014a.75.75 0 0 1-.711.987H9a.75.75 0 0 1-.712-.987l.671-2.013H4a.75.75 0 0 1-.75-.75v-12Zm1.5 9.75v1.5h14.5v-1.5H4.75Zm14.5-1.5H4.75v-7.5h14.5v7.5Zm-8.71 4.5h2.92l.5 1.5h-3.92l.5-1.5Z",lightbulb:"M12 3.75A5.25 5.25 0 0 0 6.75 9c0 2.333 1.504 4.588 3.5 5.293.3.106.5.39.5.707v1.24h2.5V15a.75.75 0 0 1 .5-.707c1.996-.706 3.5-2.96 3.5-5.293 0-2.9-2.35-5.25-5.25-5.25ZM5.25 9a6.75 6.75 0 0 1 13.5 0c0 2.707-1.608 5.398-4 6.504v1.486a.75.75 0 0 1-.75.75h-4a.75.75 0 0 1-.75-.75v-1.486c-2.391-1.106-4-3.797-4-6.504Zm4 10a.75.75 0 0 1 .75-.75h4a.75.75 0 1 1 0 1.5h-4a.75.75 0 0 1-.75-.75ZM11 20.25a.75.75 0 1 0 0 1.5h2a.75.75 0 0 0 0-1.5h-2Z",contrast:"M12 3.75v16.5a8.25 8.25 0 0 0 0-16.5Zm0-1.5c-5.385 0-9.75 4.366-9.75 9.75 0 5.385 4.365 9.75 9.75 9.75s9.75-4.365 9.75-9.75c0-5.384-4.365-9.75-9.75-9.75Z",stop:"M3.75 12a8.25 8.25 0 1 1 16.5 0 8.25 8.25 0 0 1-16.5 0ZM12 2.25c-5.385 0-9.75 4.366-9.75 9.75 0 5.385 4.365 9.75 9.75 9.75s9.75-4.365 9.75-9.75c0-5.384-4.365-9.75-9.75-9.75Zm-3.5 5.5a.75.75 0 0 0-.75.75v7c0 .415.336.75.75.75h7a.75.75 0 0 0 .75-.75v-7a.75.75 0 0 0-.75-.75h-7Zm.75 7v-5.5h5.5v5.5h-5.5Z",play:"M3.75 12a8.25 8.25 0 1 1 16.5 0 8.25 8.25 0 0 1-16.5 0ZM12 2.25c-5.385 0-9.75 4.366-9.75 9.75 0 5.385 4.365 9.75 9.75 9.75s9.75-4.365 9.75-9.75c0-5.384-4.365-9.75-9.75-9.75Zm4.759 10.46a.75.75 0 0 0 0-1.207l-6.515-4.8a.75.75 0 0 0-1.195.605v9.598a.75.75 0 0 0 1.195.604l6.515-4.8Zm-6.21 2.712v-6.63l4.5 3.315-4.5 3.315Z",rotate:"M12.024 3.25C7.18 3.25 3.25 7.166 3.25 12A8.741 8.741 0 0 0 12 20.75c4.37 0 7.634-3.28 8.711-6.513a.75.75 0 0 0-1.423-.474C18.366 16.53 15.582 19.25 12 19.25A7.241 7.241 0 0 1 4.75 12c0-4.002 3.254-7.25 7.274-7.25a7.275 7.275 0 0 1 6.228 3.5H16a.75.75 0 0 0 0 1.5h4.75V5a.75.75 0 0 0-1.5 0v2.035a8.772 8.772 0 0 0-7.226-3.785Z",check:"M12 3.75a8.25 8.25 0 1 0 0 16.5 8.25 8.25 0 0 0 0-16.5ZM2.25 12c0-5.384 4.365-9.75 9.75-9.75s9.75 4.366 9.75 9.75c0 5.385-4.365 9.75-9.75 9.75S2.25 17.386 2.25 12Zm13.755-3.005a.75.75 0 0 1 0 1.06l-4.95 4.95-.015.016-.01.01a.75.75 0 0 1-1.06 0l-2.5-2.5a.75.75 0 0 1 1.06-1.06l1.97 1.969 4.444-4.445a.75.75 0 0 1 1.061 0Z",external:"M13.658 3.921a.75.75 0 0 0 0 1.5h3.846l-6.548 6.549a.75.75 0 1 0 1.06 1.06l6.548-6.547v3.845a.75.75 0 0 0 1.5 0V3.921h-6.406ZM3.236 7a.75.75 0 0 1 .75-.75h6a.75.75 0 0 1 0 1.5h-5.25v11.5h11.5V15a.75.75 0 0 1 1.5 0v5a.75.75 0 0 1-.75.75h-13a.75.75 0 0 1-.75-.75V7Z",warning:"M12.598 5.066c-.26-.422-.937-.422-1.197 0L7.61 11.225l-3.773 6.127c-.211.343.006.898.599.898h15.13c.593 0 .81-.555.6-.898l-3.774-6.127L12.6 5.066Zm1.278-.786c-.845-1.374-2.906-1.374-3.752 0l-3.792 6.158-3.773 6.128c-.903 1.466.257 3.184 1.876 3.184h15.13c1.618 0 2.78-1.718 1.876-3.184l-3.773-6.128-3.792-6.158ZM12 7.25a.75.75 0 0 1 .75.75v4a.75.75 0 1 1-1.5 0V8a.75.75 0 0 1 .75-.75Zm0 7.25a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z",info:"M12 3.75a8.25 8.25 0 1 0 0 16.5 8.25 8.25 0 0 0 0-16.5ZM2.25 12c0-5.384 4.365-9.75 9.75-9.75s9.75 4.366 9.75 9.75c0 5.385-4.365 9.75-9.75 9.75S2.25 17.386 2.25 12ZM12 10.25a.75.75 0 0 1 .75.75v5a.75.75 0 0 1-1.5 0v-5a.75.75 0 0 1 .75-.75Zm0-1.75a1 1 0 1 0 0-2 1 1 0 0 0 0 2Z",dot:"M3.75 12a8.25 8.25 0 1 1 16.5 0 8.25 8.25 0 0 1-16.5 0ZM12 2.25c-5.385 0-9.75 4.366-9.75 9.75 0 5.385 4.365 9.75 9.75 9.75s9.75-4.365 9.75-9.75c0-5.384-4.365-9.75-9.75-9.75ZM12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10Z",checkmark:"M19.96 7.53a.75.75 0 0 0-1.062-1.06l-9.47 9.47-3.469-3.47a.75.75 0 1 0-1.06 1.06l4 4a.75.75 0 0 0 1.06 0",xmark:"M6.53 5.47a.75.75 0 0 0-1.06 1.06L10.94 12l-5.47 5.47a.75.75 0 0 0 1.06 1.06L12 13.06l5.47 5.47a.75.75 0 0 0 1.06-1.06L13.06 12l5.47-5.47a.75.75 0 1 0-1.06-1.06L12 10.94 6.53 5.47Z",pause:"M12 3.75a8.25 8.25 0 1 0 0 16.5 8.25 8.25 0 0 0 0-16.5ZM2.25 12c0-5.384 4.365-9.75 9.75-9.75s9.75 4.366 9.75 9.75c0 5.385-4.365 9.75-9.75 9.75S2.25 17.386 2.25 12ZM10 7.5a.75.75 0 0 1 .75.75v7a.75.75 0 1 1-1.5 0v-7A.75.75 0 0 1 10 7.5Zm4.75.75a.75.75 0 0 0-1.5 0v7a.75.75 0 1 0 1.5 0v-7Z"},V=(r,e="small")=>n`<jh-icon size=${e}>${Xi(Ji[r])}</jh-icon>`;function k(r){return r==null?"":(r=Math.max(0,Math.round(r)),r<90?`${r}s`:r<5400?`${Math.floor(r/60)}m`:r<172800?`${Math.floor(r/3600)}h`:`${Math.floor(r/86400)}d`)}function _(r){r=String(r??"");let e=r.indexOf(`
+`);return(e<0?r:r.slice(0,e)).trim()}function Nt(r,e=200){return r=String(r??""),r.length>e?r.slice(0,e-1)+"\u2026":r}function E(r){return _(r)}function Ur(r){let e=String(r??"").match(/https?:\/\/[^\s)>\]]+/);return e?e[0]:""}function H(r,e=10){let t=String(r??"");return/^[0-9a-f]{16,}$/i.test(t)?t.slice(0,e):t}var ea=new Intl.DateTimeFormat(void 0,{dateStyle:"medium",timeStyle:"medium"});function Mr(r){if(!r)return{rel:"",abs:"",iso:""};let e=new Date(r);if(Number.isNaN(e.getTime()))return{rel:String(r),abs:"",iso:""};let t=Math.round((Date.now()-e.getTime())/1e3);return{rel:t<-60?`in ${k(-t)}`:t<5?"just now":`${k(t)} ago`,abs:ea.format(e),iso:e.toISOString()}}function Z(r){return r==null?"0":r<1e3?String(r):r<1e6?`${Math.round(r/100)/10}k`:`${Math.round(r/1e5)/10}M`}function Xe(r){let e=(r??0)/1e6;return e<1?`$${e.toFixed(4)}`:`$${e.toFixed(2)}`}function Je(r){return[["in",r?.input],["out",r?.output],["cache read",r?.cache_read],["cache write",r?.cache_write]].filter(([,t])=>t>0).map(([t,o])=>`${t} ${Z(o)}`).join(" \xB7 ")}function Nr(r){return Object.entries(r??{}).sort((e,t)=>t[1]-e[1]).map(([e,t])=>t>1?`${e}\xD7${t}`:e).join(" ")}function ee(r){return r?.route?r.key?`${r.route} / ${r.key}`:r.route:""}function te(r){return[r?.box,r?.repo].filter(Boolean).join(" / ")}function et(r){if(!r?.runner)return"";let e=r.lease_expires_sec??0;return r.lease_lapsed?`${r.runner} \u2014 lease lapsed ${k(-e)} ago`:`${r.runner} \u2014 ${k(e)} left`}function Ut(r){return r?.blocked_by?.length?r.blocked_by.join(", "):r?.root?`cascaded from ${r.root}`:""}function Dr(r){return Object.keys(r??{}).sort().map(e=>`${e} ${r[e]}`).join(" \xB7 ")}var Hr={pending:"neutral",claimed:"brand",waiting:"neutral",handedoff:"neutral",parked:"negative",failed:"negative",done:"positive",resolved:"positive"},ta={done:"positive",land:"positive",check:"positive",resume:"positive","config-reloaded":"positive",recovered:"positive",resolved:"positive",started:"positive",promoted:"positive","build-resumed":"positive",parked:"negative",failed:"negative","budget-refused":"negative",stop:"negative",denied:"negative",escalated:"negative","land-refused":"negative","land-conflict":"negative","rebase-refused":"negative","handoff-failed":"negative","break-glass":"negative",preempted:"negative",claimed:"brand","agent-run":"brand",retried:"brand"},Mt={low:"neutral",medium:"neutral",high:"negative",critical:"negative"},Ir=r=>ta[r]??"neutral",oa=new TextDecoder;function ra(r){if(r.body!==void 0&&r.body!==null)return r.body;if(r.Body==null||r.Body==="")return"";let e;try{e=oa.decode(Uint8Array.from(atob(r.Body),t=>t.charCodeAt(0)))}catch{return""}try{return JSON.parse(e)}catch{return e}}function Br(r){return{kind:r.kind??r.Kind??"",subject:r.subject??r.Subject??"",scope:r.scope??r.Scope??"",actor:r.actor??r.Actor??"",at:r.at??r.At??"",seq:r.seq??r.Seq??0,body:ra(r)}}var ia=new Set(["id","tenant","box","repo","ingress","requester","task","state","opened","changed","depth"]);function Qe(r,e=4){return Object.entries(r??{}).filter(([t,o])=>!ia.has(t)&&o!==""&&o!=null&&typeof o!="object").slice(0,e).map(([t,o])=>`${t}: ${H(String(o))}`).join(" \xB7 ")}function J(r){return r?.note?` \u2014 ${_(r.note)}`:""}function C(r,e){let t=r?.reason??r?.Reason??e;return t?_(t):""}function tt(r,e={}){let t=Br(r),o=t.body&&typeof t.body=="object"?t.body:null,i=typeof t.body=="string"?t.body:"",a=s=>e[s]?E(e[s]):s;switch(t.kind){case"queued":return"Queued"+(o?.depends_on?.length?`, after ${o.depends_on.join(", ")}`:"")+J(o);case"claimed":return`Claimed${o?.seat?` for seat ${o.seat}`:""}${J(o)}`;case"waiting":return`Waiting${J(o)}`;case"handedoff":return`Handed off to a fresh session${J(o)}`;case"parked":return`Parked${J(o)}`;case"failed":return`Failed${J(o)}`;case"recovered":return`Recovered from a lapsed claim${J(o)}`;case"done":return`Done \u2014 landed as ${H(t.subject)}`;case"built":return`Built ${H(o?.built||t.subject)}`;case"land":return o?.branch?`Landed on ${[o.repo,o.branch].filter(Boolean).join("/")}: ${H(o.was)} \u2192 ${H(o.now??t.subject)}`:`Landed ${H(t.subject)}`;case"gate":return`${o?.Gate??o?.gate??"gate"}: ${o?.Decision??o?.decision??""}${C(o)?" \u2014 "+C(o):""}`;case"check":return o&&"green"in o?`Check ${o.green?"green":"RED"}${o.lane?` on the ${o.lane} lane`:""}`:o?`Check ${o.Decision??o.decision??""} ${C(o)}`.trim():`Check ${_(i)}`.trim();case"agent-run":return`${o?.seat??"agent"} started as ${o?.role??"builder"} (mode ${o?.mode??"?"})`;case"agent-prompt":return"Prompt materialized for the agent";case"agent-result":{if(!o)return _(i);let s=[`${o.stop}`,`${Math.round((o.wall_ms??0)/100)/10}s`];return s.push(o.metered?`${Z(o.tokens)} tokens`:"cost NOT reported"),o.cost_usd&&s.push(`$${o.cost_usd.toFixed(4)}`),s.push(o.tools?Nr(o.tools):`${o.tool_calls??0} tools`),o.denied_tools&&s.push(`DENIED ${Nr(o.denied_tools)}`),o.unknown_updates?.length&&s.push(`dialect drift: ${o.unknown_updates.join(", ")}`),s.join(" \xB7 ")}case"charge":{if(!o)return _(i);if(!o.metered)return"Cost NOT reported \u2014 claims stopped";let s=[`${Z(o.tokens??0)} tokens`],h=Je(o);return h&&s.push(h),o.cost_micros&&s.push(Xe(o.cost_micros)),s.join(" \xB7 ")}case"spend":return o?.tokens!=null?`Spent ${Z(o.tokens)} tokens`:o?.running!=null?`Run started \u2014 ${o.running} running, ${o.started_this_window??"?"} started this window`:`Spend recorded${i?" \u2014 "+_(i):""}`;case"budget-refused":return o?.max_per_window!=null?`Refused by the budget \u2014 ${o.max_per_window} starts per ${o.window??"window"} already used`:o?.max_tokens!=null?`Refused by the budget \u2014 ${Z(o.max_tokens)} tokens per window already spent`:`Refused by the budget${C(o,i)?" \u2014 "+C(o,i):Qe(o)?" \u2014 "+Qe(o):""}`;case"authz":return C(o,i)||"Authorization checked";case"escalated":return`Escalated: ${C(o,i)}`;case"handoff-requested":return`Handoff requested: ${C(o,i)}`;case"handoff-failed":return`Handoff failed: ${C(o,i)}`;case"denied":return`Tool refused by policy: ${o?.tool??C(o,i)}`;case"retried":return`Retried by an operator${i?" \u2014 "+_(i):""}`;case"resolved":return`Resolved by an operator${i?" \u2014 "+_(i):""}`;case"stop":return`Claims stopped \u2014 ${_(i)}`;case"resume":return`Claims resumed \u2014 ${_(i)}`;case"config-reloaded":return`Configuration reloaded${i?": "+_(i):o?": "+Qe(o):""}`;case"ingress-open":return`Ingress opened${o?.route?` on ${o.route}`:""}${o?.key?` for ${o.key}`:""}`;case"indexed":return aa(t,i,a);case"compacted":return"Chain compacted behind a verifiable seal";case"review-sample":return"Sampled for human review";case"review-signoff":return`Signed off${i?" \u2014 "+_(i):""}`;case"break-glass":return`Break-glass: ${C(o,i)}`;case"preempted":return`Preempted by an incident${C(o,i)?" \u2014 "+C(o,i):""}`;default:return i?Nt(_(i)):o?Nt(Qe(o))||t.kind:t.subject}}function aa(r,e,t){let o=r.scope.replace(/^index\//,""),i=e?` \u2014 ${_(e)}`:"";switch(o){case"pending":return`Queued: ${t(r.subject)}${i}`;case"exceptions":return`Parked: ${t(r.subject)}${i}`;case"landings":return`Landed: ${t(r.subject)}${i}`;case"ingress":return`Ingress opened: ${e?_(e):r.subject}`;default:return`Filed under ${o}: ${t(r.subject)}${i}`}}function Dt(r){let e=Br(r);if(/^wi-/.test(e.subject))return e.subject;let t=e.scope.match(/^workitem\/(wi-[^/]+)$/);return t?t[1]:""}var z=$`
+  a { color: var(--jh-color-content-brand-enabled); text-decoration: underline; text-underline-offset: 2px; }
+  a:hover { color: var(--jh-color-content-brand-hover); }
+  a:focus-visible, button:focus-visible, [tabindex]:focus-visible {
+    outline: none; box-shadow: var(--jh-shadow-focus); border-radius: var(--jh-border-radius-100);
+  }
+  .vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+  .muted { color: var(--jh-color-content-secondary-enabled); }
+  .helper { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+  .micro { font: var(--jh-font-micro-medium); color: var(--jh-color-content-secondary-enabled); text-transform: uppercase; letter-spacing: .04em; }
+  code, .mono { font: var(--jh-font-code-regular-2); font-size: .85em; }
+  .empty { color: var(--jh-color-content-secondary-enabled); margin: 0; }
+  /* A tinted container pairs with its own content colour: red-100 under
+     red-600 in the light theme, red-800 under red-300 in the dark. The
+     "on-" colours are for solid surfaces and vanish on a tint. */
+  jh-tag { --jh-tag-color-border-enabled: transparent; }
+  jh-tag.positive {
+    --jh-tag-color-background-enabled: var(--jh-color-container-positive-enabled);
+    --jh-tag-color-text-enabled: var(--jh-color-content-positive-enabled);
+  }
+  jh-tag.negative {
+    --jh-tag-color-background-enabled: var(--jh-color-container-negative-enabled);
+    --jh-tag-color-text-enabled: var(--jh-color-content-negative-enabled);
+  }
+  jh-tag.brand {
+    --jh-tag-color-background-enabled: var(--jh-color-container-brand-enabled);
+    --jh-tag-color-text-enabled: var(--jh-color-content-brand-enabled);
+  }
+  jh-notification a { color: inherit; text-decoration: underline; }
+  jh-notification { display: block; margin-top: var(--jh-space-300); }
+  .actions { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; }
+`,sa=r=>String(r??"").replace(/[&<>"']/g,e=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[e]);function R(r,e="neutral",t=6e3){window.dispatchEvent(new CustomEvent("jh-create-toast",{detail:{text:sa(r),appearance:e,timeout:t,dismissButtonAccessibleLabel:"Dismiss"}}))}function qr(r){(r?.shadowRoot?.querySelector("input, textarea")??r)?.focus?.()}var Ht=class extends j{static properties={value:{},label:{},href:{},chars:{type:Number}};static styles=[z,$`
+    :host { display: inline-flex; align-items: center; gap: var(--jh-space-100); vertical-align: middle; }
+    code { padding: 1px var(--jh-space-100); border-radius: var(--jh-border-radius-100);
+           background: var(--jh-color-container-secondary-enabled); }
+    a code { color: inherit; }
+    button { font: var(--jh-font-micro-medium); cursor: pointer; padding: 2px var(--jh-space-200);
+             border: 1px solid var(--jh-color-control-enabled); border-radius: var(--jh-border-radius-pill);
+             background: transparent; color: var(--jh-color-content-secondary-enabled); }
+    button:hover { color: var(--jh-color-content-primary-enabled); border-color: var(--jh-color-control-hover); }
+  `];constructor(){super(),this.chars=10,this.label="id"}async _copy(){try{await navigator.clipboard.writeText(this.value),R(`Copied ${this.label} ${this.value.slice(0,this.chars)}\u2026`,"positive",3e3)}catch{R(`Could not copy \u2014 select the ${this.label} and copy it by hand`,"negative")}}render(){let e=String(this.value??"");if(!e)return p;let t=e.length>this.chars+2?e.slice(0,this.chars):e,o=n`<code title=${e}>${t}</code>`;return n`
+      ${this.href?n`<a href=${this.href} aria-label=${`${this.label} ${t}`}>${o}</a>`:o}
+      ${e.length>t.length?n`<button type="button" @click=${this._copy} aria-label=${`Copy the full ${this.label}`}>Copy</button>`:p}`}};customElements.define("box-hash",Ht);var It=class extends j{static properties={at:{},abs:{type:Boolean}};static styles=$`:host { display: inline; } time { font-variant-numeric: tabular-nums; }`;render(){let e=Mr(this.at);return e.iso?n`<time datetime=${e.iso} title=${e.abs}>${this.abs?e.abs:e.rel}</time>`:n`${e.rel}`}};customElements.define("box-when",It);var Bt=class extends j{static properties={label:{},confirm:{},appearance:{},size:{},prompt:{},glyph:{},floating:{type:Boolean},action:{attribute:!1},_open:{state:!0},_reason:{state:!0},_pending:{state:!0},_error:{state:!0}};static styles=[z,$`
+    :host { display: inline-block; position: relative; }
+    form { display: grid; gap: var(--jh-space-200); margin-top: var(--jh-space-200);
+           padding: var(--jh-space-300); max-width: 420px;
+           background: var(--jh-color-container-primary-enabled);
+           border: 1px solid var(--jh-color-divider-primary);
+           border-radius: var(--jh-border-radius-200); box-shadow: var(--jh-shadow-200); }
+    :host([floating]) form { position: absolute; top: calc(100% + var(--jh-space-100)); left: 0; z-index: var(--jh-z-index-positive-300);
+                            width: max(320px, 100%); margin-top: 0; }
+    .row { display: flex; gap: var(--jh-space-200); }
+    jh-notification { margin: 0; }
+  `];constructor(){super(),this.appearance="secondary",this.size="small",this._open=!1,this._reason="",this._pending=!1,this._error=""}async _toggle(){this._open=!this._open,this._error="",this._open&&(await this.updateComplete,qr(this.renderRoot.querySelector("jh-input")))}_cancel(){this._open=!1,this._reason="",this._error="",this.renderRoot.querySelector("jh-button")?.focus()}async _submit(e){e.preventDefault();let t=this._reason.trim();if(!(!t||this._pending)){this._pending=!0,this._error="";try{let o=await this.action(t);this._open=!1,this._reason="",this.dispatchEvent(new CustomEvent("box-done",{detail:{reason:t,result:o},bubbles:!0,composed:!0}))}catch(o){this._error=o.message}finally{this._pending=!1}}}render(){return n`
+      <jh-button appearance=${this.appearance} size=${this.size} label=${this.label}
+        aria-expanded=${this._open?"true":"false"} @click=${this._toggle}>
+        ${this.glyph?n`<span slot="jh-button-icon-left">${V(this.glyph,"x-small")}</span>`:p}
+      </jh-button>
+      ${this._open?n`
+        <form role="group" aria-label=${this.prompt??this.label} @submit=${this._submit}
+          @keydown=${e=>{e.key==="Escape"&&this._cancel()}}>
+          <jh-input size="small" label="Reason" required
+            helper-text="Becomes the record: who did this, when, and why"
+            .value=${this._reason}
+            @jh-change=${e=>{this._reason=e.target.value??""}}
+            @input=${e=>{this._reason=e.composedPath()[0].value??this._reason}}></jh-input>
+          <div class="row">
+            <jh-button submit size="small" label=${this.confirm??this.label}
+              appearance=${this.appearance==="danger"?"danger":"primary"}
+              ?pending=${this._pending} ?disabled=${!this._reason.trim()}></jh-button>
+            <jh-button appearance="tertiary" size="small" label="Cancel" @click=${this._cancel}></jh-button>
+          </div>
+          ${this._error?n`<jh-notification appearance="negative" type="alert" hide-dismiss-button>${this._error}</jh-notification>`:p}
+        </form>`:p}`}};customElements.define("box-reason",Bt);var ot=window,rt=ot.ShadowRoot&&(ot.ShadyCSS===void 0||ot.ShadyCSS.nativeShadow)&&"adoptedStyleSheets"in Document.prototype&&"replace"in CSSStyleSheet.prototype,qt=Symbol(),Vr=new WeakMap,Le=class{constructor(e,t,o){if(this._$cssResult$=!0,o!==qt)throw Error("CSSResult is not constructable. Use `unsafeCSS` or `css` instead.");this.cssText=e,this.t=t}get styleSheet(){let e=this.o,t=this.t;if(rt&&e===void 0){let o=t!==void 0&&t.length===1;o&&(e=Vr.get(t)),e===void 0&&((this.o=e=new CSSStyleSheet).replaceSync(this.cssText),o&&Vr.set(t,e))}return e}toString(){return this.cssText}},Zr=r=>new Le(typeof r=="string"?r:r+"",void 0,qt),y=(r,...e)=>{let t=r.length===1?r[0]:e.reduce((o,i,a)=>o+(s=>{if(s._$cssResult$===!0)return s.cssText;if(typeof s=="number")return s;throw Error("Value passed to 'css' function must be a 'css' function result: "+s+". Use 'unsafeCSS' to pass non-literal values, but take care to ensure page security.")})(i)+r[a+1],r[0]);return new Le(t,r,qt)},Vt=(r,e)=>{rt?r.adoptedStyleSheets=e.map(t=>t instanceof CSSStyleSheet?t:t.styleSheet):e.forEach(t=>{let o=document.createElement("style"),i=ot.litNonce;i!==void 0&&o.setAttribute("nonce",i),o.textContent=t.cssText,r.appendChild(o)})},it=rt?r=>r:r=>r instanceof CSSStyleSheet?(e=>{let t="";for(let o of e.cssRules)t+=o.cssText;return Zr(t)})(r):r;var Zt,at=window,Wr=at.trustedTypes,na=Wr?Wr.emptyScript:"",Fr=at.reactiveElementPolyfillSupport,Ft={toAttribute(r,e){switch(e){case Boolean:r=r?na:null;break;case Object:case Array:r=r==null?r:JSON.stringify(r)}return r},fromAttribute(r,e){let t=r;switch(e){case Boolean:t=r!==null;break;case Number:t=r===null?null:Number(r);break;case Object:case Array:try{t=JSON.parse(r)}catch{t=null}}return t}},Kr=(r,e)=>e!==r&&(e==e||r==r),Wt={attribute:!0,type:String,converter:Ft,reflect:!1,hasChanged:Kr},Kt="finalized",I=class extends HTMLElement{constructor(){super(),this._$Ei=new Map,this.isUpdatePending=!1,this.hasUpdated=!1,this._$El=null,this._$Eu()}static addInitializer(e){var t;this.finalize(),((t=this.h)!==null&&t!==void 0?t:this.h=[]).push(e)}static get observedAttributes(){this.finalize();let e=[];return this.elementProperties.forEach((t,o)=>{let i=this._$Ep(o,t);i!==void 0&&(this._$Ev.set(i,o),e.push(i))}),e}static createProperty(e,t=Wt){if(t.state&&(t.attribute=!1),this.finalize(),this.elementProperties.set(e,t),!t.noAccessor&&!this.prototype.hasOwnProperty(e)){let o=typeof e=="symbol"?Symbol():"__"+e,i=this.getPropertyDescriptor(e,o,t);i!==void 0&&Object.defineProperty(this.prototype,e,i)}}static getPropertyDescriptor(e,t,o){return{get(){return this[t]},set(i){let a=this[e];this[t]=i,this.requestUpdate(e,a,o)},configurable:!0,enumerable:!0}}static getPropertyOptions(e){return this.elementProperties.get(e)||Wt}static finalize(){if(this.hasOwnProperty(Kt))return!1;this[Kt]=!0;let e=Object.getPrototypeOf(this);if(e.finalize(),e.h!==void 0&&(this.h=[...e.h]),this.elementProperties=new Map(e.elementProperties),this._$Ev=new Map,this.hasOwnProperty("properties")){let t=this.properties,o=[...Object.getOwnPropertyNames(t),...Object.getOwnPropertySymbols(t)];for(let i of o)this.createProperty(i,t[i])}return this.elementStyles=this.finalizeStyles(this.styles),!0}static finalizeStyles(e){let t=[];if(Array.isArray(e)){let o=new Set(e.flat(1/0).reverse());for(let i of o)t.unshift(it(i))}else e!==void 0&&t.push(it(e));return t}static _$Ep(e,t){let o=t.attribute;return o===!1?void 0:typeof o=="string"?o:typeof e=="string"?e.toLowerCase():void 0}_$Eu(){var e;this._$E_=new Promise(t=>this.enableUpdating=t),this._$AL=new Map,this._$Eg(),this.requestUpdate(),(e=this.constructor.h)===null||e===void 0||e.forEach(t=>t(this))}addController(e){var t,o;((t=this._$ES)!==null&&t!==void 0?t:this._$ES=[]).push(e),this.renderRoot!==void 0&&this.isConnected&&((o=e.hostConnected)===null||o===void 0||o.call(e))}removeController(e){var t;(t=this._$ES)===null||t===void 0||t.splice(this._$ES.indexOf(e)>>>0,1)}_$Eg(){this.constructor.elementProperties.forEach((e,t)=>{this.hasOwnProperty(t)&&(this._$Ei.set(t,this[t]),delete this[t])})}createRenderRoot(){var e;let t=(e=this.shadowRoot)!==null&&e!==void 0?e:this.attachShadow(this.constructor.shadowRootOptions);return Vt(t,this.constructor.elementStyles),t}connectedCallback(){var e;this.renderRoot===void 0&&(this.renderRoot=this.createRenderRoot()),this.enableUpdating(!0),(e=this._$ES)===null||e===void 0||e.forEach(t=>{var o;return(o=t.hostConnected)===null||o===void 0?void 0:o.call(t)})}enableUpdating(e){}disconnectedCallback(){var e;(e=this._$ES)===null||e===void 0||e.forEach(t=>{var o;return(o=t.hostDisconnected)===null||o===void 0?void 0:o.call(t)})}attributeChangedCallback(e,t,o){this._$AK(e,o)}_$EO(e,t,o=Wt){var i;let a=this.constructor._$Ep(e,o);if(a!==void 0&&o.reflect===!0){let s=(((i=o.converter)===null||i===void 0?void 0:i.toAttribute)!==void 0?o.converter:Ft).toAttribute(t,o.type);this._$El=e,s==null?this.removeAttribute(a):this.setAttribute(a,s),this._$El=null}}_$AK(e,t){var o;let i=this.constructor,a=i._$Ev.get(e);if(a!==void 0&&this._$El!==a){let s=i.getPropertyOptions(a),h=typeof s.converter=="function"?{fromAttribute:s.converter}:((o=s.converter)===null||o===void 0?void 0:o.fromAttribute)!==void 0?s.converter:Ft;this._$El=a,this[a]=h.fromAttribute(t,s.type),this._$El=null}}requestUpdate(e,t,o){let i=!0;e!==void 0&&(((o=o||this.constructor.getPropertyOptions(e)).hasChanged||Kr)(this[e],t)?(this._$AL.has(e)||this._$AL.set(e,t),o.reflect===!0&&this._$El!==e&&(this._$EC===void 0&&(this._$EC=new Map),this._$EC.set(e,o))):i=!1),!this.isUpdatePending&&i&&(this._$E_=this._$Ej())}async _$Ej(){this.isUpdatePending=!0;try{await this._$E_}catch(t){Promise.reject(t)}let e=this.scheduleUpdate();return e!=null&&await e,!this.isUpdatePending}scheduleUpdate(){return this.performUpdate()}performUpdate(){var e;if(!this.isUpdatePending)return;this.hasUpdated,this._$Ei&&(this._$Ei.forEach((i,a)=>this[a]=i),this._$Ei=void 0);let t=!1,o=this._$AL;try{t=this.shouldUpdate(o),t?(this.willUpdate(o),(e=this._$ES)===null||e===void 0||e.forEach(i=>{var a;return(a=i.hostUpdate)===null||a===void 0?void 0:a.call(i)}),this.update(o)):this._$Ek()}catch(i){throw t=!1,this._$Ek(),i}t&&this._$AE(o)}willUpdate(e){}_$AE(e){var t;(t=this._$ES)===null||t===void 0||t.forEach(o=>{var i;return(i=o.hostUpdated)===null||i===void 0?void 0:i.call(o)}),this.hasUpdated||(this.hasUpdated=!0,this.firstUpdated(e)),this.updated(e)}_$Ek(){this._$AL=new Map,this.isUpdatePending=!1}get updateComplete(){return this.getUpdateComplete()}getUpdateComplete(){return this._$E_}shouldUpdate(e){return!0}update(e){this._$EC!==void 0&&(this._$EC.forEach((t,o)=>this._$EO(o,this[o],t)),this._$EC=void 0),this._$Ek()}updated(e){}firstUpdated(e){}};I[Kt]=!0,I.elementProperties=new Map,I.elementStyles=[],I.shadowRootOptions={mode:"open"},Fr?.({ReactiveElement:I}),((Zt=at.reactiveElementVersions)!==null&&Zt!==void 0?Zt:at.reactiveElementVersions=[]).push("1.6.3");var Yt,st=window,ve=st.trustedTypes,Yr=ve?ve.createPolicy("lit-html",{createHTML:r=>r}):void 0,Qt="$lit$",W=`lit$${(Math.random()+"").slice(9)}$`,oi="?"+W,la=`<${oi}>`,ie=document,Pe=()=>ie.createComment(""),Oe=r=>r===null||typeof r!="object"&&typeof r!="function",ri=Array.isArray,ca=r=>ri(r)||typeof r?.[Symbol.iterator]=="function",Gt=`[ 	
+\f\r]`,Re=/<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g,Gr=/-->/g,Qr=/>/g,oe=RegExp(`>|${Gt}(?:([^\\s"'>=/]+)(${Gt}*=${Gt}*(?:[^ 	
+\f\r"'\`<>=]|("|')|))|$)`,"g"),Xr=/'/g,Jr=/"/g,ii=/^(?:script|style|textarea|title)$/i,ai=r=>(e,...t)=>({_$litType$:r,strings:e,values:t}),d=ai(1),bs=ai(2),ae=Symbol.for("lit-noChange"),x=Symbol.for("lit-nothing"),ei=new WeakMap,re=ie.createTreeWalker(ie,129,null,!1);function si(r,e){if(!Array.isArray(r)||!r.hasOwnProperty("raw"))throw Error("invalid template strings array");return Yr!==void 0?Yr.createHTML(e):e}var ha=(r,e)=>{let t=r.length-1,o=[],i,a=e===2?"<svg>":"",s=Re;for(let h=0;h<t;h++){let l=r[h],c,b,u=-1,m=0;for(;m<l.length&&(s.lastIndex=m,b=s.exec(l),b!==null);)m=s.lastIndex,s===Re?b[1]==="!--"?s=Gr:b[1]!==void 0?s=Qr:b[2]!==void 0?(ii.test(b[2])&&(i=RegExp("</"+b[2],"g")),s=oe):b[3]!==void 0&&(s=oe):s===oe?b[0]===">"?(s=i??Re,u=-1):b[1]===void 0?u=-2:(u=s.lastIndex-b[2].length,c=b[1],s=b[3]===void 0?oe:b[3]==='"'?Jr:Xr):s===Jr||s===Xr?s=oe:s===Gr||s===Qr?s=Re:(s=oe,i=void 0);let f=s===oe&&r[h+1].startsWith("/>")?" ":"";a+=s===Re?l+la:u>=0?(o.push(c),l.slice(0,u)+Qt+l.slice(u)+W+f):l+W+(u===-2?(o.push(void 0),h):f)}return[si(r,a+(r[t]||"<?>")+(e===2?"</svg>":"")),o]},Ne=class r{constructor({strings:e,_$litType$:t},o){let i;this.parts=[];let a=0,s=0,h=e.length-1,l=this.parts,[c,b]=ha(e,t);if(this.el=r.createElement(c,o),re.currentNode=this.el.content,t===2){let u=this.el.content,m=u.firstChild;m.remove(),u.append(...m.childNodes)}for(;(i=re.nextNode())!==null&&l.length<h;){if(i.nodeType===1){if(i.hasAttributes()){let u=[];for(let m of i.getAttributeNames())if(m.endsWith(Qt)||m.startsWith(W)){let f=b[s++];if(u.push(m),f!==void 0){let L=i.getAttribute(f.toLowerCase()+Qt).split(W),T=/([.?@])?(.*)/.exec(f);l.push({type:1,index:a,name:T[2],strings:L,ctor:T[1]==="."?Jt:T[1]==="?"?eo:T[1]==="@"?to:ge})}else l.push({type:6,index:a})}for(let m of u)i.removeAttribute(m)}if(ii.test(i.tagName)){let u=i.textContent.split(W),m=u.length-1;if(m>0){i.textContent=ve?ve.emptyScript:"";for(let f=0;f<m;f++)i.append(u[f],Pe()),re.nextNode(),l.push({type:2,index:++a});i.append(u[m],Pe())}}}else if(i.nodeType===8)if(i.data===oi)l.push({type:2,index:a});else{let u=-1;for(;(u=i.data.indexOf(W,u+1))!==-1;)l.push({type:7,index:a}),u+=W.length-1}a++}}static createElement(e,t){let o=ie.createElement("template");return o.innerHTML=e,o}};function me(r,e,t=r,o){var i,a,s,h;if(e===ae)return e;let l=o!==void 0?(i=t._$Co)===null||i===void 0?void 0:i[o]:t._$Cl,c=Oe(e)?void 0:e._$litDirective$;return l?.constructor!==c&&((a=l?._$AO)===null||a===void 0||a.call(l,!1),c===void 0?l=void 0:(l=new c(r),l._$AT(r,t,o)),o!==void 0?((s=(h=t)._$Co)!==null&&s!==void 0?s:h._$Co=[])[o]=l:t._$Cl=l),l!==void 0&&(e=me(r,l._$AS(r,e.values),l,o)),e}var Xt=class{constructor(e,t){this._$AV=[],this._$AN=void 0,this._$AD=e,this._$AM=t}get parentNode(){return this._$AM.parentNode}get _$AU(){return this._$AM._$AU}u(e){var t;let{el:{content:o},parts:i}=this._$AD,a=((t=e?.creationScope)!==null&&t!==void 0?t:ie).importNode(o,!0);re.currentNode=a;let s=re.nextNode(),h=0,l=0,c=i[0];for(;c!==void 0;){if(h===c.index){let b;c.type===2?b=new Ue(s,s.nextSibling,this,e):c.type===1?b=new c.ctor(s,c.name,c.strings,this,e):c.type===6&&(b=new oo(s,this,e)),this._$AV.push(b),c=i[++l]}h!==c?.index&&(s=re.nextNode(),h++)}return re.currentNode=ie,a}v(e){let t=0;for(let o of this._$AV)o!==void 0&&(o.strings!==void 0?(o._$AI(e,o,t),t+=o.strings.length-2):o._$AI(e[t])),t++}},Ue=class r{constructor(e,t,o,i){var a;this.type=2,this._$AH=x,this._$AN=void 0,this._$AA=e,this._$AB=t,this._$AM=o,this.options=i,this._$Cp=(a=i?.isConnected)===null||a===void 0||a}get _$AU(){var e,t;return(t=(e=this._$AM)===null||e===void 0?void 0:e._$AU)!==null&&t!==void 0?t:this._$Cp}get parentNode(){let e=this._$AA.parentNode,t=this._$AM;return t!==void 0&&e?.nodeType===11&&(e=t.parentNode),e}get startNode(){return this._$AA}get endNode(){return this._$AB}_$AI(e,t=this){e=me(this,e,t),Oe(e)?e===x||e==null||e===""?(this._$AH!==x&&this._$AR(),this._$AH=x):e!==this._$AH&&e!==ae&&this._(e):e._$litType$!==void 0?this.g(e):e.nodeType!==void 0?this.$(e):ca(e)?this.T(e):this._(e)}k(e){return this._$AA.parentNode.insertBefore(e,this._$AB)}$(e){this._$AH!==e&&(this._$AR(),this._$AH=this.k(e))}_(e){this._$AH!==x&&Oe(this._$AH)?this._$AA.nextSibling.data=e:this.$(ie.createTextNode(e)),this._$AH=e}g(e){var t;let{values:o,_$litType$:i}=e,a=typeof i=="number"?this._$AC(e):(i.el===void 0&&(i.el=Ne.createElement(si(i.h,i.h[0]),this.options)),i);if(((t=this._$AH)===null||t===void 0?void 0:t._$AD)===a)this._$AH.v(o);else{let s=new Xt(a,this),h=s.u(this.options);s.v(o),this.$(h),this._$AH=s}}_$AC(e){let t=ei.get(e.strings);return t===void 0&&ei.set(e.strings,t=new Ne(e)),t}T(e){ri(this._$AH)||(this._$AH=[],this._$AR());let t=this._$AH,o,i=0;for(let a of e)i===t.length?t.push(o=new r(this.k(Pe()),this.k(Pe()),this,this.options)):o=t[i],o._$AI(a),i++;i<t.length&&(this._$AR(o&&o._$AB.nextSibling,i),t.length=i)}_$AR(e=this._$AA.nextSibling,t){var o;for((o=this._$AP)===null||o===void 0||o.call(this,!1,!0,t);e&&e!==this._$AB;){let i=e.nextSibling;e.remove(),e=i}}setConnected(e){var t;this._$AM===void 0&&(this._$Cp=e,(t=this._$AP)===null||t===void 0||t.call(this,e))}},ge=class{constructor(e,t,o,i,a){this.type=1,this._$AH=x,this._$AN=void 0,this.element=e,this.name=t,this._$AM=i,this.options=a,o.length>2||o[0]!==""||o[1]!==""?(this._$AH=Array(o.length-1).fill(new String),this.strings=o):this._$AH=x}get tagName(){return this.element.tagName}get _$AU(){return this._$AM._$AU}_$AI(e,t=this,o,i){let a=this.strings,s=!1;if(a===void 0)e=me(this,e,t,0),s=!Oe(e)||e!==this._$AH&&e!==ae,s&&(this._$AH=e);else{let h=e,l,c;for(e=a[0],l=0;l<a.length-1;l++)c=me(this,h[o+l],t,l),c===ae&&(c=this._$AH[l]),s||(s=!Oe(c)||c!==this._$AH[l]),c===x?e=x:e!==x&&(e+=(c??"")+a[l+1]),this._$AH[l]=c}s&&!i&&this.j(e)}j(e){e===x?this.element.removeAttribute(this.name):this.element.setAttribute(this.name,e??"")}},Jt=class extends ge{constructor(){super(...arguments),this.type=3}j(e){this.element[this.name]=e===x?void 0:e}},da=ve?ve.emptyScript:"",eo=class extends ge{constructor(){super(...arguments),this.type=4}j(e){e&&e!==x?this.element.setAttribute(this.name,da):this.element.removeAttribute(this.name)}},to=class extends ge{constructor(e,t,o,i,a){super(e,t,o,i,a),this.type=5}_$AI(e,t=this){var o;if((e=(o=me(this,e,t,0))!==null&&o!==void 0?o:x)===ae)return;let i=this._$AH,a=e===x&&i!==x||e.capture!==i.capture||e.once!==i.once||e.passive!==i.passive,s=e!==x&&(i===x||a);a&&this.element.removeEventListener(this.name,this,i),s&&this.element.addEventListener(this.name,this,e),this._$AH=e}handleEvent(e){var t,o;typeof this._$AH=="function"?this._$AH.call((o=(t=this.options)===null||t===void 0?void 0:t.host)!==null&&o!==void 0?o:this.element,e):this._$AH.handleEvent(e)}},oo=class{constructor(e,t,o){this.element=e,this.type=6,this._$AN=void 0,this._$AM=t,this.options=o}get _$AU(){return this._$AM._$AU}_$AI(e){me(this,e)}};var ti=st.litHtmlPolyfillSupport;ti?.(Ne,Ue),((Yt=st.litHtmlVersions)!==null&&Yt!==void 0?Yt:st.litHtmlVersions=[]).push("2.8.0");var ni=(r,e,t)=>{var o,i;let a=(o=t?.renderBefore)!==null&&o!==void 0?o:e,s=a._$litPart$;if(s===void 0){let h=(i=t?.renderBefore)!==null&&i!==void 0?i:null;a._$litPart$=s=new Ue(e.insertBefore(Pe(),h),h,void 0,t??{})}return s._$AI(r),s};var ro,io;var g=class extends I{constructor(){super(...arguments),this.renderOptions={host:this},this._$Do=void 0}createRenderRoot(){var e,t;let o=super.createRenderRoot();return(e=(t=this.renderOptions).renderBefore)!==null&&e!==void 0||(t.renderBefore=o.firstChild),o}update(e){let t=this.render();this.hasUpdated||(this.renderOptions.isConnected=this.isConnected),super.update(e),this._$Do=ni(t,this.renderRoot,this.renderOptions)}connectedCallback(){var e;super.connectedCallback(),(e=this._$Do)===null||e===void 0||e.setConnected(!0)}disconnectedCallback(){var e;super.disconnectedCallback(),(e=this._$Do)===null||e===void 0||e.setConnected(!1)}render(){return ae}};g.finalized=!0,g._$litElement$=!0,(ro=globalThis.litElementHydrateSupport)===null||ro===void 0||ro.call(globalThis,{LitElement:g});var li=globalThis.litElementPolyfillSupport;li?.({LitElement:g});((io=globalThis.litElementVersions)!==null&&io!==void 0?io:globalThis.litElementVersions=[]).push("3.3.3");var v=r=>r??x;var ao=class extends g{#e;#t;static get styles(){return y`
       @keyframes indicator {
         from {
           margin-left: -45%;
@@ -148,39 +222,39 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         transform: none;
         animation: spin 0.75s linear infinite;
       }
-    `}static get properties(){return{accessibleLabel:{type:String,attribute:"accessible-label"},accessibleValueText:{type:String,attribute:"accessible-valuetext"},hideValue:{type:Boolean,attribute:"hide-value"},indeterminate:{type:Boolean,reflect:!0},label:{type:String,reflect:!0},max:{type:Number},min:{type:Number},size:{type:String,reflect:!0},type:{type:String,reflect:!0},value:{type:Number}}}constructor(){super(),this.#t=this.attachInternals(),this.indeterminate=!1,this.label=null,this.size="medium",this.type="linear",this.hideValue=!1,this.#t.ariaLabel,this.#t.ariaValueMax,this.#t.ariaValueMin,this.#t.ariaValueNow,this.#t.ariaValueText,this.#t.role="progressbar",this.accessibleLabel=null,this.max=100,this.min=0,this.value=0,this.accessibleValueText=null}connectedCallback(){super.connectedCallback(),new MutationObserver(this.#o.bind(this)).observe(this,{attributeFilter:["indeterminate"]})}#o(){this.indeterminate&&(this.value=null)}#r(t,e){let o=this.#t[t];e!==o&&(this.#t[t]=e),this.requestUpdate(t,o)}get label(){return this.#e}set label(t){let e=this.label;t!==e&&(this.#e=t,this.accessibleLabel===null&&(this.accessibleLabel=t)),this.requestUpdate("label",e)}get accessibleLabel(){return this.#t.ariaLabel}set accessibleLabel(t){this.#r("ariaLabel",t)}get min(){return this.#t.ariaValueMin}set min(t){this.#r("ariaValueMin",t)}get max(){return this.#t.ariaValueMax}set max(t){this.#r("ariaValueMax",t)}get accessibleValueText(){return this.#t.ariaValueText}set accessibleValueText(t){this.#r("ariaValueText",t)}get value(){return this.#t.ariaValueNow}set value(t){this.#r("ariaValueNow",t)}#i(t,e,o){let i;e?i=75:o===null?i=0:i=o;let s={small:[6,6,37.8],medium:[8,8,50.3],large:[16,16,100.8]},[a,c,n]=s[t],l=n-n*Number(i)/100;return d`
+    `}static get properties(){return{accessibleLabel:{type:String,attribute:"accessible-label"},accessibleValueText:{type:String,attribute:"accessible-valuetext"},hideValue:{type:Boolean,attribute:"hide-value"},indeterminate:{type:Boolean,reflect:!0},label:{type:String,reflect:!0},max:{type:Number},min:{type:Number},size:{type:String,reflect:!0},type:{type:String,reflect:!0},value:{type:Number}}}constructor(){super(),this.#e=this.attachInternals(),this.indeterminate=!1,this.label=null,this.size="medium",this.type="linear",this.hideValue=!1,this.#e.ariaLabel,this.#e.ariaValueMax,this.#e.ariaValueMin,this.#e.ariaValueNow,this.#e.ariaValueText,this.#e.role="progressbar",this.accessibleLabel=null,this.max=100,this.min=0,this.value=0,this.accessibleValueText=null}connectedCallback(){super.connectedCallback(),new MutationObserver(this.#o.bind(this)).observe(this,{attributeFilter:["indeterminate"]})}#o(){this.indeterminate&&(this.value=null)}#r(e,t){let o=this.#e[e];t!==o&&(this.#e[e]=t),this.requestUpdate(e,o)}get label(){return this.#t}set label(e){let t=this.label;e!==t&&(this.#t=e,this.accessibleLabel===null&&(this.accessibleLabel=e)),this.requestUpdate("label",t)}get accessibleLabel(){return this.#e.ariaLabel}set accessibleLabel(e){this.#r("ariaLabel",e)}get min(){return this.#e.ariaValueMin}set min(e){this.#r("ariaValueMin",e)}get max(){return this.#e.ariaValueMax}set max(e){this.#r("ariaValueMax",e)}get accessibleValueText(){return this.#e.ariaValueText}set accessibleValueText(e){this.#r("ariaValueText",e)}get value(){return this.#e.ariaValueNow}set value(e){this.#r("ariaValueNow",e)}#i(e,t,o){let i;t?i=75:o===null?i=0:i=o;let a={small:[6,6,37.8],medium:[8,8,50.3],large:[16,16,100.8]},[s,h,l]=a[e],c=l-l*Number(i)/100;return d`
       <svg>
         <circle
           class="circular-progress-bar"
-          r=${a}
-          cx=${c}
-          cy=${c}
-          c=${n}
+          r=${s}
+          cx=${h}
+          cy=${h}
+          c=${l}
         ></circle>
         <circle
           class="circular-progress-bar-value"
-          r=${a}
-          cx=${c}
-          cy=${c}
-          c=${n}
-          style="stroke-dashoffset:${l}px"
+          r=${s}
+          cx=${h}
+          cy=${h}
+          c=${l}
+          style="stroke-dashoffset:${c}px"
         ></circle>
       </svg>
-    `}#s(t){return d`
+    `}#a(e){return d`
       <div class="linear-progress-bar">
         <div
           class="linear-progress-bar-value"
-          style=${b(this.indeterminate?null:`width:${t||0}%`)}
+          style=${v(this.indeterminate?null:`width:${e||0}%`)}
         ></div>
       </div>
-    `}render(){let t,e,o,i,s=Math.round((+this.value-+this.min)/(+this.max-+this.min)*100);return this.label&&(i=d`<label>${this.label}</label>`),this.type==="linear"?t=this.#s(s):this.type==="circular"&&(t=this.#i(this.size,this.indeterminate,s)),this.value&&!this.hideValue&&!this.indeterminate&&(this.label&&this.type==="linear"&&(o="has-label"),e=d`
-        <span class=${b(o)}>${s+"%"}</span>
+    `}render(){let e,t,o,i,a=Math.round((+this.value-+this.min)/(+this.max-+this.min)*100);return this.label&&(i=d`<label>${this.label}</label>`),this.type==="linear"?e=this.#a(a):this.type==="circular"&&(e=this.#i(this.size,this.indeterminate,a)),this.value&&!this.hideValue&&!this.indeterminate&&(this.label&&this.type==="linear"&&(o="has-label"),t=d`
+        <span class=${v(o)}>${a+"%"}</span>
       `),d`
       <div class="container">
-        ${this.label||this.value&&!this.hideValue?d`<div class="text-content">${i} ${e}</div>`:null}
-        ${t}
+        ${this.label||this.value&&!this.hideValue?d`<div class="text-content">${i} ${t}</div>`:null}
+        ${e}
       </div>
-    `}};customElements.define("jh-progress",Se);var Ee=class extends f{static get formAssociated(){return!0}#t;#e;static get styles(){return y`
+    `}};customElements.define("jh-progress",ao);var so=class extends g{static get formAssociated(){return!0}#e;#t;static get styles(){return y`
       :host {
         display: inline-block;
         touch-action: manipulation;
@@ -781,36 +855,36 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
       :host(:not([label])) a {
         padding: 0;
       }
-    `}static get properties(){return{accessibleDisabled:{type:String,attribute:"accessible-disabled",reflect:!0},accessibleLabel:{type:String,attribute:"accessible-label"},appearance:{type:String,reflect:!0},block:{type:Boolean},disabled:{type:Boolean,reflect:!0},href:{type:String},iconPosition:{type:String,attribute:"icon-position",reflect:!0},pending:{type:Boolean,reflect:!0},label:{type:String},name:{type:String},size:{type:String,reflect:!0},submit:{type:Boolean},target:{type:String},value:{type:String}}}constructor(){super(),this.#t=this.attachInternals(),this.#t.form,this.accessibleDisabled=null,this.accessibleLabel=null,this.appearance="secondary",this.block=!1,this.disabled=!1,this.href=null,this.iconPosition="before",this.pending=!1,this.label=null,this.name=null,this.size="medium",this.submit=!1,this.target=null,this.value=null,this.addEventListener("click",this.#r),this.addEventListener("keydown",this.#i)}get value(){return this.#e}set value(t){let e=this.#e;t!==e&&(this.#e=t,this.#t.setFormValue(t)),this.requestUpdate("value",e)}firstUpdated(){this.#o(),new ResizeObserver(this.#o.bind(this)).observe(this)}#o(){let{width:t}=this.getBoundingClientRect();this.style.setProperty("--populated-button-width",`${t}px`)}formDisabledCallback(t){this.disabled=t}#r(t){this.submit&&this.#t.form&&!this.disabled&&this.#t.form.requestSubmit()}#i(t){(t.code==="Space"||t.code==="Enter")&&(this.accessibleDisabled==="true"||this.pending)&&t.preventDefault()}#s(){this.firstElementChild.setAttribute("aria-hidden","true"),this.firstElementChild.setAttribute("size","medium")}#a(t,e){let o,i;return e&&(i=d`<span>${e}</span>`),t&&!this.disabled?o=d`
+    `}static get properties(){return{accessibleDisabled:{type:String,attribute:"accessible-disabled",reflect:!0},accessibleLabel:{type:String,attribute:"accessible-label"},appearance:{type:String,reflect:!0},block:{type:Boolean},disabled:{type:Boolean,reflect:!0},href:{type:String},iconPosition:{type:String,attribute:"icon-position",reflect:!0},pending:{type:Boolean,reflect:!0},label:{type:String},name:{type:String},size:{type:String,reflect:!0},submit:{type:Boolean},target:{type:String},value:{type:String}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.form,this.accessibleDisabled=null,this.accessibleLabel=null,this.appearance="secondary",this.block=!1,this.disabled=!1,this.href=null,this.iconPosition="before",this.pending=!1,this.label=null,this.name=null,this.size="medium",this.submit=!1,this.target=null,this.value=null,this.addEventListener("click",this.#r),this.addEventListener("keydown",this.#i)}get value(){return this.#t}set value(e){let t=this.#t;e!==t&&(this.#t=e,this.#e.setFormValue(e)),this.requestUpdate("value",t)}firstUpdated(){this.#o(),new ResizeObserver(this.#o.bind(this)).observe(this)}#o(){let{width:e}=this.getBoundingClientRect();this.style.setProperty("--populated-button-width",`${e}px`)}formDisabledCallback(e){this.disabled=e}#r(e){this.submit&&this.#e.form&&!this.disabled&&this.#e.form.requestSubmit()}#i(e){(e.code==="Space"||e.code==="Enter")&&(this.accessibleDisabled==="true"||this.pending)&&e.preventDefault()}#a(){this.firstElementChild.setAttribute("aria-hidden","true"),this.firstElementChild.setAttribute("size","medium")}#s(e,t){let o,i;return t&&(i=d`<span>${t}</span>`),e&&!this.disabled?o=d`
         <jh-progress type="circular" indeterminate></jh-progress>
       `:o=d`
         <slot
           name="jh-button-icon"
-          @slotchange=${this.#s}
+          @slotchange=${this.#a}
         ></slot>
         ${i}
-      `,d` <span class="content-wrapper">${o}</span> `}render(){let t=this.#a(this.pending,this.label),e;return this.accessibleDisabled!=="false"&&(e=this.accessibleDisabled),this.href?d`
+      `,d` <span class="content-wrapper">${o}</span> `}render(){let e=this.#s(this.pending,this.label),t;return this.accessibleDisabled!=="false"&&(t=this.accessibleDisabled),this.href?d`
         <a
           tabindex="0"
-          aria-disabled=${b(e)}
-          aria-label=${b(this.accessibleLabel)}
+          aria-disabled=${v(t)}
+          aria-label=${v(this.accessibleLabel)}
           ?disabled=${this.disabled}
-          href=${b(this.disabled?null:this.href)}
-          target=${b(this.disabled?null:this.target)}
+          href=${v(this.disabled?null:this.href)}
+          target=${v(this.disabled?null:this.target)}
         >
-          ${t}
+          ${e}
         </a>
       `:d`
         <button
           tabindex="0"
-          aria-disabled=${b(e)}
-          aria-label=${b(this.accessibleLabel)}
+          aria-disabled=${v(t)}
+          aria-label=${v(this.accessibleLabel)}
           ?disabled=${this.disabled}
           type=${this.submit?"submit":"button"}
         >
-          ${t}
+          ${e}
         </button>
-      `}};customElements.define("jh-button",Ee);var ze=class extends f{static get styles(){return y`
+      `}};customElements.define("jh-button",so);var no=class extends g{static get styles(){return y`
         :host {
           border-bottom:
             var(--jh-divider-border-width, 1px)
@@ -867,7 +941,7 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         :host[inset] {
           margin-left: var(--inset, var(--jh-divider-space-inset));
         }
-      `}static get properties(){return{inset:{type:Number,reflect:!0}}}constructor(){super(),this.inset=null}};customElements.define("jh-divider",ze);var Ce=class extends f{static get styles(){return y`
+      `}static get properties(){return{inset:{type:Number,reflect:!0}}}constructor(){super(),this.inset=null}};customElements.define("jh-divider",no);var lo=class extends g{static get styles(){return y`
       :host {
         --border-radius: var(--jh-border-radius-400);
         background-color: var(
@@ -1007,33 +1081,33 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
           var(--jh-space-400) var(--jh-space-600)
         );
       }
-    `}static get properties(){return{footerDividerInset:{type:Number,attribute:"footer-divider-inset"},headerDividerInset:{type:Number,attribute:"header-divider-inset"},showFooterDivider:{type:Boolean,attribute:"show-footer-divider",reflect:!0},showHeaderDivider:{type:Boolean,attribute:"show-header-divider",reflect:!0},padding:{type:String,reflect:!0},headerSubtitle:{type:String,attribute:"header-subtitle"},headerTitle:{type:String,attribute:"header-title"},titleHeadingLevel:{type:Number,attribute:"title-heading-level"}}}constructor(){super(),this.footerDividerInset=null,this.headerDividerInset=null,this.titleHeadingLevel=2,this.padding="medium",this.showFooterDivider=!1,this.showHeaderDivider=!1,this.headerSubtitle=null,this.headerTitle=null}#t(){switch(this.titleHeadingLevel){case 1:return d`<h1>${this.headerTitle}</h1>`;case 2:return d`<h2>${this.headerTitle}</h2>`;case 3:return d`<h3>${this.headerTitle}</h3>`;case 4:return d`<h4>${this.headerTitle}</h4>`;case 5:return d`<h5>${this.headerTitle}</h5>`;case 6:return d`<h6>${this.headerTitle}</h6>`;default:return d`<h2>${this.headerTitle}</h2>`}}#e(t){t.target.classList.add("display-slot")}render(){let t,e,o;return(this.headerTitle||this.headerSubtitle)&&(t=d`
+    `}static get properties(){return{footerDividerInset:{type:Number,attribute:"footer-divider-inset"},headerDividerInset:{type:Number,attribute:"header-divider-inset"},showFooterDivider:{type:Boolean,attribute:"show-footer-divider",reflect:!0},showHeaderDivider:{type:Boolean,attribute:"show-header-divider",reflect:!0},padding:{type:String,reflect:!0},headerSubtitle:{type:String,attribute:"header-subtitle"},headerTitle:{type:String,attribute:"header-title"},titleHeadingLevel:{type:Number,attribute:"title-heading-level"}}}constructor(){super(),this.footerDividerInset=null,this.headerDividerInset=null,this.titleHeadingLevel=2,this.padding="medium",this.showFooterDivider=!1,this.showHeaderDivider=!1,this.headerSubtitle=null,this.headerTitle=null}#e(){switch(this.titleHeadingLevel){case 1:return d`<h1>${this.headerTitle}</h1>`;case 2:return d`<h2>${this.headerTitle}</h2>`;case 3:return d`<h3>${this.headerTitle}</h3>`;case 4:return d`<h4>${this.headerTitle}</h4>`;case 5:return d`<h5>${this.headerTitle}</h5>`;case 6:return d`<h6>${this.headerTitle}</h6>`;default:return d`<h2>${this.headerTitle}</h2>`}}#t(e){e.target.classList.add("display-slot")}render(){let e,t,o;return(this.headerTitle||this.headerSubtitle)&&(e=d`
         <div class="display-header">
-          ${this.headerTitle?this.#t():null}
+          ${this.headerTitle?this.#e():null}
           ${this.headerSubtitle?d`<p>${this.headerSubtitle}</p>`:null}
         </div>
-      `),this.showHeaderDivider&&(e=d`
+      `),this.showHeaderDivider&&(t=d`
         <jh-divider
           class="card-header-divider"
-          inset=${b(this.headerDividerInset?this.headerDividerInset:null)}
+          inset=${v(this.headerDividerInset?this.headerDividerInset:null)}
         >
         </jh-divider>
       `),this.showFooterDivider&&(o=d`
         <jh-divider
           class="card-footer-divider"
-          inset=${b(this.footerDividerInset?this.footerDividerInset:null)}
+          inset=${v(this.footerDividerInset?this.footerDividerInset:null)}
         >
         </jh-divider>
       `),d`
-      <slot name="jh-card-media" @slotchange=${this.#e}></slot>
-      <slot name="jh-card-header" @slotchange=${this.#e}>${t}</slot>
-      ${e}
-      <slot @slotchange=${this.#e}></slot>
+      <slot name="jh-card-media" @slotchange=${this.#t}></slot>
+      <slot name="jh-card-header" @slotchange=${this.#t}>${e}</slot>
+      ${t}
+      <slot @slotchange=${this.#t}></slot>
       ${o}
-      <slot name="jh-card-footer" @slotchange=${this.#e}></slot>
-    `}};customElements.define("jh-card",Ce);var Ht=window,Dt=Ht.ShadowRoot&&(Ht.ShadyCSS===void 0||Ht.ShadyCSS.nativeShadow)&&"adoptedStyleSheets"in Document.prototype&&"replace"in CSSStyleSheet.prototype,Te=Symbol(),vr=new WeakMap,$t=class{constructor(t,e,o){if(this._$cssResult$=!0,o!==Te)throw Error("CSSResult is not constructable. Use `unsafeCSS` or `css` instead.");this.cssText=t,this.t=e}get styleSheet(){let t=this.o,e=this.t;if(Dt&&t===void 0){let o=e!==void 0&&e.length===1;o&&(t=vr.get(e)),t===void 0&&((this.o=t=new CSSStyleSheet).replaceSync(this.cssText),o&&vr.set(e,t))}return t}toString(){return this.cssText}},gr=r=>new $t(typeof r=="string"?r:r+"",void 0,Te),S=(r,...t)=>{let e=r.length===1?r[0]:t.reduce((o,i,s)=>o+(a=>{if(a._$cssResult$===!0)return a.cssText;if(typeof a=="number")return a;throw Error("Value passed to 'css' function must be a 'css' function result: "+a+". Use 'unsafeCSS' to pass non-literal values, but take care to ensure page security.")})(i)+r[s+1],r[0]);return new $t(e,r,Te)},Le=(r,t)=>{Dt?r.adoptedStyleSheets=t.map(e=>e instanceof CSSStyleSheet?e:e.styleSheet):t.forEach(e=>{let o=document.createElement("style"),i=Ht.litNonce;i!==void 0&&o.setAttribute("nonce",i),o.textContent=e.cssText,r.appendChild(o)})},Mt=Dt?r=>r:r=>r instanceof CSSStyleSheet?(t=>{let e="";for(let o of t.cssRules)e+=o.cssText;return gr(e)})(r):r;var Pe,It=window,mr=It.trustedTypes,ni=mr?mr.emptyScript:"",fr=It.reactiveElementPolyfillSupport,Ue={toAttribute(r,t){switch(t){case Boolean:r=r?ni:null;break;case Object:case Array:r=r==null?r:JSON.stringify(r)}return r},fromAttribute(r,t){let e=r;switch(t){case Boolean:e=r!==null;break;case Number:e=r===null?null:Number(r);break;case Object:case Array:try{e=JSON.parse(r)}catch{e=null}}return e}},yr=(r,t)=>t!==r&&(t==t||r==r),Re={attribute:!0,type:String,converter:Ue,reflect:!1,hasChanged:yr},Oe="finalized",P=class extends HTMLElement{constructor(){super(),this._$Ei=new Map,this.isUpdatePending=!1,this.hasUpdated=!1,this._$El=null,this._$Eu()}static addInitializer(t){var e;this.finalize(),((e=this.h)!==null&&e!==void 0?e:this.h=[]).push(t)}static get observedAttributes(){this.finalize();let t=[];return this.elementProperties.forEach((e,o)=>{let i=this._$Ep(o,e);i!==void 0&&(this._$Ev.set(i,o),t.push(i))}),t}static createProperty(t,e=Re){if(e.state&&(e.attribute=!1),this.finalize(),this.elementProperties.set(t,e),!e.noAccessor&&!this.prototype.hasOwnProperty(t)){let o=typeof t=="symbol"?Symbol():"__"+t,i=this.getPropertyDescriptor(t,o,e);i!==void 0&&Object.defineProperty(this.prototype,t,i)}}static getPropertyDescriptor(t,e,o){return{get(){return this[e]},set(i){let s=this[t];this[e]=i,this.requestUpdate(t,s,o)},configurable:!0,enumerable:!0}}static getPropertyOptions(t){return this.elementProperties.get(t)||Re}static finalize(){if(this.hasOwnProperty(Oe))return!1;this[Oe]=!0;let t=Object.getPrototypeOf(this);if(t.finalize(),t.h!==void 0&&(this.h=[...t.h]),this.elementProperties=new Map(t.elementProperties),this._$Ev=new Map,this.hasOwnProperty("properties")){let e=this.properties,o=[...Object.getOwnPropertyNames(e),...Object.getOwnPropertySymbols(e)];for(let i of o)this.createProperty(i,e[i])}return this.elementStyles=this.finalizeStyles(this.styles),!0}static finalizeStyles(t){let e=[];if(Array.isArray(t)){let o=new Set(t.flat(1/0).reverse());for(let i of o)e.unshift(Mt(i))}else t!==void 0&&e.push(Mt(t));return e}static _$Ep(t,e){let o=e.attribute;return o===!1?void 0:typeof o=="string"?o:typeof t=="string"?t.toLowerCase():void 0}_$Eu(){var t;this._$E_=new Promise(e=>this.enableUpdating=e),this._$AL=new Map,this._$Eg(),this.requestUpdate(),(t=this.constructor.h)===null||t===void 0||t.forEach(e=>e(this))}addController(t){var e,o;((e=this._$ES)!==null&&e!==void 0?e:this._$ES=[]).push(t),this.renderRoot!==void 0&&this.isConnected&&((o=t.hostConnected)===null||o===void 0||o.call(t))}removeController(t){var e;(e=this._$ES)===null||e===void 0||e.splice(this._$ES.indexOf(t)>>>0,1)}_$Eg(){this.constructor.elementProperties.forEach((t,e)=>{this.hasOwnProperty(e)&&(this._$Ei.set(e,this[e]),delete this[e])})}createRenderRoot(){var t;let e=(t=this.shadowRoot)!==null&&t!==void 0?t:this.attachShadow(this.constructor.shadowRootOptions);return Le(e,this.constructor.elementStyles),e}connectedCallback(){var t;this.renderRoot===void 0&&(this.renderRoot=this.createRenderRoot()),this.enableUpdating(!0),(t=this._$ES)===null||t===void 0||t.forEach(e=>{var o;return(o=e.hostConnected)===null||o===void 0?void 0:o.call(e)})}enableUpdating(t){}disconnectedCallback(){var t;(t=this._$ES)===null||t===void 0||t.forEach(e=>{var o;return(o=e.hostDisconnected)===null||o===void 0?void 0:o.call(e)})}attributeChangedCallback(t,e,o){this._$AK(t,o)}_$EO(t,e,o=Re){var i;let s=this.constructor._$Ep(t,o);if(s!==void 0&&o.reflect===!0){let a=(((i=o.converter)===null||i===void 0?void 0:i.toAttribute)!==void 0?o.converter:Ue).toAttribute(e,o.type);this._$El=t,a==null?this.removeAttribute(s):this.setAttribute(s,a),this._$El=null}}_$AK(t,e){var o;let i=this.constructor,s=i._$Ev.get(t);if(s!==void 0&&this._$El!==s){let a=i.getPropertyOptions(s),c=typeof a.converter=="function"?{fromAttribute:a.converter}:((o=a.converter)===null||o===void 0?void 0:o.fromAttribute)!==void 0?a.converter:Ue;this._$El=s,this[s]=c.fromAttribute(e,a.type),this._$El=null}}requestUpdate(t,e,o){let i=!0;t!==void 0&&(((o=o||this.constructor.getPropertyOptions(t)).hasChanged||yr)(this[t],e)?(this._$AL.has(t)||this._$AL.set(t,e),o.reflect===!0&&this._$El!==t&&(this._$EC===void 0&&(this._$EC=new Map),this._$EC.set(t,o))):i=!1),!this.isUpdatePending&&i&&(this._$E_=this._$Ej())}async _$Ej(){this.isUpdatePending=!0;try{await this._$E_}catch(e){Promise.reject(e)}let t=this.scheduleUpdate();return t!=null&&await t,!this.isUpdatePending}scheduleUpdate(){return this.performUpdate()}performUpdate(){var t;if(!this.isUpdatePending)return;this.hasUpdated,this._$Ei&&(this._$Ei.forEach((i,s)=>this[s]=i),this._$Ei=void 0);let e=!1,o=this._$AL;try{e=this.shouldUpdate(o),e?(this.willUpdate(o),(t=this._$ES)===null||t===void 0||t.forEach(i=>{var s;return(s=i.hostUpdate)===null||s===void 0?void 0:s.call(i)}),this.update(o)):this._$Ek()}catch(i){throw e=!1,this._$Ek(),i}e&&this._$AE(o)}willUpdate(t){}_$AE(t){var e;(e=this._$ES)===null||e===void 0||e.forEach(o=>{var i;return(i=o.hostUpdated)===null||i===void 0?void 0:i.call(o)}),this.hasUpdated||(this.hasUpdated=!0,this.firstUpdated(t)),this.updated(t)}_$Ek(){this._$AL=new Map,this.isUpdatePending=!1}get updateComplete(){return this.getUpdateComplete()}getUpdateComplete(){return this._$E_}shouldUpdate(t){return!0}update(t){this._$EC!==void 0&&(this._$EC.forEach((e,o)=>this._$EO(o,this[o],e)),this._$EC=void 0),this._$Ek()}updated(t){}firstUpdated(t){}};P[Oe]=!0,P.elementProperties=new Map,P.elementStyles=[],P.shadowRootOptions={mode:"open"},fr?.({ReactiveElement:P}),((Pe=It.reactiveElementVersions)!==null&&Pe!==void 0?Pe:It.reactiveElementVersions=[]).push("1.6.3");var Ne,Bt=window,rt=Bt.trustedTypes,jr=rt?rt.createPolicy("lit-html",{createHTML:r=>r}):void 0,De="$lit$",N=`lit$${(Math.random()+"").slice(9)}$`,Sr="?"+N,li=`<${Sr}>`,Z=document,_t=()=>Z.createComment(""),wt=r=>r===null||typeof r!="object"&&typeof r!="function",Er=Array.isArray,hi=r=>Er(r)||typeof r?.[Symbol.iterator]=="function",He=`[ 	
-\f\r]`,xt=/<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g,$r=/-->/g,xr=/>/g,K=RegExp(`>|${He}(?:([^\\s"'>=/]+)(${He}*=${He}*(?:[^ 	
-\f\r"'\`<>=]|("|')|))|$)`,"g"),_r=/'/g,wr=/"/g,zr=/^(?:script|style|textarea|title)$/i,Cr=r=>(t,...e)=>({_$litType$:r,strings:t,values:e}),C=Cr(1),Ls=Cr(2),G=Symbol.for("lit-noChange"),$=Symbol.for("lit-nothing"),kr=new WeakMap,F=Z.createTreeWalker(Z,129,null,!1);function Tr(r,t){if(!Array.isArray(r)||!r.hasOwnProperty("raw"))throw Error("invalid template strings array");return jr!==void 0?jr.createHTML(t):t}var ci=(r,t)=>{let e=r.length-1,o=[],i,s=t===2?"<svg>":"",a=xt;for(let c=0;c<e;c++){let n=r[c],l,u,p=-1,v=0;for(;v<n.length&&(a.lastIndex=v,u=a.exec(n),u!==null);)v=a.lastIndex,a===xt?u[1]==="!--"?a=$r:u[1]!==void 0?a=xr:u[2]!==void 0?(zr.test(u[2])&&(i=RegExp("</"+u[2],"g")),a=K):u[3]!==void 0&&(a=K):a===K?u[0]===">"?(a=i??xt,p=-1):u[1]===void 0?p=-2:(p=a.lastIndex-u[2].length,l=u[1],a=u[3]===void 0?K:u[3]==='"'?wr:_r):a===wr||a===_r?a=K:a===$r||a===xr?a=xt:(a=K,i=void 0);let m=a===K&&r[c+1].startsWith("/>")?" ":"";s+=a===xt?n+li:p>=0?(o.push(l),n.slice(0,p)+De+n.slice(p)+N+m):n+N+(p===-2?(o.push(void 0),c):m)}return[Tr(r,s+(r[e]||"<?>")+(t===2?"</svg>":"")),o]},kt=class r{constructor({strings:t,_$litType$:e},o){let i;this.parts=[];let s=0,a=0,c=t.length-1,n=this.parts,[l,u]=ci(t,e);if(this.el=r.createElement(l,o),F.currentNode=this.el.content,e===2){let p=this.el.content,v=p.firstChild;v.remove(),p.append(...v.childNodes)}for(;(i=F.nextNode())!==null&&n.length<c;){if(i.nodeType===1){if(i.hasAttributes()){let p=[];for(let v of i.getAttributeNames())if(v.endsWith(De)||v.startsWith(N)){let m=u[a++];if(p.push(v),m!==void 0){let k=i.getAttribute(m.toLowerCase()+De).split(N),w=/([.?@])?(.*)/.exec(m);n.push({type:1,index:s,name:w[2],strings:k,ctor:w[1]==="."?Ie:w[1]==="?"?Be:w[1]==="@"?qe:st})}else n.push({type:6,index:s})}for(let v of p)i.removeAttribute(v)}if(zr.test(i.tagName)){let p=i.textContent.split(N),v=p.length-1;if(v>0){i.textContent=rt?rt.emptyScript:"";for(let m=0;m<v;m++)i.append(p[m],_t()),F.nextNode(),n.push({type:2,index:++s});i.append(p[v],_t())}}}else if(i.nodeType===8)if(i.data===Sr)n.push({type:2,index:s});else{let p=-1;for(;(p=i.data.indexOf(N,p+1))!==-1;)n.push({type:7,index:s}),p+=N.length-1}s++}}static createElement(t,e){let o=Z.createElement("template");return o.innerHTML=t,o}};function it(r,t,e=r,o){var i,s,a,c;if(t===G)return t;let n=o!==void 0?(i=e._$Co)===null||i===void 0?void 0:i[o]:e._$Cl,l=wt(t)?void 0:t._$litDirective$;return n?.constructor!==l&&((s=n?._$AO)===null||s===void 0||s.call(n,!1),l===void 0?n=void 0:(n=new l(r),n._$AT(r,e,o)),o!==void 0?((a=(c=e)._$Co)!==null&&a!==void 0?a:c._$Co=[])[o]=n:e._$Cl=n),n!==void 0&&(t=it(r,n._$AS(r,t.values),n,o)),t}var Me=class{constructor(t,e){this._$AV=[],this._$AN=void 0,this._$AD=t,this._$AM=e}get parentNode(){return this._$AM.parentNode}get _$AU(){return this._$AM._$AU}u(t){var e;let{el:{content:o},parts:i}=this._$AD,s=((e=t?.creationScope)!==null&&e!==void 0?e:Z).importNode(o,!0);F.currentNode=s;let a=F.nextNode(),c=0,n=0,l=i[0];for(;l!==void 0;){if(c===l.index){let u;l.type===2?u=new At(a,a.nextSibling,this,t):l.type===1?u=new l.ctor(a,l.name,l.strings,this,t):l.type===6&&(u=new Ve(a,this,t)),this._$AV.push(u),l=i[++n]}c!==l?.index&&(a=F.nextNode(),c++)}return F.currentNode=Z,s}v(t){let e=0;for(let o of this._$AV)o!==void 0&&(o.strings!==void 0?(o._$AI(t,o,e),e+=o.strings.length-2):o._$AI(t[e])),e++}},At=class r{constructor(t,e,o,i){var s;this.type=2,this._$AH=$,this._$AN=void 0,this._$AA=t,this._$AB=e,this._$AM=o,this.options=i,this._$Cp=(s=i?.isConnected)===null||s===void 0||s}get _$AU(){var t,e;return(e=(t=this._$AM)===null||t===void 0?void 0:t._$AU)!==null&&e!==void 0?e:this._$Cp}get parentNode(){let t=this._$AA.parentNode,e=this._$AM;return e!==void 0&&t?.nodeType===11&&(t=e.parentNode),t}get startNode(){return this._$AA}get endNode(){return this._$AB}_$AI(t,e=this){t=it(this,t,e),wt(t)?t===$||t==null||t===""?(this._$AH!==$&&this._$AR(),this._$AH=$):t!==this._$AH&&t!==G&&this._(t):t._$litType$!==void 0?this.g(t):t.nodeType!==void 0?this.$(t):hi(t)?this.T(t):this._(t)}k(t){return this._$AA.parentNode.insertBefore(t,this._$AB)}$(t){this._$AH!==t&&(this._$AR(),this._$AH=this.k(t))}_(t){this._$AH!==$&&wt(this._$AH)?this._$AA.nextSibling.data=t:this.$(Z.createTextNode(t)),this._$AH=t}g(t){var e;let{values:o,_$litType$:i}=t,s=typeof i=="number"?this._$AC(t):(i.el===void 0&&(i.el=kt.createElement(Tr(i.h,i.h[0]),this.options)),i);if(((e=this._$AH)===null||e===void 0?void 0:e._$AD)===s)this._$AH.v(o);else{let a=new Me(s,this),c=a.u(this.options);a.v(o),this.$(c),this._$AH=a}}_$AC(t){let e=kr.get(t.strings);return e===void 0&&kr.set(t.strings,e=new kt(t)),e}T(t){Er(this._$AH)||(this._$AH=[],this._$AR());let e=this._$AH,o,i=0;for(let s of t)i===e.length?e.push(o=new r(this.k(_t()),this.k(_t()),this,this.options)):o=e[i],o._$AI(s),i++;i<e.length&&(this._$AR(o&&o._$AB.nextSibling,i),e.length=i)}_$AR(t=this._$AA.nextSibling,e){var o;for((o=this._$AP)===null||o===void 0||o.call(this,!1,!0,e);t&&t!==this._$AB;){let i=t.nextSibling;t.remove(),t=i}}setConnected(t){var e;this._$AM===void 0&&(this._$Cp=t,(e=this._$AP)===null||e===void 0||e.call(this,t))}},st=class{constructor(t,e,o,i,s){this.type=1,this._$AH=$,this._$AN=void 0,this.element=t,this.name=e,this._$AM=i,this.options=s,o.length>2||o[0]!==""||o[1]!==""?(this._$AH=Array(o.length-1).fill(new String),this.strings=o):this._$AH=$}get tagName(){return this.element.tagName}get _$AU(){return this._$AM._$AU}_$AI(t,e=this,o,i){let s=this.strings,a=!1;if(s===void 0)t=it(this,t,e,0),a=!wt(t)||t!==this._$AH&&t!==G,a&&(this._$AH=t);else{let c=t,n,l;for(t=s[0],n=0;n<s.length-1;n++)l=it(this,c[o+n],e,n),l===G&&(l=this._$AH[n]),a||(a=!wt(l)||l!==this._$AH[n]),l===$?t=$:t!==$&&(t+=(l??"")+s[n+1]),this._$AH[n]=l}a&&!i&&this.j(t)}j(t){t===$?this.element.removeAttribute(this.name):this.element.setAttribute(this.name,t??"")}},Ie=class extends st{constructor(){super(...arguments),this.type=3}j(t){this.element[this.name]=t===$?void 0:t}},di=rt?rt.emptyScript:"",Be=class extends st{constructor(){super(...arguments),this.type=4}j(t){t&&t!==$?this.element.setAttribute(this.name,di):this.element.removeAttribute(this.name)}},qe=class extends st{constructor(t,e,o,i,s){super(t,e,o,i,s),this.type=5}_$AI(t,e=this){var o;if((t=(o=it(this,t,e,0))!==null&&o!==void 0?o:$)===G)return;let i=this._$AH,s=t===$&&i!==$||t.capture!==i.capture||t.once!==i.once||t.passive!==i.passive,a=t!==$&&(i===$||s);s&&this.element.removeEventListener(this.name,this,i),a&&this.element.addEventListener(this.name,this,t),this._$AH=t}handleEvent(t){var e,o;typeof this._$AH=="function"?this._$AH.call((o=(e=this.options)===null||e===void 0?void 0:e.host)!==null&&o!==void 0?o:this.element,t):this._$AH.handleEvent(t)}},Ve=class{constructor(t,e,o){this.element=t,this.type=6,this._$AN=void 0,this._$AM=e,this.options=o}get _$AU(){return this._$AM._$AU}_$AI(t){it(this,t)}};var Ar=Bt.litHtmlPolyfillSupport;Ar?.(kt,At),((Ne=Bt.litHtmlVersions)!==null&&Ne!==void 0?Ne:Bt.litHtmlVersions=[]).push("2.8.0");var Lr=(r,t,e)=>{var o,i;let s=(o=e?.renderBefore)!==null&&o!==void 0?o:t,a=s._$litPart$;if(a===void 0){let c=(i=e?.renderBefore)!==null&&i!==void 0?i:null;s._$litPart$=a=new At(t.insertBefore(_t(),c),c,void 0,e??{})}return a._$AI(r),a};var We,Ke;var _=class extends P{constructor(){super(...arguments),this.renderOptions={host:this},this._$Do=void 0}createRenderRoot(){var t,e;let o=super.createRenderRoot();return(t=(e=this.renderOptions).renderBefore)!==null&&t!==void 0||(e.renderBefore=o.firstChild),o}update(t){let e=this.render();this.hasUpdated||(this.renderOptions.isConnected=this.isConnected),super.update(t),this._$Do=Lr(e,this.renderRoot,this.renderOptions)}connectedCallback(){var t;super.connectedCallback(),(t=this._$Do)===null||t===void 0||t.setConnected(!0)}disconnectedCallback(){var t;super.disconnectedCallback(),(t=this._$Do)===null||t===void 0||t.setConnected(!1)}render(){return G}};_.finalized=!0,_._$litElement$=!0,(We=globalThis.litElementHydrateSupport)===null||We===void 0||We.call(globalThis,{LitElement:_});var Pr=globalThis.litElementPolyfillSupport;Pr?.({LitElement:_});((Ke=globalThis.litElementVersions)!==null&&Ke!==void 0?Ke:globalThis.litElementVersions=[]).push("3.3.3");var qt=class extends _{#t;static get styles(){return S`
+      <slot name="jh-card-footer" @slotchange=${this.#t}></slot>
+    `}};customElements.define("jh-card",lo);var nt=window,lt=nt.ShadowRoot&&(nt.ShadyCSS===void 0||nt.ShadyCSS.nativeShadow)&&"adoptedStyleSheets"in Document.prototype&&"replace"in CSSStyleSheet.prototype,co=Symbol(),ci=new WeakMap,Me=class{constructor(e,t,o){if(this._$cssResult$=!0,o!==co)throw Error("CSSResult is not constructable. Use `unsafeCSS` or `css` instead.");this.cssText=e,this.t=t}get styleSheet(){let e=this.o,t=this.t;if(lt&&e===void 0){let o=t!==void 0&&t.length===1;o&&(e=ci.get(t)),e===void 0&&((this.o=e=new CSSStyleSheet).replaceSync(this.cssText),o&&ci.set(t,e))}return e}toString(){return this.cssText}},hi=r=>new Me(typeof r=="string"?r:r+"",void 0,co),P=(r,...e)=>{let t=r.length===1?r[0]:e.reduce((o,i,a)=>o+(s=>{if(s._$cssResult$===!0)return s.cssText;if(typeof s=="number")return s;throw Error("Value passed to 'css' function must be a 'css' function result: "+s+". Use 'unsafeCSS' to pass non-literal values, but take care to ensure page security.")})(i)+r[a+1],r[0]);return new Me(t,r,co)},ho=(r,e)=>{lt?r.adoptedStyleSheets=e.map(t=>t instanceof CSSStyleSheet?t:t.styleSheet):e.forEach(t=>{let o=document.createElement("style"),i=nt.litNonce;i!==void 0&&o.setAttribute("nonce",i),o.textContent=t.cssText,r.appendChild(o)})},ct=lt?r=>r:r=>r instanceof CSSStyleSheet?(e=>{let t="";for(let o of e.cssRules)t+=o.cssText;return hi(t)})(r):r;var po,ht=window,di=ht.trustedTypes,pa=di?di.emptyScript:"",pi=ht.reactiveElementPolyfillSupport,bo={toAttribute(r,e){switch(e){case Boolean:r=r?pa:null;break;case Object:case Array:r=r==null?r:JSON.stringify(r)}return r},fromAttribute(r,e){let t=r;switch(e){case Boolean:t=r!==null;break;case Number:t=r===null?null:Number(r);break;case Object:case Array:try{t=JSON.parse(r)}catch{t=null}}return t}},ui=(r,e)=>e!==r&&(e==e||r==r),uo={attribute:!0,type:String,converter:bo,reflect:!1,hasChanged:ui},vo="finalized",B=class extends HTMLElement{constructor(){super(),this._$Ei=new Map,this.isUpdatePending=!1,this.hasUpdated=!1,this._$El=null,this._$Eu()}static addInitializer(e){var t;this.finalize(),((t=this.h)!==null&&t!==void 0?t:this.h=[]).push(e)}static get observedAttributes(){this.finalize();let e=[];return this.elementProperties.forEach((t,o)=>{let i=this._$Ep(o,t);i!==void 0&&(this._$Ev.set(i,o),e.push(i))}),e}static createProperty(e,t=uo){if(t.state&&(t.attribute=!1),this.finalize(),this.elementProperties.set(e,t),!t.noAccessor&&!this.prototype.hasOwnProperty(e)){let o=typeof e=="symbol"?Symbol():"__"+e,i=this.getPropertyDescriptor(e,o,t);i!==void 0&&Object.defineProperty(this.prototype,e,i)}}static getPropertyDescriptor(e,t,o){return{get(){return this[t]},set(i){let a=this[e];this[t]=i,this.requestUpdate(e,a,o)},configurable:!0,enumerable:!0}}static getPropertyOptions(e){return this.elementProperties.get(e)||uo}static finalize(){if(this.hasOwnProperty(vo))return!1;this[vo]=!0;let e=Object.getPrototypeOf(this);if(e.finalize(),e.h!==void 0&&(this.h=[...e.h]),this.elementProperties=new Map(e.elementProperties),this._$Ev=new Map,this.hasOwnProperty("properties")){let t=this.properties,o=[...Object.getOwnPropertyNames(t),...Object.getOwnPropertySymbols(t)];for(let i of o)this.createProperty(i,t[i])}return this.elementStyles=this.finalizeStyles(this.styles),!0}static finalizeStyles(e){let t=[];if(Array.isArray(e)){let o=new Set(e.flat(1/0).reverse());for(let i of o)t.unshift(ct(i))}else e!==void 0&&t.push(ct(e));return t}static _$Ep(e,t){let o=t.attribute;return o===!1?void 0:typeof o=="string"?o:typeof e=="string"?e.toLowerCase():void 0}_$Eu(){var e;this._$E_=new Promise(t=>this.enableUpdating=t),this._$AL=new Map,this._$Eg(),this.requestUpdate(),(e=this.constructor.h)===null||e===void 0||e.forEach(t=>t(this))}addController(e){var t,o;((t=this._$ES)!==null&&t!==void 0?t:this._$ES=[]).push(e),this.renderRoot!==void 0&&this.isConnected&&((o=e.hostConnected)===null||o===void 0||o.call(e))}removeController(e){var t;(t=this._$ES)===null||t===void 0||t.splice(this._$ES.indexOf(e)>>>0,1)}_$Eg(){this.constructor.elementProperties.forEach((e,t)=>{this.hasOwnProperty(t)&&(this._$Ei.set(t,this[t]),delete this[t])})}createRenderRoot(){var e;let t=(e=this.shadowRoot)!==null&&e!==void 0?e:this.attachShadow(this.constructor.shadowRootOptions);return ho(t,this.constructor.elementStyles),t}connectedCallback(){var e;this.renderRoot===void 0&&(this.renderRoot=this.createRenderRoot()),this.enableUpdating(!0),(e=this._$ES)===null||e===void 0||e.forEach(t=>{var o;return(o=t.hostConnected)===null||o===void 0?void 0:o.call(t)})}enableUpdating(e){}disconnectedCallback(){var e;(e=this._$ES)===null||e===void 0||e.forEach(t=>{var o;return(o=t.hostDisconnected)===null||o===void 0?void 0:o.call(t)})}attributeChangedCallback(e,t,o){this._$AK(e,o)}_$EO(e,t,o=uo){var i;let a=this.constructor._$Ep(e,o);if(a!==void 0&&o.reflect===!0){let s=(((i=o.converter)===null||i===void 0?void 0:i.toAttribute)!==void 0?o.converter:bo).toAttribute(t,o.type);this._$El=e,s==null?this.removeAttribute(a):this.setAttribute(a,s),this._$El=null}}_$AK(e,t){var o;let i=this.constructor,a=i._$Ev.get(e);if(a!==void 0&&this._$El!==a){let s=i.getPropertyOptions(a),h=typeof s.converter=="function"?{fromAttribute:s.converter}:((o=s.converter)===null||o===void 0?void 0:o.fromAttribute)!==void 0?s.converter:bo;this._$El=a,this[a]=h.fromAttribute(t,s.type),this._$El=null}}requestUpdate(e,t,o){let i=!0;e!==void 0&&(((o=o||this.constructor.getPropertyOptions(e)).hasChanged||ui)(this[e],t)?(this._$AL.has(e)||this._$AL.set(e,t),o.reflect===!0&&this._$El!==e&&(this._$EC===void 0&&(this._$EC=new Map),this._$EC.set(e,o))):i=!1),!this.isUpdatePending&&i&&(this._$E_=this._$Ej())}async _$Ej(){this.isUpdatePending=!0;try{await this._$E_}catch(t){Promise.reject(t)}let e=this.scheduleUpdate();return e!=null&&await e,!this.isUpdatePending}scheduleUpdate(){return this.performUpdate()}performUpdate(){var e;if(!this.isUpdatePending)return;this.hasUpdated,this._$Ei&&(this._$Ei.forEach((i,a)=>this[a]=i),this._$Ei=void 0);let t=!1,o=this._$AL;try{t=this.shouldUpdate(o),t?(this.willUpdate(o),(e=this._$ES)===null||e===void 0||e.forEach(i=>{var a;return(a=i.hostUpdate)===null||a===void 0?void 0:a.call(i)}),this.update(o)):this._$Ek()}catch(i){throw t=!1,this._$Ek(),i}t&&this._$AE(o)}willUpdate(e){}_$AE(e){var t;(t=this._$ES)===null||t===void 0||t.forEach(o=>{var i;return(i=o.hostUpdated)===null||i===void 0?void 0:i.call(o)}),this.hasUpdated||(this.hasUpdated=!0,this.firstUpdated(e)),this.updated(e)}_$Ek(){this._$AL=new Map,this.isUpdatePending=!1}get updateComplete(){return this.getUpdateComplete()}getUpdateComplete(){return this._$E_}shouldUpdate(e){return!0}update(e){this._$EC!==void 0&&(this._$EC.forEach((t,o)=>this._$EO(o,this[o],t)),this._$EC=void 0),this._$Ek()}updated(e){}firstUpdated(e){}};B[vo]=!0,B.elementProperties=new Map,B.elementStyles=[],B.shadowRootOptions={mode:"open"},pi?.({ReactiveElement:B}),((po=ht.reactiveElementVersions)!==null&&po!==void 0?po:ht.reactiveElementVersions=[]).push("1.6.3");var mo,dt=window,fe=dt.trustedTypes,bi=fe?fe.createPolicy("lit-html",{createHTML:r=>r}):void 0,fo="$lit$",F=`lit$${(Math.random()+"").slice(9)}$`,$i="?"+F,ua=`<${$i}>`,le=document,He=()=>le.createComment(""),Ie=r=>r===null||typeof r!="object"&&typeof r!="function",xi=Array.isArray,ba=r=>xi(r)||typeof r?.[Symbol.iterator]=="function",go=`[ 	
+\f\r]`,De=/<(?:(!--|\/[^a-zA-Z])|(\/?[a-zA-Z][^>\s]*)|(\/?$))/g,vi=/-->/g,mi=/>/g,se=RegExp(`>|${go}(?:([^\\s"'>=/]+)(${go}*=${go}*(?:[^ 	
+\f\r"'\`<>=]|("|')|))|$)`,"g"),gi=/'/g,fi=/"/g,wi=/^(?:script|style|textarea|title)$/i,_i=r=>(e,...t)=>({_$litType$:r,strings:e,values:t}),U=_i(1),Ws=_i(2),ce=Symbol.for("lit-noChange"),A=Symbol.for("lit-nothing"),yi=new WeakMap,ne=le.createTreeWalker(le,129,null,!1);function ki(r,e){if(!Array.isArray(r)||!r.hasOwnProperty("raw"))throw Error("invalid template strings array");return bi!==void 0?bi.createHTML(e):e}var va=(r,e)=>{let t=r.length-1,o=[],i,a=e===2?"<svg>":"",s=De;for(let h=0;h<t;h++){let l=r[h],c,b,u=-1,m=0;for(;m<l.length&&(s.lastIndex=m,b=s.exec(l),b!==null);)m=s.lastIndex,s===De?b[1]==="!--"?s=vi:b[1]!==void 0?s=mi:b[2]!==void 0?(wi.test(b[2])&&(i=RegExp("</"+b[2],"g")),s=se):b[3]!==void 0&&(s=se):s===se?b[0]===">"?(s=i??De,u=-1):b[1]===void 0?u=-2:(u=s.lastIndex-b[2].length,c=b[1],s=b[3]===void 0?se:b[3]==='"'?fi:gi):s===fi||s===gi?s=se:s===vi||s===mi?s=De:(s=se,i=void 0);let f=s===se&&r[h+1].startsWith("/>")?" ":"";a+=s===De?l+ua:u>=0?(o.push(c),l.slice(0,u)+fo+l.slice(u)+F+f):l+F+(u===-2?(o.push(void 0),h):f)}return[ki(r,a+(r[t]||"<?>")+(e===2?"</svg>":"")),o]},Be=class r{constructor({strings:e,_$litType$:t},o){let i;this.parts=[];let a=0,s=0,h=e.length-1,l=this.parts,[c,b]=va(e,t);if(this.el=r.createElement(c,o),ne.currentNode=this.el.content,t===2){let u=this.el.content,m=u.firstChild;m.remove(),u.append(...m.childNodes)}for(;(i=ne.nextNode())!==null&&l.length<h;){if(i.nodeType===1){if(i.hasAttributes()){let u=[];for(let m of i.getAttributeNames())if(m.endsWith(fo)||m.startsWith(F)){let f=b[s++];if(u.push(m),f!==void 0){let L=i.getAttribute(f.toLowerCase()+fo).split(F),T=/([.?@])?(.*)/.exec(f);l.push({type:1,index:a,name:T[2],strings:L,ctor:T[1]==="."?jo:T[1]==="?"?$o:T[1]==="@"?xo:je})}else l.push({type:6,index:a})}for(let m of u)i.removeAttribute(m)}if(wi.test(i.tagName)){let u=i.textContent.split(F),m=u.length-1;if(m>0){i.textContent=fe?fe.emptyScript:"";for(let f=0;f<m;f++)i.append(u[f],He()),ne.nextNode(),l.push({type:2,index:++a});i.append(u[m],He())}}}else if(i.nodeType===8)if(i.data===$i)l.push({type:2,index:a});else{let u=-1;for(;(u=i.data.indexOf(F,u+1))!==-1;)l.push({type:7,index:a}),u+=F.length-1}a++}}static createElement(e,t){let o=le.createElement("template");return o.innerHTML=e,o}};function ye(r,e,t=r,o){var i,a,s,h;if(e===ce)return e;let l=o!==void 0?(i=t._$Co)===null||i===void 0?void 0:i[o]:t._$Cl,c=Ie(e)?void 0:e._$litDirective$;return l?.constructor!==c&&((a=l?._$AO)===null||a===void 0||a.call(l,!1),c===void 0?l=void 0:(l=new c(r),l._$AT(r,t,o)),o!==void 0?((s=(h=t)._$Co)!==null&&s!==void 0?s:h._$Co=[])[o]=l:t._$Cl=l),l!==void 0&&(e=ye(r,l._$AS(r,e.values),l,o)),e}var yo=class{constructor(e,t){this._$AV=[],this._$AN=void 0,this._$AD=e,this._$AM=t}get parentNode(){return this._$AM.parentNode}get _$AU(){return this._$AM._$AU}u(e){var t;let{el:{content:o},parts:i}=this._$AD,a=((t=e?.creationScope)!==null&&t!==void 0?t:le).importNode(o,!0);ne.currentNode=a;let s=ne.nextNode(),h=0,l=0,c=i[0];for(;c!==void 0;){if(h===c.index){let b;c.type===2?b=new qe(s,s.nextSibling,this,e):c.type===1?b=new c.ctor(s,c.name,c.strings,this,e):c.type===6&&(b=new wo(s,this,e)),this._$AV.push(b),c=i[++l]}h!==c?.index&&(s=ne.nextNode(),h++)}return ne.currentNode=le,a}v(e){let t=0;for(let o of this._$AV)o!==void 0&&(o.strings!==void 0?(o._$AI(e,o,t),t+=o.strings.length-2):o._$AI(e[t])),t++}},qe=class r{constructor(e,t,o,i){var a;this.type=2,this._$AH=A,this._$AN=void 0,this._$AA=e,this._$AB=t,this._$AM=o,this.options=i,this._$Cp=(a=i?.isConnected)===null||a===void 0||a}get _$AU(){var e,t;return(t=(e=this._$AM)===null||e===void 0?void 0:e._$AU)!==null&&t!==void 0?t:this._$Cp}get parentNode(){let e=this._$AA.parentNode,t=this._$AM;return t!==void 0&&e?.nodeType===11&&(e=t.parentNode),e}get startNode(){return this._$AA}get endNode(){return this._$AB}_$AI(e,t=this){e=ye(this,e,t),Ie(e)?e===A||e==null||e===""?(this._$AH!==A&&this._$AR(),this._$AH=A):e!==this._$AH&&e!==ce&&this._(e):e._$litType$!==void 0?this.g(e):e.nodeType!==void 0?this.$(e):ba(e)?this.T(e):this._(e)}k(e){return this._$AA.parentNode.insertBefore(e,this._$AB)}$(e){this._$AH!==e&&(this._$AR(),this._$AH=this.k(e))}_(e){this._$AH!==A&&Ie(this._$AH)?this._$AA.nextSibling.data=e:this.$(le.createTextNode(e)),this._$AH=e}g(e){var t;let{values:o,_$litType$:i}=e,a=typeof i=="number"?this._$AC(e):(i.el===void 0&&(i.el=Be.createElement(ki(i.h,i.h[0]),this.options)),i);if(((t=this._$AH)===null||t===void 0?void 0:t._$AD)===a)this._$AH.v(o);else{let s=new yo(a,this),h=s.u(this.options);s.v(o),this.$(h),this._$AH=s}}_$AC(e){let t=yi.get(e.strings);return t===void 0&&yi.set(e.strings,t=new Be(e)),t}T(e){xi(this._$AH)||(this._$AH=[],this._$AR());let t=this._$AH,o,i=0;for(let a of e)i===t.length?t.push(o=new r(this.k(He()),this.k(He()),this,this.options)):o=t[i],o._$AI(a),i++;i<t.length&&(this._$AR(o&&o._$AB.nextSibling,i),t.length=i)}_$AR(e=this._$AA.nextSibling,t){var o;for((o=this._$AP)===null||o===void 0||o.call(this,!1,!0,t);e&&e!==this._$AB;){let i=e.nextSibling;e.remove(),e=i}}setConnected(e){var t;this._$AM===void 0&&(this._$Cp=e,(t=this._$AP)===null||t===void 0||t.call(this,e))}},je=class{constructor(e,t,o,i,a){this.type=1,this._$AH=A,this._$AN=void 0,this.element=e,this.name=t,this._$AM=i,this.options=a,o.length>2||o[0]!==""||o[1]!==""?(this._$AH=Array(o.length-1).fill(new String),this.strings=o):this._$AH=A}get tagName(){return this.element.tagName}get _$AU(){return this._$AM._$AU}_$AI(e,t=this,o,i){let a=this.strings,s=!1;if(a===void 0)e=ye(this,e,t,0),s=!Ie(e)||e!==this._$AH&&e!==ce,s&&(this._$AH=e);else{let h=e,l,c;for(e=a[0],l=0;l<a.length-1;l++)c=ye(this,h[o+l],t,l),c===ce&&(c=this._$AH[l]),s||(s=!Ie(c)||c!==this._$AH[l]),c===A?e=A:e!==A&&(e+=(c??"")+a[l+1]),this._$AH[l]=c}s&&!i&&this.j(e)}j(e){e===A?this.element.removeAttribute(this.name):this.element.setAttribute(this.name,e??"")}},jo=class extends je{constructor(){super(...arguments),this.type=3}j(e){this.element[this.name]=e===A?void 0:e}},ma=fe?fe.emptyScript:"",$o=class extends je{constructor(){super(...arguments),this.type=4}j(e){e&&e!==A?this.element.setAttribute(this.name,ma):this.element.removeAttribute(this.name)}},xo=class extends je{constructor(e,t,o,i,a){super(e,t,o,i,a),this.type=5}_$AI(e,t=this){var o;if((e=(o=ye(this,e,t,0))!==null&&o!==void 0?o:A)===ce)return;let i=this._$AH,a=e===A&&i!==A||e.capture!==i.capture||e.once!==i.once||e.passive!==i.passive,s=e!==A&&(i===A||a);a&&this.element.removeEventListener(this.name,this,i),s&&this.element.addEventListener(this.name,this,e),this._$AH=e}handleEvent(e){var t,o;typeof this._$AH=="function"?this._$AH.call((o=(t=this.options)===null||t===void 0?void 0:t.host)!==null&&o!==void 0?o:this.element,e):this._$AH.handleEvent(e)}},wo=class{constructor(e,t,o){this.element=e,this.type=6,this._$AN=void 0,this._$AM=t,this.options=o}get _$AU(){return this._$AM._$AU}_$AI(e){ye(this,e)}};var ji=dt.litHtmlPolyfillSupport;ji?.(Be,qe),((mo=dt.litHtmlVersions)!==null&&mo!==void 0?mo:dt.litHtmlVersions=[]).push("2.8.0");var Ai=(r,e,t)=>{var o,i;let a=(o=t?.renderBefore)!==null&&o!==void 0?o:e,s=a._$litPart$;if(s===void 0){let h=(i=t?.renderBefore)!==null&&i!==void 0?i:null;a._$litPart$=s=new qe(e.insertBefore(He(),h),h,void 0,t??{})}return s._$AI(r),s};var _o,ko;var S=class extends B{constructor(){super(...arguments),this.renderOptions={host:this},this._$Do=void 0}createRenderRoot(){var e,t;let o=super.createRenderRoot();return(e=(t=this.renderOptions).renderBefore)!==null&&e!==void 0||(t.renderBefore=o.firstChild),o}update(e){let t=this.render();this.hasUpdated||(this.renderOptions.isConnected=this.isConnected),super.update(e),this._$Do=Ai(t,this.renderRoot,this.renderOptions)}connectedCallback(){var e;super.connectedCallback(),(e=this._$Do)===null||e===void 0||e.setConnected(!0)}disconnectedCallback(){var e;super.disconnectedCallback(),(e=this._$Do)===null||e===void 0||e.setConnected(!1)}render(){return ce}};S.finalized=!0,S._$litElement$=!0,(_o=globalThis.litElementHydrateSupport)===null||_o===void 0||_o.call(globalThis,{LitElement:S});var Si=globalThis.litElementPolyfillSupport;Si?.({LitElement:S});((ko=globalThis.litElementVersions)!==null&&ko!==void 0?ko:globalThis.litElementVersions=[]).push("3.3.3");var pt=class extends S{#e;static get styles(){return P`
       :host {
         fill: var(
           --jh-icon-color-fill,
@@ -1077,9 +1151,9 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         width: 100%;
         height: 100%;
       }
-    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#t=this.attachInternals(),this.#t.role="graphics-symbol",this.#t.ariaHidden="true",this.size="medium"}render(){return C`
+    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.role="graphics-symbol",this.#e.ariaHidden="true",this.size="medium"}render(){return U`
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">   <path fill-rule="evenodd" d="M6.53 5.47a.75.75 0 0 0-1.06 1.06L10.94 12l-5.47 5.47a.75.75 0 0 0 1.06 1.06L12 13.06l5.47 5.47a.75.75 0 0 0 1.06-1.06L13.06 12l5.47-5.47a.75.75 0 1 0-1.06-1.06L12 10.94 6.53 5.47Z" clip-rule="evenodd"/> </svg> 
-    `}};customElements.define("jh-icon-xmark",qt);var pi=0,Rr="open",Fe=class extends f{#t;static get styles(){return y`
+    `}};customElements.define("jh-icon-xmark",pt);var ga=0,Ei="open",Ao=class extends g{#e;static get styles(){return y`
       :host {
         display: inline-block;
         position: relative;
@@ -1247,17 +1321,17 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         right: 100%;
         bottom: 50%;
       }
-    `}static get properties(){return{flipDisabled:{type:Boolean,attribute:"flip-disabled"},label:{type:String},open:{type:Boolean,reflect:!0},position:{type:String,reflect:!0}}}constructor(){super(),this.#t=this.attachInternals(),this.flipDisabled=!1,this.label=null,this.open=!1,this.position="top-center"}connectedCallback(){super.connectedCallback(),this.id=`tooltip-describedby-${pi++}`;let t=new MutationObserver(this.#e.bind(this)),e={childList:!0};t.observe(this.shadowRoot,e)}#e(t){for(let e of t)Array.from(e.addedNodes).some(s=>s.tagName==="SPAN")&&(this.#t.role="tooltip",this.addEventListener("focus",this.#i,!0),this.addEventListener("mouseenter",this.#i),this.addEventListener("blur",this.#s,!0),this.addEventListener("mouseleave",this.#s),this.addEventListener("keydown",this.#r)),e.removedNodes.length>0&&(this.#t.role="",this.removeEventListener("focus",this.#i),this.removeEventListener("mouseenter",this.#i),this.removeEventListener("blur",this.#s),this.removeEventListener("mouseleave",this.#s),this.removeEventListener("keydown",this.#r))}disconnectedCallback(){super.disconnectedCallback(),this.removeEventListener("focus",this.#i),this.removeEventListener("mouseenter",this.#i),this.removeEventListener("blur",this.#s),this.removeEventListener("mouseleave",this.#s),this.removeEventListener("keydown",this.#r)}#o(){let t=this.getAttribute("id");this.firstElementChild.setAttribute("aria-describedby",t);let e=window.getComputedStyle(this.firstElementChild).display;this.style.setProperty("display",e)}updated(){this.open&&this.#a()}#r(t){t.key==="Escape"&&this.#s()}#i(){this.setAttribute(Rr,"")}#s(){this.removeAttribute(Rr)}#a(){let t=this.getAttribute("position");if(["left","right","top-start","top-end","top-center","bottom-start","bottom-end","bottom-center"].includes(t)&&this.flipDisabled===!1&&this.label){let[e,o]=t.split("-"),i=this.#h(),s=n=>t===n,a=n=>e===n.split("-")[0],c=n=>{let[l,u]=n.split("-");return t==="left"&&n==="right"||t==="right"&&n==="left"||e==="bottom"&&l==="top"&&o===u||e==="top"&&l==="bottom"&&o===u};if(!i.some(s)){let n=i.find(a)||i.find(c)||i[0];this.setAttribute("position",n)}}}#h(){let{tooltipWidth:t,tooltipHeight:e,elemHeight:o,elemWidth:i}=this.#c(),{elemLeft:s,elemRight:a,elemTop:c,elemBottom:n}=this.#n(),l=c-e>0,u=n-e>0,p=a-t>0,v=s-t>0,m=this.#l(c,o,e),k=this.#l(n,o,e),w=window.innerWidth-s-t>0,bo=s>0,vo=this.#l(a,i,t),go=this.#l(s,i,t),mo=a>0,fo=s+i-t>0;return Object.entries({left:v&&m&&k,right:p&&m&&k,"top-start":l&&w&&bo,"bottom-start":u&&w&&bo,"top-center":l&&vo&&go,"bottom-center":u&&vo&&go,"top-end":l&&mo&&fo,"bottom-end":u&&mo&&fo}).reduce((yo,[Mr,Ir])=>Ir?[...yo,Mr]:yo,[])}#c(){return{tooltipWidth:this.shadowRoot.querySelector("span").getBoundingClientRect().width,tooltipHeight:this.shadowRoot.querySelector("span").getBoundingClientRect().height,elemHeight:this.getBoundingClientRect().height,elemWidth:this.getBoundingClientRect().width}}#n(){return{elemLeft:this.getBoundingClientRect().left,elemRight:window.innerWidth-this.getBoundingClientRect().right,elemTop:this.getBoundingClientRect().top,elemBottom:window.innerHeight-this.getBoundingClientRect().bottom}}#l(t,e,o){return t+e/2-o/2>0}render(){let t;return this.label&&(t=d`
+    `}static get properties(){return{flipDisabled:{type:Boolean,attribute:"flip-disabled"},label:{type:String},open:{type:Boolean,reflect:!0},position:{type:String,reflect:!0}}}constructor(){super(),this.#e=this.attachInternals(),this.flipDisabled=!1,this.label=null,this.open=!1,this.position="top-center"}connectedCallback(){super.connectedCallback(),this.id=`tooltip-describedby-${ga++}`;let e=new MutationObserver(this.#t.bind(this)),t={childList:!0};e.observe(this.shadowRoot,t)}#t(e){for(let t of e)Array.from(t.addedNodes).some(a=>a.tagName==="SPAN")&&(this.#e.role="tooltip",this.addEventListener("focus",this.#i,!0),this.addEventListener("mouseenter",this.#i),this.addEventListener("blur",this.#a,!0),this.addEventListener("mouseleave",this.#a),this.addEventListener("keydown",this.#r)),t.removedNodes.length>0&&(this.#e.role="",this.removeEventListener("focus",this.#i),this.removeEventListener("mouseenter",this.#i),this.removeEventListener("blur",this.#a),this.removeEventListener("mouseleave",this.#a),this.removeEventListener("keydown",this.#r))}disconnectedCallback(){super.disconnectedCallback(),this.removeEventListener("focus",this.#i),this.removeEventListener("mouseenter",this.#i),this.removeEventListener("blur",this.#a),this.removeEventListener("mouseleave",this.#a),this.removeEventListener("keydown",this.#r)}#o(){let e=this.getAttribute("id");this.firstElementChild.setAttribute("aria-describedby",e);let t=window.getComputedStyle(this.firstElementChild).display;this.style.setProperty("display",t)}updated(){this.open&&this.#s()}#r(e){e.key==="Escape"&&this.#a()}#i(){this.setAttribute(Ei,"")}#a(){this.removeAttribute(Ei)}#s(){let e=this.getAttribute("position");if(["left","right","top-start","top-end","top-center","bottom-start","bottom-end","bottom-center"].includes(e)&&this.flipDisabled===!1&&this.label){let[t,o]=e.split("-"),i=this.#c(),a=l=>e===l,s=l=>t===l.split("-")[0],h=l=>{let[c,b]=l.split("-");return e==="left"&&l==="right"||e==="right"&&l==="left"||t==="bottom"&&c==="top"&&o===b||t==="top"&&c==="bottom"&&o===b};if(!i.some(a)){let l=i.find(s)||i.find(h)||i[0];this.setAttribute("position",l)}}}#c(){let{tooltipWidth:e,tooltipHeight:t,elemHeight:o,elemWidth:i}=this.#h(),{elemLeft:a,elemRight:s,elemTop:h,elemBottom:l}=this.#n(),c=h-t>0,b=l-t>0,u=s-e>0,m=a-e>0,f=this.#l(h,o,t),L=this.#l(l,o,t),T=window.innerWidth-a-e>0,Go=a>0,Qo=this.#l(s,i,e),Xo=this.#l(a,i,e),Jo=s>0,er=a+i-e>0;return Object.entries({left:m&&f&&L,right:u&&f&&L,"top-start":c&&T&&Go,"bottom-start":b&&T&&Go,"top-center":c&&Qo&&Xo,"bottom-center":b&&Qo&&Xo,"top-end":c&&Jo&&er,"bottom-end":b&&Jo&&er}).reduce((tr,[Ri,Pi])=>Pi?[...tr,Ri]:tr,[])}#h(){return{tooltipWidth:this.shadowRoot.querySelector("span").getBoundingClientRect().width,tooltipHeight:this.shadowRoot.querySelector("span").getBoundingClientRect().height,elemHeight:this.getBoundingClientRect().height,elemWidth:this.getBoundingClientRect().width}}#n(){return{elemLeft:this.getBoundingClientRect().left,elemRight:window.innerWidth-this.getBoundingClientRect().right,elemTop:this.getBoundingClientRect().top,elemBottom:window.innerHeight-this.getBoundingClientRect().bottom}}#l(e,t,o){return e+t/2-o/2>0}render(){let e;return this.label&&(e=d`
         <span
-          class=${b(this.open?"show":null)}
+          class=${v(this.open?"show":null)}
           aria-hidden=${this.open?"false":"true"}
         >
           ${this.label}
         </span>
       `),d`
       <slot @slotchange=${this.#o}></slot>
-      ${t}
-    `}};customElements.define("jh-tooltip",Fe);var Ze=class extends f{#t=!1;#e;static get styles(){return y`
+      ${e}
+    `}};customElements.define("jh-tooltip",Ao);var So=class extends g{#e=!1;#t;static get styles(){return y`
       :host {
         display: inline-block;
         vertical-align: middle;
@@ -1493,23 +1567,83 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
           var(--jh-color-content-secondary-hover)
         );
       }
-    `}static get properties(){return{label:{type:String},dismissButtonAccessibleLabel:{type:String,attribute:"dismiss-button-accessible-label"},dismissible:{type:Boolean},tooltipLabel:{type:String,attribute:"tooltip-label"},size:{type:String,reflect:!0},href:{type:String},target:{type:String},removeOnDismiss:{type:Boolean,attribute:"remove-on-dismiss"}}}constructor(){super(),this.label=null,this.dismissible=!1,this.dismissButtonAccessibleLabel=null,this.tooltipLabel=null,this.size="small",this.href=null,this.target=null,this.removeOnDismiss=!1,this.addEventListener("keyup",this.#i),this.addEventListener("keyup",this.#o),this.addEventListener("blur",this.#s)}connectedCallback(){super.connectedCallback(),new ResizeObserver(this.#r.bind(this)).observe(this)}#o(t){(t.code==="Space"||t.code==="Enter")&&this.click()}#r(){if(!this.label)return;let t=this.#t,e=this.shadowRoot.querySelector(".label");this.#t=e.offsetWidth<e.scrollWidth,t!==this.#t&&(this.#t&&!this.href?(this.#e=this.getAttribute("tabindex"),this.setAttribute("tabindex","0")):this.#t||(this.#e?this.setAttribute("tabindex",this.#e):this.removeAttribute("tabindex")),this.update())}#i(t){if(t.target.#t&&(t.key==="Tab"||t.shiftKey&&t.key==="Tab")){let e=this.shadowRoot.querySelector("jh-tooltip");(t.composedPath()[0].localName==="jh-tag"||t.composedPath()[0].localName==="a")&&(e.open=!e.open),t.composedPath()[0].localName==="button"&&(e.open=!1)}}#s(t){if(t.target.#t){let e=this.shadowRoot.querySelector("jh-tooltip");e.open=!1}}#a(t){t&&(this.shadowRoot.querySelector('slot[name="jh-tag-icon"]').classList.add("display-icon-slot"),this.firstElementChild.setAttribute("size","x-small"))}#h(t){t.stopPropagation(),this.dispatchEvent(new CustomEvent("jh-dismiss",{bubbles:!0,cancelable:!0,composed:!0})),this.removeOnDismiss&&this.remove()}#c(){let t;return this.dismissible&&(t=d`
+    `}static get properties(){return{label:{type:String},dismissButtonAccessibleLabel:{type:String,attribute:"dismiss-button-accessible-label"},dismissible:{type:Boolean},tooltipLabel:{type:String,attribute:"tooltip-label"},size:{type:String,reflect:!0},href:{type:String},target:{type:String},removeOnDismiss:{type:Boolean,attribute:"remove-on-dismiss"}}}constructor(){super(),this.label=null,this.dismissible=!1,this.dismissButtonAccessibleLabel=null,this.tooltipLabel=null,this.size="small",this.href=null,this.target=null,this.removeOnDismiss=!1,this.addEventListener("keyup",this.#i),this.addEventListener("keyup",this.#o),this.addEventListener("blur",this.#a)}connectedCallback(){super.connectedCallback(),new ResizeObserver(this.#r.bind(this)).observe(this)}#o(e){(e.code==="Space"||e.code==="Enter")&&this.click()}#r(){if(!this.label)return;let e=this.#e,t=this.shadowRoot.querySelector(".label");this.#e=t.offsetWidth<t.scrollWidth,e!==this.#e&&(this.#e&&!this.href?(this.#t=this.getAttribute("tabindex"),this.setAttribute("tabindex","0")):this.#e||(this.#t?this.setAttribute("tabindex",this.#t):this.removeAttribute("tabindex")),this.update())}#i(e){if(e.target.#e&&(e.key==="Tab"||e.shiftKey&&e.key==="Tab")){let t=this.shadowRoot.querySelector("jh-tooltip");(e.composedPath()[0].localName==="jh-tag"||e.composedPath()[0].localName==="a")&&(t.open=!t.open),e.composedPath()[0].localName==="button"&&(t.open=!1)}}#a(e){if(e.target.#e){let t=this.shadowRoot.querySelector("jh-tooltip");t.open=!1}}#s(e){e&&(this.shadowRoot.querySelector('slot[name="jh-tag-icon"]').classList.add("display-icon-slot"),this.firstElementChild.setAttribute("size","x-small"))}#c(e){e.stopPropagation(),this.dispatchEvent(new CustomEvent("jh-dismiss",{bubbles:!0,cancelable:!0,composed:!0})),this.removeOnDismiss&&this.remove()}#h(){let e;return this.dismissible&&(e=d`
       <jh-button
         size="medium"
         appearance="secondary"
         accessible-label=${this.dismissButtonAccessibleLabel}
-        @click=${this.#h}>
+        @click=${this.#c}>
         <slot name="jh-tag-dismiss-icon" slot="jh-button-icon">
           <jh-icon-xmark slot="jh-button-icon"></jh-icon-xmark>
         </slot>
       </jh-button>
-      `),this.dismissible&&this.tooltipLabel&&(t=d`<jh-tooltip label=${this.tooltipLabel}>${t}</jh-tooltip>`),t}#n(){let t,e=d`<span class="label">${this.label}</span>`;return this.#t&&(e=d`<jh-tooltip label=${this.label}>${e}</jh-tooltip>`),this.href?(this.removeAttribute("tabindex"),t=d` <a class="label-container" tabindex="0" href=${this.href}>${e}</a>`):t=d` <div class="label-container">${e}</div>`,t}render(){return d` 
+      `),this.dismissible&&this.tooltipLabel&&(e=d`<jh-tooltip label=${this.tooltipLabel}>${e}</jh-tooltip>`),e}#n(){let e,t=d`<span class="label">${this.label}</span>`;return this.#e&&(t=d`<jh-tooltip label=${this.label}>${t}</jh-tooltip>`),this.href?(this.removeAttribute("tabindex"),e=d` <a class="label-container" tabindex="0" href=${this.href}>${t}</a>`):e=d` <div class="label-container">${t}</div>`,e}render(){return d` 
     <span class="container">
-      <slot name="jh-tag-icon" @slotchange=${this.#a}></slot>
+      <slot name="jh-tag-icon" @slotchange=${this.#s}></slot>
       ${this.#n()}
-      ${this.#c()}
+      ${this.#h()}
     </span>
-    `}};customElements.define("jh-tag",Ze);var Vt=class extends _{#t;static get styles(){return S`
+    `}};customElements.define("jh-tag",So);var Eo=class extends g{#e;static get styles(){return y`
+      :host {
+        gap: var(--jh-space-100);
+        display: flex;
+        flex-wrap: wrap;
+        align-content: flex-start;
+      }
+      :host([alignment='start']) {
+        justify-content: flex-start;
+      }
+      :host([alignment='end']) {
+        justify-content: flex-end;
+      }
+    `}static get properties(){return{alignment:{type:String,reflect:!0}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.role="group",this.alignment="start"}render(){return d` <slot></slot> `}};customElements.define("jh-tag-group",Eo);var zo=class extends g{#e;static get styles(){return y`
+      :host {
+        fill: var(
+          --jh-icon-color-fill,
+          var(--jh-color-content-secondary-enabled)
+        );
+        width: var(--icon-size);
+        height: var(--icon-size);
+        display: inline-block;
+      }
+      :host([size='x-small']) {
+        --icon-size: var(
+          --jh-icon-size-extra-small,
+          var(--jh-size-400)
+        );
+      }
+      :host([size='small']) {
+        --icon-size: var(
+          --jh-icon-size-small,
+          var(--jh-size-500)
+        );
+      }
+      :host([size='medium']) {
+        --icon-size: var(
+          --jh-icon-size-medium,
+          var(--jh-size-600)
+        );
+      }
+      :host([size='large']) {
+        --icon-size: var(
+          --jh-icon-size-large,
+          var(--jh-size-900)
+        );
+      }
+      :host([size='x-large']) {
+        --icon-size: var(
+          --jh-icon-size-extra-large,
+          var(--jh-size-1400)
+        );
+      }
+      svg,
+      ::slotted(*) {
+        width: 100%;
+        height: 100%;
+      }
+    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.role="graphics-symbol",this.#e.ariaHidden="true",this.size="medium"}render(){return d`
+      <slot></slot>
+    `}};customElements.define("jh-icon",zo);var ut=class extends S{#e;static get styles(){return P`
       :host {
         fill: var(
           --jh-icon-color-fill,
@@ -1553,9 +1687,9 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         width: 100%;
         height: 100%;
       }
-    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#t=this.attachInternals(),this.#t.role="graphics-symbol",this.#t.ariaHidden="true",this.size="medium"}render(){return C`
+    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.role="graphics-symbol",this.#e.ariaHidden="true",this.size="medium"}render(){return U`
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">   <path fill-rule="evenodd" d="M4.625 10.375a5.75 5.75 0 1 1 11.5 0 5.75 5.75 0 0 1-11.5 0Zm5.75-7.25a7.25 7.25 0 1 0 4.569 12.88l4.65 4.65a.75.75 0 1 0 1.061-1.06l-4.65-4.651a7.25 7.25 0 0 0-5.63-11.819Z" clip-rule="evenodd"/> </svg> 
-    `}};customElements.define("jh-icon-magnifying-glass",Vt);var Wt=class extends _{#t;static get styles(){return S`
+    `}};customElements.define("jh-icon-magnifying-glass",ut);var bt=class extends S{#e;static get styles(){return P`
       :host {
         fill: var(
           --jh-icon-color-fill,
@@ -1599,9 +1733,9 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         width: 100%;
         height: 100%;
       }
-    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#t=this.attachInternals(),this.#t.role="graphics-symbol",this.#t.ariaHidden="true",this.size="medium"}render(){return C`
+    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.role="graphics-symbol",this.#e.ariaHidden="true",this.size="medium"}render(){return U`
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">   <path fill-rule="evenodd" d="M12 3.75a8.25 8.25 0 1 0 0 16.5 8.25 8.25 0 0 0 0-16.5ZM2.25 12c0-5.384 4.365-9.75 9.75-9.75s9.75 4.366 9.75 9.75c0 5.385-4.365 9.75-9.75 9.75S2.25 17.386 2.25 12Zm6.22-3.53a.75.75 0 0 1 1.06 0L12 10.94l2.47-2.47a.75.75 0 1 1 1.06 1.06L13.06 12l2.47 2.47a.75.75 0 1 1-1.06 1.06L12 13.062l-2.47 2.47a.75.75 0 0 1-1.06-1.06L10.94 12 8.47 9.53a.75.75 0 0 1 0-1.06Z" clip-rule="evenodd"/> </svg> 
-    `}};customElements.define("jh-icon-circle-xmark",Wt);var Kt=class extends _{#t;static get styles(){return S`
+    `}};customElements.define("jh-icon-circle-xmark",bt);var vt=class extends S{#e;static get styles(){return P`
       :host {
         fill: var(
           --jh-icon-color-fill,
@@ -1645,9 +1779,9 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         width: 100%;
         height: 100%;
       }
-    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#t=this.attachInternals(),this.#t.role="graphics-symbol",this.#t.ariaHidden="true",this.size="medium"}render(){return C`
+    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.role="graphics-symbol",this.#e.ariaHidden="true",this.size="medium"}render(){return U`
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">   <path fill-rule="evenodd" d="M12 6.25c-4.354 0-6.76 2.428-9.066 4.754l-.464.466a.75.75 0 0 0 0 1.061l.464.467C5.24 15.324 7.646 17.751 12 17.751c4.354 0 6.76-2.427 9.066-4.753l.464-.467a.75.75 0 0 0 0-1.06l-.464-.467C18.76 8.678 16.354 6.25 12 6.25Zm0 10c-3.65 0-5.635-1.932-7.941-4.25C6.365 9.685 8.349 7.75 12 7.75c3.65 0 5.635 1.934 7.941 4.25-2.306 2.318-4.29 4.25-7.941 4.25ZM12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" clip-rule="evenodd"/> </svg> 
-    `}};customElements.define("jh-icon-eye",Kt);var Ft=class extends _{#t;static get styles(){return S`
+    `}};customElements.define("jh-icon-eye",vt);var mt=class extends S{#e;static get styles(){return P`
       :host {
         fill: var(
           --jh-icon-color-fill,
@@ -1691,9 +1825,9 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         width: 100%;
         height: 100%;
       }
-    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#t=this.attachInternals(),this.#t.role="graphics-symbol",this.#t.ariaHidden="true",this.size="medium"}render(){return C`
+    `}static get properties(){return{size:{type:String,reflect:!0}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.role="graphics-symbol",this.#e.ariaHidden="true",this.size="medium"}render(){return U`
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">   <path fill-rule="evenodd" d="m4.672 4.673.708-.707 2.956 2.956c1.06-.42 2.261-.671 3.664-.671 4.354 0 6.76 2.427 9.066 4.753l.464.466a.75.75 0 0 1 0 1.061l-.464.467c-1.094 1.103-2.21 2.23-3.546 3.108l2.515 2.515-.707.708L4.672 4.673ZM6.48 7.895c-1.336.88-2.452 2.005-3.546 3.109l-.464.466a.75.75 0 0 0 0 1.061l.464.467C5.24 15.324 7.646 17.75 12 17.75c1.403 0 2.604-.252 3.664-.672l-1.176-1.176A8.57 8.57 0 0 1 12 16.25c-3.65 0-5.635-1.933-7.941-4.25 1.166-1.172 2.25-2.245 3.507-3.02L6.48 7.895Zm2.812 2.812a3 3 0 0 0 4 4.001l-4-4Zm.22-2.609 1.195 1.195a3 3 0 0 1 4 4l1.727 1.727c1.258-.775 2.341-1.848 3.507-3.02-2.306-2.316-4.29-4.25-7.941-4.25a8.57 8.57 0 0 0-2.488.348Z" clip-rule="evenodd"/> </svg> 
-    `}};customElements.define("jh-icon-eye-slash",Ft);var ui=0,Ge=class extends f{static get formAssociated(){return!0}#t;#e;#o;static get styles(){return y`
+    `}};customElements.define("jh-icon-eye-slash",mt);var fa=0,Co=class extends g{static get formAssociated(){return!0}#e;#t;#o;static get styles(){return y`
       :host {
         font: var(--jh-font-helper-regular);
         display: inline-block;
@@ -2100,18 +2234,18 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
       input:-webkit-autofill {
         transition: background-color 5000s ease-in-out 0s;
       }
-    `}static get properties(){return{accessibleLabelClearButton:{type:String,attribute:"accessible-label-clear-button"},accessibleLabelInput:{type:String,attribute:"accessible-label-input"},accessibleLabelHidePassword:{type:String,attribute:"accessible-label-hide-password"},accessibleLabelShowPassword:{type:String,attribute:"accessible-label-show-password"},autocomplete:{type:String},autoGrow:{type:Boolean,attribute:"auto-grow",reflect:!0},cols:{type:String},disabled:{type:Boolean,reflect:!0},enterkeyhint:{type:String},errorText:{type:String,attribute:"error-text"},helperText:{type:String,attribute:"helper-text",reflect:!0},hideLeftSlot:{type:Boolean,attribute:"hide-left-slot",reflect:!0},passwordVisible:{type:Boolean,attribute:"password-visible"},hideRightSlot:{type:Boolean,attribute:"hide-right-slot",reflect:!0},inputmode:{type:String},invalid:{type:Boolean,reflect:!0},label:{type:String},maxlength:{type:String},minlength:{type:String},name:{type:String},noResize:{type:Boolean,attribute:"no-resize",reflect:!0},placeholder:{type:String},readonly:{type:Boolean,reflect:!0},required:{type:Boolean,reflect:!0},rows:{type:String},showClearButton:{type:Boolean,attribute:"show-clear-button",reflect:!0},showIndicator:{type:Boolean,attribute:"show-indicator",reflect:!0},size:{type:String,reflect:!0},spellcheck:{type:String},type:{type:String,reflect:!0},value:{type:String},wrap:{type:String}}}constructor(){super(),this.#t=this.attachInternals(),this.accessibleLabelInput=null,this.accessibleLabelClearButton=null,this.accessibleLabelHidePassword=null,this.accessibleLabelShowPassword=null,this.autocomplete=null,this.autoGrow=!1,this.cols=null,this.disabled=!1,this.enterkeyhint=null,this.errorText=null,this.helperText=null,this.hideLeftSlot=!1,this.passwordVisible=!1,this.hideRightSlot=!1,this.inputmode=null,this.invalid=!1,this.label=null,this.maxlength=null,this.minlength=null,this.name=null,this.noResize=!1,this.placeholder=null,this.readonly=!1,this.required=!1,this.rows=null,this.showClearButton=!1,this.showIndicator=!1,this.size="medium",this.spellcheck=null,this.type="text",this.value=null,this.wrap=null}get form(){return this.#t.form}get validity(){return this.#t.validity}get value(){return this.#e}set value(t){let e=this.#e;t!==e&&(this.#e=t,this.#t.setFormValue(this.#e)),this.requestUpdate("value",e)}connectedCallback(){super.connectedCallback(),this.#o=ui++}#r(){this.value=null,this.shadowRoot.querySelector("input").focus(),this.#i("jh-clear")}#i(t){this.dispatchEvent(new CustomEvent(t,{bubbles:!0,cancelable:!0,composed:!0}))}#s(){!this.readonly&&!this.disabled&&(this.passwordVisible=!this.passwordVisible)}#a(){let t=!1,e=!1;for(let o of this.children)o.slot==="jh-input-left"?o.assignedSlot!==null&&(t=!0):(o.slot==="jh-input-right"||o.slot==="jh-input-password-visible"||o.slot==="jh-input-password-hidden")&&o.assignedSlot!==null&&(e=!0);this.#h(t,e)}#h(t,e){let o,i=this.shadowRoot.querySelector("input");t&&e?o="input-both-slots":t?o="input-left-slot":e&&(o="input-right-slot"),o?(i.className&&i.classList.remove(i.className),i.classList.add(o)):i.classList.remove(i.className)}#c(){let t=this.shadowRoot.querySelector("textarea");t.style.height="auto",t.style.height=t.scrollHeight+"px"}#n(){this.#i("jh-change")}#l(t){this.value=t.target.value,this.type==="textarea"&&this.autoGrow&&this.#c()}#d(t){let e=t.target.value.substring(t.target.selectionStart,t.target.selectionEnd);this.dispatchEvent(new CustomEvent("jh-select",{detail:{selected:e},bubbles:!0,cancelable:!0,composed:!0}))}#p(){return d`
+    `}static get properties(){return{accessibleLabelClearButton:{type:String,attribute:"accessible-label-clear-button"},accessibleLabelInput:{type:String,attribute:"accessible-label-input"},accessibleLabelHidePassword:{type:String,attribute:"accessible-label-hide-password"},accessibleLabelShowPassword:{type:String,attribute:"accessible-label-show-password"},autocomplete:{type:String},autoGrow:{type:Boolean,attribute:"auto-grow",reflect:!0},cols:{type:String},disabled:{type:Boolean,reflect:!0},enterkeyhint:{type:String},errorText:{type:String,attribute:"error-text"},helperText:{type:String,attribute:"helper-text",reflect:!0},hideLeftSlot:{type:Boolean,attribute:"hide-left-slot",reflect:!0},passwordVisible:{type:Boolean,attribute:"password-visible"},hideRightSlot:{type:Boolean,attribute:"hide-right-slot",reflect:!0},inputmode:{type:String},invalid:{type:Boolean,reflect:!0},label:{type:String},maxlength:{type:String},minlength:{type:String},name:{type:String},noResize:{type:Boolean,attribute:"no-resize",reflect:!0},placeholder:{type:String},readonly:{type:Boolean,reflect:!0},required:{type:Boolean,reflect:!0},rows:{type:String},showClearButton:{type:Boolean,attribute:"show-clear-button",reflect:!0},showIndicator:{type:Boolean,attribute:"show-indicator",reflect:!0},size:{type:String,reflect:!0},spellcheck:{type:String},type:{type:String,reflect:!0},value:{type:String},wrap:{type:String}}}constructor(){super(),this.#e=this.attachInternals(),this.accessibleLabelInput=null,this.accessibleLabelClearButton=null,this.accessibleLabelHidePassword=null,this.accessibleLabelShowPassword=null,this.autocomplete=null,this.autoGrow=!1,this.cols=null,this.disabled=!1,this.enterkeyhint=null,this.errorText=null,this.helperText=null,this.hideLeftSlot=!1,this.passwordVisible=!1,this.hideRightSlot=!1,this.inputmode=null,this.invalid=!1,this.label=null,this.maxlength=null,this.minlength=null,this.name=null,this.noResize=!1,this.placeholder=null,this.readonly=!1,this.required=!1,this.rows=null,this.showClearButton=!1,this.showIndicator=!1,this.size="medium",this.spellcheck=null,this.type="text",this.value=null,this.wrap=null}get form(){return this.#e.form}get validity(){return this.#e.validity}get value(){return this.#t}set value(e){let t=this.#t;e!==t&&(this.#t=e,this.#e.setFormValue(this.#t)),this.requestUpdate("value",t)}connectedCallback(){super.connectedCallback(),this.#o=fa++}#r(){this.value=null,this.shadowRoot.querySelector("input").focus(),this.#i("jh-clear")}#i(e){this.dispatchEvent(new CustomEvent(e,{bubbles:!0,cancelable:!0,composed:!0}))}#a(){!this.readonly&&!this.disabled&&(this.passwordVisible=!this.passwordVisible)}#s(){let e=!1,t=!1;for(let o of this.children)o.slot==="jh-input-left"?o.assignedSlot!==null&&(e=!0):(o.slot==="jh-input-right"||o.slot==="jh-input-password-visible"||o.slot==="jh-input-password-hidden")&&o.assignedSlot!==null&&(t=!0);this.#c(e,t)}#c(e,t){let o,i=this.shadowRoot.querySelector("input");e&&t?o="input-both-slots":e?o="input-left-slot":t&&(o="input-right-slot"),o?(i.className&&i.classList.remove(i.className),i.classList.add(o)):i.classList.remove(i.className)}#h(){let e=this.shadowRoot.querySelector("textarea");e.style.height="auto",e.style.height=e.scrollHeight+"px"}#n(){this.#i("jh-change")}#l(e){this.value=e.target.value,this.type==="textarea"&&this.autoGrow&&this.#h()}#d(e){let t=e.target.value.substring(e.target.selectionStart,e.target.selectionEnd);this.dispatchEvent(new CustomEvent("jh-select",{detail:{selected:t},bubbles:!0,cancelable:!0,composed:!0}))}#p(){return d`
       <slot
         class="left-slot"
         name="jh-input-left"
-        @slotchange=${this.#a}
+        @slotchange=${this.#s}
         >${this.type==="search"?d`
               <jh-icon-magnifying-glass aria-hidden="true" size="small"></jh-icon-magnifying-glass>
             `:null}
       </slot>
-    `}#u(){let t=this.value?null:"hide-clear-button";return d`
-      <jh-button size="small" appearance="tertiary" class="clear-button ${t}" 
-      accessible-label=${b(this.accessibleLabelClearButton)} 
+    `}#u(){let e=this.value?null:"hide-clear-button";return d`
+      <jh-button size="small" appearance="tertiary" class="clear-button ${e}" 
+      accessible-label=${v(this.accessibleLabelClearButton)} 
       ?disabled=${this.disabled||this.readonly} 
       @click=${this.#r}
       >
@@ -2119,20 +2253,20 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
           <jh-icon-circle-xmark slot="jh-button-icon" aria-hidden="true" size="small"></jh-icon-circle-xmark>
         </slot>
       </jh-button>
-    `}#b(){if(this.type==="password"){let t=this.passwordVisible?this.accessibleLabelHidePassword:this.accessibleLabelShowPassword;return d`
+    `}#b(){if(this.type==="password"){let e=this.passwordVisible?this.accessibleLabelHidePassword:this.accessibleLabelShowPassword;return d`
         <jh-button
           size="small"
           class="right-slot"
           appearance="tertiary"
           ?disabled=${this.disabled||this.readonly}
-          accessible-label=${b(t)}
-          @click=${this.#s}
+          accessible-label=${v(e)}
+          @click=${this.#a}
         >
           ${this.passwordVisible?d`
                 <slot
                   name="jh-input-password-visible"
                   slot="jh-button-icon"
-                  @slotchange=${this.#a}
+                  @slotchange=${this.#s}
                 >
                   <jh-icon-eye-slash
                     slot="jh-button-icon"
@@ -2144,7 +2278,7 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
                 <slot
                   name="jh-input-password-hidden"
                   slot="jh-button-icon"
-                  @slotchange=${this.#a}
+                  @slotchange=${this.#s}
                 >
                   <jh-icon-eye
                     slot="jh-button-icon"
@@ -2158,70 +2292,70 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         <slot
           class="right-slot"
           name="jh-input-right"
-          @slotchange=${this.#a}
+          @slotchange=${this.#s}
         ></slot>
-      `}#v(){if(this.readonly)return;let t=this.showClearButton&&!this.readonly&&!this.disabled,e=this.hideLeftSlot?null:this.#p(),o=t?this.#u():null,i;return this.hideRightSlot||this.type==="password"&&this.disabled?i=null:i=this.#b(),d`${e}${o}${i}`}#g(){if(this.label&&this.helperText&&this.errorText)return`jh-input-error-${this.#o} jh-input-desc-${this.#o}`;if(this.label&&this.helperText)return`jh-input-desc-${this.#o}`;if(this.invalid&&this.errorText)return`jh-input-error-${this.#o}`}render(){let t=["email","password","search","tel","text","textarea","url"],e,o,i,s,a,c,n=this.label&&this.helperText||this.invalid&&this.errorText?this.#g():null;return this.showIndicator&&(this.required?i=d`<span class="indicator" aria-hidden="true"> *</span>`:i=d`<span class="indicator"> (optional)</span>`),this.helperText&&(s=d`
+      `}#v(){if(this.readonly)return;let e=this.showClearButton&&!this.readonly&&!this.disabled,t=this.hideLeftSlot?null:this.#p(),o=e?this.#u():null,i;return this.hideRightSlot||this.type==="password"&&this.disabled?i=null:i=this.#b(),d`${t}${o}${i}`}#m(){if(this.label&&this.helperText&&this.errorText)return`jh-input-error-${this.#o} jh-input-desc-${this.#o}`;if(this.label&&this.helperText)return`jh-input-desc-${this.#o}`;if(this.invalid&&this.errorText)return`jh-input-error-${this.#o}`}render(){let e=["email","password","search","tel","text","textarea","url"],t,o,i,a,s,h,l=this.label&&this.helperText||this.invalid&&this.errorText?this.#m():null;return this.showIndicator&&(this.required?i=d`<span class="indicator" aria-hidden="true"> *</span>`:i=d`<span class="indicator"> (optional)</span>`),this.helperText&&(a=d`
         <p id="jh-input-desc-${this.#o}" class="helper-text">
           ${this.helperText}
         </p>
-      `),this.label&&(e=d`
+      `),this.label&&(t=d`
         <label for="jh-input-${this.#o}"> ${this.label}${i} </label>
-        ${s}
-      `),this.invalid&&this.errorText&&(a=d`
+        ${a}
+      `),this.invalid&&this.errorText&&(s=d`
         <div id="jh-input-error-${this.#o}" class="error-text">
           ${this.errorText}
         </div>
-      `),t.includes(this.type)&&(this.type==="password"&&this.passwordVisible?c="text":c=this.type),this.type==="textarea"?o=d`
+      `),e.includes(this.type)&&(this.type==="password"&&this.passwordVisible?h="text":h=this.type),this.type==="textarea"?o=d`
         <textarea
           id="jh-input-${this.#o}"
-          aria-describedby=${b(n)}
-          aria-invalid=${b(this.invalid?"true":null)}
-          aria-label=${b(this.accessibleLabelInput===""?null:this.accessibleLabelInput)}
-          autocomplete=${b(this.autocomplete===""?null:this.autocomplete)}
+          aria-describedby=${v(l)}
+          aria-invalid=${v(this.invalid?"true":null)}
+          aria-label=${v(this.accessibleLabelInput===""?null:this.accessibleLabelInput)}
+          autocomplete=${v(this.autocomplete===""?null:this.autocomplete)}
           ?disabled=${this.disabled}
-          inputmode=${b(this.inputmode===""?null:this.inputmode)}
+          inputmode=${v(this.inputmode===""?null:this.inputmode)}
           ?invalid=${this.invalid}
-          maxlength=${b(this.maxlength===""?null:this.maxlength)}
-          minlength=${b(this.minlength===""?null:this.minlength)}
-          name=${b(this.name===""?null:this.name)}
-          placeholder=${b(this.placeholder===""?null:this.placeholder)}
+          maxlength=${v(this.maxlength===""?null:this.maxlength)}
+          minlength=${v(this.minlength===""?null:this.minlength)}
+          name=${v(this.name===""?null:this.name)}
+          placeholder=${v(this.placeholder===""?null:this.placeholder)}
           ?readonly=${this.readonly}
           ?required=${this.required}
-          spellcheck=${b(this.spellcheck===""?null:this.spellcheck)}
+          spellcheck=${v(this.spellcheck===""?null:this.spellcheck)}
           .value=${this.value}
           @change=${this.#n}
           @input=${this.#l}
           @select=${this.#d}
-          cols=${b(this.cols===""?null:this.cols)}
-          rows=${b(this.rows===""?null:this.rows)}
-          wrap=${b(this.wrap===""?null:this.wrap)}
+          cols=${v(this.cols===""?null:this.cols)}
+          rows=${v(this.rows===""?null:this.rows)}
+          wrap=${v(this.wrap===""?null:this.wrap)}
         ></textarea>
       `:o=d`
         <div class="input-container">
           <input
             id="jh-input-${this.#o}"
-            aria-describedby=${b(n)}
-            aria-invalid=${b(this.invalid?"true":null)}
-            aria-label=${b(this.accessibleLabelInput===""?null:this.accessibleLabelInput)}
-            autocomplete=${b(this.autocomplete===""?null:this.autocomplete)}
+            aria-describedby=${v(l)}
+            aria-invalid=${v(this.invalid?"true":null)}
+            aria-label=${v(this.accessibleLabelInput===""?null:this.accessibleLabelInput)}
+            autocomplete=${v(this.autocomplete===""?null:this.autocomplete)}
             ?disabled=${this.disabled}
-            inputmode=${b(this.inputmode===""?null:this.inputmode)}
+            inputmode=${v(this.inputmode===""?null:this.inputmode)}
             ?invalid=${this.invalid}
-            maxlength=${b(this.maxlength===""?null:this.maxlength)}
-            minlength=${b(this.minlength===""?null:this.minlength)}
-            name=${b(this.name===""?null:this.name)}
-            placeholder=${b(this.placeholder===""?null:this.placeholder)}
+            maxlength=${v(this.maxlength===""?null:this.maxlength)}
+            minlength=${v(this.minlength===""?null:this.minlength)}
+            name=${v(this.name===""?null:this.name)}
+            placeholder=${v(this.placeholder===""?null:this.placeholder)}
             ?readonly=${this.readonly}
             ?required=${this.required}
-            spellcheck=${b(this.spellcheck===""?null:this.spellcheck)}
+            spellcheck=${v(this.spellcheck===""?null:this.spellcheck)}
             .value=${this.value}
             @change=${this.#n}
             @input=${this.#l}
             @select=${this.#d}
-            type=${b(c)}
+            type=${v(h)}
           />${this.#v()}
         </div>
-      `,d` ${e} ${o} ${a} `}};customElements.define("jh-input",Ge);var bi=0,Ye=class extends f{static get formAssociated(){return!0}#t;#e;#o;#r;static get styles(){return y`
+      `,d` ${t} ${o} ${s} `}};customElements.define("jh-input",Co);var ya=0,To=class extends g{static get formAssociated(){return!0}#e;#t;#o;#r;static get styles(){return y`
       :host {
         font: var(--jh-font-helper-regular);
         display: block;
@@ -2299,32 +2433,32 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
           var(--jh-color-content-negative-enabled)
         );
       }
-    `}static get properties(){return{accessibleLabel:{type:String,attribute:"accessible-label"},errorText:{type:String,attribute:"error-text"},helperText:{attribute:"helper-text"},invalid:{type:Boolean,reflect:!0},label:{type:String},name:{type:String},required:{type:Boolean,reflect:!0},orientation:{type:String,reflect:!0},showIndicator:{type:Boolean,reflect:!0,attribute:"show-indicator"},value:{type:String,reflect:!0}}}constructor(){super(),this.#o=this.attachInternals(),this.accessibleLabel=null,this.errorText=null,this.helperText=null,this.invalid=!1,this.label=null,this.name=null,this.required=!1,this.orientation="vertical",this.showIndicator=!1,this.value=null,this.addEventListener("jh-change",this.#a),this.addEventListener("keydown",this.#h),this.addEventListener("focusout",this.#c)}connectedCallback(){super.connectedCallback(),this.#e=bi++}get form(){return this.#o.form}get validity(){return this.#o.validity}get value(){return this.#r}set value(t){let e=this.#r;t!==e&&(this.#r=t,this.#o.setFormValue(t)),this.requestUpdate("value",e)}#i(){return[...this.querySelectorAll("jh-radio")]}#s(){let t=this.#i();if(this.#t=t.find(e=>e.value===this.value&&this.value!==null),!this.#t){let e=t.find(o=>o.checked);e?(this.value=e.value,this.#t=e):(this.value=null,this.#t=null)}this.#n(),this.#t||(t[0].tabIndex=0)}#a(t){if(t.target.tagName==="JH-RADIO"){this.value=t.target.value,this.#t=t.target,this.#n();let e={bubbles:!0,composed:!0,cancelable:!0};this.dispatchEvent(new CustomEvent("jh-change",e))}}#h(t){if(!["ArrowDown","ArrowRight","ArrowUp","ArrowLeft","Space"].includes(t.code))return;let o=this.#i().filter(a=>!a.disabled),i=o.length,s=o.findIndex(a=>a.checked);s=s===-1?0:s,t.code==="ArrowDown"||t.code==="ArrowRight"?(t.preventDefault(),s+1<i?s++:s=0):(t.code==="ArrowUp"||t.code==="ArrowLeft")&&(t.preventDefault(),s-1>=0?s--:s=i-1),this.value=o[s].value,o[s].click(),this.#t=o[s],this.#n(),o[s].focus()}#c(){let t=this.#i().filter(e=>!e.disabled);t.some(e=>e.checked)&&t.forEach(e=>e.checked?e.tabIndex=0:e.tabIndex=-1)}#n(){this.#i().forEach(e=>{e.checked=this.#t===e,e.checked?e.tabIndex=0:e.tabIndex=-1})}#l(){if(this.errorText&&this.invalid&&this.helperText&&this.label)return`radio-group-error-${this.#e} radio-group-helper-${this.#e}`;if(this.errorText&&this.invalid)return`radio-group-error-${this.#e}`;if(this.helperText&&this.label)return`radio-group-helper-${this.#e}`}render(){let t,e,o,i;return this.showIndicator&&(this.required?t=d`<span class="indicator" aria-hidden="true"> *</span>`:t=d`<span class="indicator"> (optional)</span>`),this.helperText&&(e=d`<p
+    `}static get properties(){return{accessibleLabel:{type:String,attribute:"accessible-label"},errorText:{type:String,attribute:"error-text"},helperText:{attribute:"helper-text"},invalid:{type:Boolean,reflect:!0},label:{type:String},name:{type:String},required:{type:Boolean,reflect:!0},orientation:{type:String,reflect:!0},showIndicator:{type:Boolean,reflect:!0,attribute:"show-indicator"},value:{type:String,reflect:!0}}}constructor(){super(),this.#o=this.attachInternals(),this.accessibleLabel=null,this.errorText=null,this.helperText=null,this.invalid=!1,this.label=null,this.name=null,this.required=!1,this.orientation="vertical",this.showIndicator=!1,this.value=null,this.addEventListener("jh-change",this.#s),this.addEventListener("keydown",this.#c),this.addEventListener("focusout",this.#h)}connectedCallback(){super.connectedCallback(),this.#t=ya++}get form(){return this.#o.form}get validity(){return this.#o.validity}get value(){return this.#r}set value(e){let t=this.#r;e!==t&&(this.#r=e,this.#o.setFormValue(e)),this.requestUpdate("value",t)}#i(){return[...this.querySelectorAll("jh-radio")]}#a(){let e=this.#i();if(this.#e=e.find(t=>t.value===this.value&&this.value!==null),!this.#e){let t=e.find(o=>o.checked);t?(this.value=t.value,this.#e=t):(this.value=null,this.#e=null)}this.#n(),this.#e||(e[0].tabIndex=0)}#s(e){if(e.target.tagName==="JH-RADIO"){this.value=e.target.value,this.#e=e.target,this.#n();let t={bubbles:!0,composed:!0,cancelable:!0};this.dispatchEvent(new CustomEvent("jh-change",t))}}#c(e){if(!["ArrowDown","ArrowRight","ArrowUp","ArrowLeft","Space"].includes(e.code))return;let o=this.#i().filter(s=>!s.disabled),i=o.length,a=o.findIndex(s=>s.checked);a=a===-1?0:a,e.code==="ArrowDown"||e.code==="ArrowRight"?(e.preventDefault(),a+1<i?a++:a=0):(e.code==="ArrowUp"||e.code==="ArrowLeft")&&(e.preventDefault(),a-1>=0?a--:a=i-1),this.value=o[a].value,o[a].click(),this.#e=o[a],this.#n(),o[a].focus()}#h(){let e=this.#i().filter(t=>!t.disabled);e.some(t=>t.checked)&&e.forEach(t=>t.checked?t.tabIndex=0:t.tabIndex=-1)}#n(){this.#i().forEach(t=>{t.checked=this.#e===t,t.checked?t.tabIndex=0:t.tabIndex=-1})}#l(){if(this.errorText&&this.invalid&&this.helperText&&this.label)return`radio-group-error-${this.#t} radio-group-helper-${this.#t}`;if(this.errorText&&this.invalid)return`radio-group-error-${this.#t}`;if(this.helperText&&this.label)return`radio-group-helper-${this.#t}`}render(){let e,t,o,i;return this.showIndicator&&(this.required?e=d`<span class="indicator" aria-hidden="true"> *</span>`:e=d`<span class="indicator"> (optional)</span>`),this.helperText&&(t=d`<p
         class="helper-text"
-        id="radio-group-helper-${this.#e}"
+        id="radio-group-helper-${this.#t}"
       >
         ${this.helperText}
-      </p>`),this.label&&(o=d`<legend class="label" for="radio-group-label-${this.#e}">
-          ${this.label}${t}
+      </p>`),this.label&&(o=d`<legend class="label" for="radio-group-label-${this.#t}">
+          ${this.label}${e}
         </legend>
-        ${e}`),this.invalid&&this.errorText&&(i=d`<p class="error-text" id="radio-group-error-${this.#e}">
+        ${t}`),this.invalid&&this.errorText&&(i=d`<p class="error-text" id="radio-group-error-${this.#t}">
         ${this.errorText}
       </p>`),d`
       <fieldset
         role="radiogroup"
-        id=${b(this.label?`radio-group-label-${this.#e}`:null)}
-        aria-describedby=${b(this.#l())}
-        aria-required=${b(this.required?"true":"false")}
-        aria-invalid=${b(this.invalid?"true":null)}
-        aria-label=${b(this.accessibleLabel)}
+        id=${v(this.label?`radio-group-label-${this.#t}`:null)}
+        aria-describedby=${v(this.#l())}
+        aria-required=${v(this.required?"true":"false")}
+        aria-invalid=${v(this.invalid?"true":null)}
+        aria-label=${v(this.accessibleLabel)}
       >
         ${o}
         <div class="controls">
-          <slot @slotchange=${this.#s}></slot>
+          <slot @slotchange=${this.#a}></slot>
         </div>
         ${i}
       </fieldset>
-    `}};customElements.define("jh-radio-group",Ye);var vi=0,Qe=class extends f{#t;#e;static get styles(){return y`
+    `}};customElements.define("jh-radio-group",To);var ja=0,Lo=class extends g{#e;#t;static get styles(){return y`
       :host {
         font: var(--jh-font-body-regular-1);
         display: inline-flex;
@@ -2520,19 +2654,19 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
       :host([disabled]:focus-visible) .radio {
         box-shadow: none;
       }
-    `}static get properties(){return{accessibleLabel:{type:String,attribute:"accessible-label"},checked:{type:Boolean,reflect:!0},disabled:{type:Boolean,reflect:!0},helperText:{type:String,attribute:"helper-text"},label:{type:String},value:{type:String}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.role="radio",this.accessibleLabel=null,this.checked=!1,this.disabled=!1,this.helperText=null,this.label=null,this.value=null,this.addEventListener("click",this.#r),this.addEventListener("keydown",this.#i)}connectedCallback(){super.connectedCallback(),this.#t=vi++,this.setAttribute("tabindex","0"),this.setAttribute("aria-checked",`${this.checked}`),this.accessibleLabel&&this.setAttribute("aria-label",`${this.accessibleLabel}`),this.helperText&&this.setAttribute("aria-describedby",`radio-helper-text-${this.#t}`);let t=new MutationObserver(this.#o.bind(this)),e={attributes:!0};t.observe(this,e)}#o(t){for(let e of t)e.attributeName==="checked"&&this.setAttribute("aria-checked",`${this.checked}`),e.attributeName==="disabled"&&this.setAttribute("aria-disabled",`${this.disabled}`),e.attributeName==="accessible-label"&&this.setAttribute("aria-label",`${this.accessibleLabel}`)}#r(){if(this.disabled||this.checked)return;this.checked=!0;let t={bubbles:!0,composed:!0,cancelable:!0};this.dispatchEvent(new CustomEvent("jh-change",t))}#i(t){t.code==="Space"&&this.#r()}render(){let t,e;return this.helperText&&(t=d`
-        <p class="helper-text" id="radio-helper-text-${this.#t}">
+    `}static get properties(){return{accessibleLabel:{type:String,attribute:"accessible-label"},checked:{type:Boolean,reflect:!0},disabled:{type:Boolean,reflect:!0},helperText:{type:String,attribute:"helper-text"},label:{type:String},value:{type:String}}}constructor(){super(),this.#t=this.attachInternals(),this.#t.role="radio",this.accessibleLabel=null,this.checked=!1,this.disabled=!1,this.helperText=null,this.label=null,this.value=null,this.addEventListener("click",this.#r),this.addEventListener("keydown",this.#i)}connectedCallback(){super.connectedCallback(),this.#e=ja++,this.setAttribute("tabindex","0"),this.setAttribute("aria-checked",`${this.checked}`),this.accessibleLabel&&this.setAttribute("aria-label",`${this.accessibleLabel}`),this.helperText&&this.setAttribute("aria-describedby",`radio-helper-text-${this.#e}`);let e=new MutationObserver(this.#o.bind(this)),t={attributes:!0};e.observe(this,t)}#o(e){for(let t of e)t.attributeName==="checked"&&this.setAttribute("aria-checked",`${this.checked}`),t.attributeName==="disabled"&&this.setAttribute("aria-disabled",`${this.disabled}`),t.attributeName==="accessible-label"&&this.setAttribute("aria-label",`${this.accessibleLabel}`)}#r(){if(this.disabled||this.checked)return;this.checked=!0;let e={bubbles:!0,composed:!0,cancelable:!0};this.dispatchEvent(new CustomEvent("jh-change",e))}#i(e){e.code==="Space"&&this.#r()}render(){let e,t;return this.helperText&&(e=d`
+        <p class="helper-text" id="radio-helper-text-${this.#e}">
           ${this.helperText}
         </p>
-      `),this.label&&(e=d`
+      `),this.label&&(t=d`
         <span class="label-container">
           <span class="label-text">${this.label}</span>
-          ${t}
+          ${e}
         </span>
       `),d`
       <span class="radio" aria-hidden="true"></span>
-      ${e}
-    `}};customElements.define("jh-radio",Qe);var Xe=class extends f{static get styles(){return y`
+      ${t}
+    `}};customElements.define("jh-radio",Lo);var Ro=class extends g{static get styles(){return y`
     :host {
       font: var(--jh-font-body-regular-1);
       padding: var(--jh-space-300) var(--jh-space-400);
@@ -2690,14 +2824,14 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
       display: flex;
       align-items: flex-start;
     }
-    `}static get properties(){return{appearance:{type:String,reflect:!0},dismissButtonAccessibleLabel:{type:String,attribute:"dismiss-button-accessible-label"},hideDismissButton:{type:Boolean,attribute:"hide-dismiss-button"},stacked:{type:Boolean,reflect:!0},type:{type:String,reflect:!0}}}constructor(){super(),this.appearance="neutral",this.dismissButtonAccessibleLabel=null,this.hideDismissButton=!1,this.stacked=!1,this.type="alert"}#t(){this.#e("jh-dismiss"),this.parentNode.host?.nodeName!=="JH-TOAST"&&this.remove()}#e(t){this.dispatchEvent(new CustomEvent(t,{bubbles:!0,cancelable:!0,composed:!0}))}#o(){let t=this.stacked?"stacked-action-btn":"inline-action-btn";return d`
-        <slot name="jh-notification-action" class=${t} @slotchange=${this.#r}></slot>
-    `}#r(){let t=this.querySelectorAll("jh-button");for(let e of t)e.getAttribute("size")!=="small"&&e.setAttribute("size","small")}#i(t){t&&this.shadowRoot.querySelector("slot:not([name])").classList.add("display-default-slot")}render(){let t;return this.hideDismissButton||(t=d`
+    `}static get properties(){return{appearance:{type:String,reflect:!0},dismissButtonAccessibleLabel:{type:String,attribute:"dismiss-button-accessible-label"},hideDismissButton:{type:Boolean,attribute:"hide-dismiss-button"},stacked:{type:Boolean,reflect:!0},type:{type:String,reflect:!0}}}constructor(){super(),this.appearance="neutral",this.dismissButtonAccessibleLabel=null,this.hideDismissButton=!1,this.stacked=!1,this.type="alert"}#e(){this.#t("jh-dismiss"),this.parentNode.host?.nodeName!=="JH-TOAST"&&this.remove()}#t(e){this.dispatchEvent(new CustomEvent(e,{bubbles:!0,cancelable:!0,composed:!0}))}#o(){let e=this.stacked?"stacked-action-btn":"inline-action-btn";return d`
+        <slot name="jh-notification-action" class=${e} @slotchange=${this.#r}></slot>
+    `}#r(){let e=this.querySelectorAll("jh-button");for(let t of e)t.getAttribute("size")!=="small"&&t.setAttribute("size","small")}#i(e){e&&this.shadowRoot.querySelector("slot:not([name])").classList.add("display-default-slot")}render(){let e;return this.hideDismissButton||(e=d`
         <jh-button
           size="small"
           appearance="secondary"
           accessible-label=${this.dismissButtonAccessibleLabel}
-          @click=${this.#t}
+          @click=${this.#e}
           ><slot name="jh-notification-dismiss-icon" slot="jh-button-icon">
             <jh-icon-xmark slot="jh-button-icon"></jh-icon-xmark>
           </slot>
@@ -2707,10 +2841,10 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         <slot aria-hidden="true" name="jh-notification-icon"></slot>
         <slot @slotchange=${this.#i}></slot>
         ${this.stacked?null:this.#o()}
-        ${t}
+        ${e}
       </div>
       ${this.stacked?this.#o():null}
-    `}};customElements.define("jh-notification",Xe);var gi=0,Je=class extends f{#t;static get styles(){return y`
+    `}};customElements.define("jh-notification",Ro);var $a=0,Po=class extends g{#e;static get styles(){return y`
       :host {
         display: block;
         box-sizing: border-box;
@@ -2737,18 +2871,18 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         );
         word-break: break-word;
       }
-    `}static get properties(){return{label:{type:String},accessibleLabel:{type:String,attribute:"accessible-label"}}}constructor(){super(),this.label=null,this.accessibleLabel=null}connectedCallback(){super.connectedCallback(),this.#t=gi++}render(){return d`
-      ${this.label?d`<div class="subheader" id="list-group-labelledby-${this.#t}">
+    `}static get properties(){return{label:{type:String},accessibleLabel:{type:String,attribute:"accessible-label"}}}constructor(){super(),this.label=null,this.accessibleLabel=null}connectedCallback(){super.connectedCallback(),this.#e=$a++}render(){return d`
+      ${this.label?d`<div class="subheader" id="list-group-labelledby-${this.#e}">
             ${this.label}
           </div>`:null}
       <div
         role="group"
-        aria-labelledby=${b(this.label?`list-group-labelledby-${this.#t}`:null)}
-        aria-label=${b(this.accessibleLabel)}
+        aria-labelledby=${v(this.label?`list-group-labelledby-${this.#e}`:null)}
+        aria-label=${v(this.accessibleLabel)}
       >
         <slot></slot>
       </div>
-    `}};customElements.define("jh-list-group",Je);var to=class extends f{#t;static get styles(){return y`
+    `}};customElements.define("jh-list-group",Po);var Oo=class extends g{#e;static get styles(){return y`
       :host {
         background-color: var(--jh-list-item-color-background, transparent);
         padding-bottom: var(--jh-space-400);
@@ -2919,9 +3053,9 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         text-align: right;
         white-space: nowrap;
       }
-    `}static get properties(){return{disabled:{type:Boolean,reflect:!0},dividerInset:{type:Number,attribute:"divider-inset"},primaryMetadata:{type:String,attribute:"primary-metadata"},primaryText:{type:String,attribute:"primary-text"},secondaryMetadata:{type:String,attribute:"secondary-metadata"},secondaryText:{type:String,attribute:"secondary-text"},selected:{type:Boolean,reflect:!0},showDivider:{type:Boolean,reflect:!0,attribute:"show-divider"}}}constructor(){super(),this.#t=this.attachInternals(),this.#t.role="listitem",this.disabled=!1,this.dividerInset=null,this.primaryMetadata=null,this.primaryText=null,this.secondaryMetadata=null,this.secondaryText=null,this.selected=!1,this.showDivider=!1,this.primaryTooltip=!1,this.secondaryTooltip=!1}#e(){let t=this.primaryTooltip,e=this.secondaryTooltip,o=this.shadowRoot.querySelector(".primary-text"),i=this.shadowRoot.querySelector(".secondary-text");this.primaryTooltip=o.offsetWidth<o.scrollWidth,this.secondaryTooltip=i.offsetWidth<i.scrollWidth,(t!==this.primaryTooltip||e!==this.secondaryTooltip)&&this.update()}async firstUpdated(){let t=this.shadowRoot.querySelectorAll("jh-tooltip"),e={characterData:!0,subtree:!0};await t.forEach(o=>{Promise.all(Array.from(o.children).map(i=>i.updateComplete)),new MutationObserver(this.#e.bind(this)).observe(o.children[0],e),new ResizeObserver(this.#e.bind(this)).observe(o.children[0])})}render(){let t;return this.disabled===!0&&this.hasAttribute("tabindex")?this.setAttribute("aria-disabled","true"):this.removeAttribute("aria-disabled"),this.showDivider&&(t=d`
+    `}static get properties(){return{disabled:{type:Boolean,reflect:!0},dividerInset:{type:Number,attribute:"divider-inset"},primaryMetadata:{type:String,attribute:"primary-metadata"},primaryText:{type:String,attribute:"primary-text"},secondaryMetadata:{type:String,attribute:"secondary-metadata"},secondaryText:{type:String,attribute:"secondary-text"},selected:{type:Boolean,reflect:!0},showDivider:{type:Boolean,reflect:!0,attribute:"show-divider"}}}constructor(){super(),this.#e=this.attachInternals(),this.#e.role="listitem",this.disabled=!1,this.dividerInset=null,this.primaryMetadata=null,this.primaryText=null,this.secondaryMetadata=null,this.secondaryText=null,this.selected=!1,this.showDivider=!1,this.primaryTooltip=!1,this.secondaryTooltip=!1}#t(){let e=this.primaryTooltip,t=this.secondaryTooltip,o=this.shadowRoot.querySelector(".primary-text"),i=this.shadowRoot.querySelector(".secondary-text");this.primaryTooltip=o.offsetWidth<o.scrollWidth,this.secondaryTooltip=i.offsetWidth<i.scrollWidth,(e!==this.primaryTooltip||t!==this.secondaryTooltip)&&this.update()}async firstUpdated(){let e=this.shadowRoot.querySelectorAll("jh-tooltip"),t={characterData:!0,subtree:!0};await e.forEach(o=>{Promise.all(Array.from(o.children).map(i=>i.updateComplete)),new MutationObserver(this.#t.bind(this)).observe(o.children[0],t),new ResizeObserver(this.#t.bind(this)).observe(o.children[0])})}render(){let e;return this.disabled===!0&&this.hasAttribute("tabindex")?this.setAttribute("aria-disabled","true"):this.removeAttribute("aria-disabled"),this.showDivider&&(e=d`
         <jh-divider
-          inset=${b(this.dividerInset?this.dividerInset:null)}
+          inset=${v(this.dividerInset?this.dividerInset:null)}
         ></jh-divider>
       `),d`
       <div class="list-item">
@@ -2949,329 +3083,556 @@ var Et=globalThis,zt=Et.ShadowRoot&&(Et.ShadyCSS===void 0||Et.ShadyCSS.nativeSha
         </slot>
         <slot name="jh-list-item-right"></slot>
       </div>
-      ${t}
-    `}};customElements.define("jh-list-item",to);var Ur=Symbol(),E=class{get taskComplete(){return this.t||(this.i===1?this.t=new Promise((t,e)=>{this.o=t,this.h=e}):this.i===3?this.t=Promise.reject(this.l):this.t=Promise.resolve(this.u)),this.t}constructor(t,e,o){this.p=0,this.i=0,(this._=t).addController(this);let i=typeof e=="object"?e:{task:e,args:o};this.v=i.task,this.j=i.args,this.m=i.argsEqual??Or,this.k=i.onComplete,this.A=i.onError,this.autoRun=i.autoRun??!0,"initialValue"in i&&(this.u=i.initialValue,this.i=2,this.O=this.T?.())}hostUpdate(){this.autoRun===!0&&this.S()}hostUpdated(){this.autoRun==="afterUpdate"&&this.S()}T(){if(this.j===void 0)return;let t=this.j();if(!Array.isArray(t))throw Error("The args function must return an array");return t}async S(){let t=this.T(),e=this.O;this.O=t,t===e||t===void 0||e!==void 0&&this.m(e,t)||await this.run(t)}async run(t){let e,o;t??=this.T(),this.O=t,this.i===1?this.q?.abort():(this.t=void 0,this.o=void 0,this.h=void 0),this.i=1,this.autoRun==="afterUpdate"?queueMicrotask(()=>this._.requestUpdate()):this._.requestUpdate();let i=++this.p;this.q=new AbortController;let s=!1;try{e=await this.v(t,{signal:this.q.signal})}catch(a){s=!0,o=a}if(this.p===i){if(e===Ur)this.i=0;else{if(s===!1){try{this.k?.(e)}catch{}this.i=2,this.o?.(e)}else{try{this.A?.(o)}catch{}this.i=3,this.h?.(o)}this.u=e,this.l=o}this._.requestUpdate()}}abort(t){this.i===1&&this.q?.abort(t)}get value(){return this.u}get error(){return this.l}get status(){return this.i}render(t){switch(this.i){case 0:return t.initial?.();case 1:return t.pending?.();case 2:return t.complete?.(this.value);case 3:return t.error?.(this.error);default:throw Error("Unexpected status: "+this.i)}}},Or=(r,t)=>r===t||r.length===t.length&&r.every((e,o)=>!Tt(e,t[o]));var Y=class{events=[];connected=!1;constructor(t,{limit:e=100,onEvent:o,onSession:i,item:s}={}){this._host=t,this._limit=e,this._onEvent=o,this._onSession=i,this._item=s,t.addController(this)}hostConnected(){this._item||Wo().then(t=>{this.events=(t??[]).slice(-this._limit),this._host.requestUpdate()}).catch(()=>{}),this._es=new EventSource(this._item?`/v1/events?item=${encodeURIComponent(this._item)}`:"/v1/events"),this._es.addEventListener("hello",()=>{this.connected=!0,this._host.requestUpdate()}),this._es.addEventListener("session",t=>{this._onSession?.(JSON.parse(t.data))}),this._es.addEventListener("activity",t=>{let e=JSON.parse(t.data);this.events=[...this.events,e].slice(-this._limit),this._host.requestUpdate(),this._onEvent?.(e)}),this._es.onerror=()=>{this.connected=!1,this._host.requestUpdate()}}hostDisconnected(){this._es?.close(),this._es=void 0}};function z(r){return r==null?"":r<90?`${r}s`:r<5400?`${Math.floor(r/60)}m`:r<172800?`${Math.floor(r/3600)}h`:`${Math.floor(r/86400)}d`}function mi(r){let t="";try{t=atob(r.Body??"")}catch{return r.Subject??""}if(!t)return r.Subject??"";let e=null;try{e=JSON.parse(t)}catch{}if(e&&typeof e=="object")switch(r.Kind){case"gate":return`${e.Gate}: ${e.Decision}${e.Reason?" \u2014 "+eo(e.Reason):""}`;case"agent-run":return`${e.seat} as ${e.role}, mode ${e.mode}`;case"agent-result":{let o=[`${e.stop}`,`${Math.round((e.wall_ms??0)/100)/10}s`];return o.push(e.metered?`${St(e.tokens)} tokens`:"cost NOT reported"),e.cost_usd&&o.push(`$${e.cost_usd.toFixed(4)}`),o.push(e.tools?Nr(e.tools):`${e.tool_calls} tools`),e.denied_tools&&o.push(`DENIED ${Nr(e.denied_tools)}`),e.unknown_updates?.length&&o.push(`dialect drift: ${e.unknown_updates.join(", ")}`),o.join(" \xB7 ")}case"authz":return e.reason??"";case"charge":{if(!e.metered)return"cost NOT reported \u2014 claims stopped";let o=[`${St(e.tokens??0)} tokens`],i=ro(e);return i&&o.push(i),e.cost_micros&&o.push(oo(e.cost_micros)),o.join(" \xB7 ")}default:return eo(t)}return eo(t)}function eo(r){let t=String(r).indexOf(`
-`);return t<0?String(r):String(r).slice(0,t)}function Nr(r){return Object.entries(r).sort((t,e)=>e[1]-t[1]).map(([t,e])=>e>1?`${t}\xD7${e}`:t).join(" ")}function St(r){return r==null?"0":r<1e3?String(r):r<1e6?`${Math.round(r/100)/10}k`:`${Math.round(r/1e5)/10}M`}function oo(r){let t=(r??0)/1e6;return t<1?`$${t.toFixed(4)}`:`$${t.toFixed(2)}`}function ro(r){return[["in",r.input],["out",r.output],["cache read",r.cache_read],["cache write",r.cache_write]].filter(([,e])=>e>0).map(([e,o])=>`${e} ${St(o)}`).join(" \xB7 ")}function Zt(r){return r.route?r.key?`${r.route}/${r.key}`:r.route:r.ingress??""}function fi(r){return Object.keys(r??{}).sort().map(t=>`${t} ${r[t]}`).join(" \xB7 ")}var io={live:["pending","claimed","waiting","handedoff"],ready:["pending","handedoff"],blocked:["pending","handedoff","waiting"],pending:["pending"],claimed:["claimed"],waiting:["waiting"],handedoff:["handedoff"],parked:["parked"],done:["done"],all:[]},yi={ready:r=>!!r.ready,blocked:r=>(r.blocked_by?.length??0)>0};function ji(r){if(!r.runner)return"";let t=r.lease_expires_sec??0;return r.lease_lapsed?`${r.runner} \u2014 lease LAPSED ${z(-t)} ago`:`${r.runner} \u2014 ${z(t)} left`}function Dr(r){return r.blocked_by?.length?r.blocked_by.join(", "):r.root?`cascaded from ${r.root}`:""}var Hr=[{key:"state",label:"State",get:r=>r.state},{key:"work",label:"Work",get:r=>r.task||r.id},{key:"why",label:"Blocked by",get:r=>Dr(r)},{key:"stage",label:"Stage",get:r=>r.stage??""},{key:"holder",label:"Held by",get:r=>r.runner??""},{key:"origin",label:"Origin",get:r=>Zt(r)},{key:"age",label:"Age",get:r=>r.age_sec??0}];var so=class extends x{static styles=A`
-    :host { display: grid; gap: 16px; }
-    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-    .stat { text-align: center; }
-    .stat .n { font-size: 1.6rem; font-weight: 600; }
-    .stat .l { color: var(--jh-color-content-secondary-enabled); font-size: .8rem; }
-    .feed { max-height: 420px; overflow-y: auto; }
-    .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); }
-    .idle { color: var(--jh-color-content-secondary-enabled); }
-    .breakdown { font-size: .8rem; color: var(--jh-color-content-secondary-enabled); margin: 12px 0 0; }
-  `;_status=new E(this,{task:async(t,{signal:e})=>he(e),args:()=>[]});_running=new E(this,{task:async(t,{signal:e})=>ce(io.live,e),args:()=>[]});_activity=new Y(this,{onEvent:()=>this._refresh()});_refresh(){clearTimeout(this._timer),this._timer=setTimeout(()=>{this._status.run(),this._running.run()},400)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer)}render(){return h`
-      <jh-card header-title="Factory status" padding="medium">
-        ${this._status.render({pending:()=>h`<jh-progress accessible-label="Loading status"></jh-progress>`,error:t=>h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${t.message}</jh-notification>`,complete:t=>h`
-            <div class="grid">
-              <div class="stat"><div class="n">${t.pending}</div><div class="l">pending</div></div>
-              <div class="stat"><div class="n">${t.exceptions}</div><div class="l">exceptions</div></div>
-              ${""}
-              ${t.exception_queue?.parked?h`<div class="stat">
-                    <div class="n">${z(t.exception_queue.oldest_age_sec)}</div>
-                    <div class="l">oldest parked of ${z(t.exception_queue.objective_sec)}</div>
-                  </div>`:g}
-              <div class="stat"><div class="n">${t.stopped?"stopped":"running"}</div><div class="l">claims</div></div>
-              ${t.spend?h`
-                <div class="stat">
-                  <div class="n">${St(t.spend.tokens)}</div>
-                  <div class="l">tokens${t.spend.max_tokens?` of ${St(t.spend.max_tokens)}`:""}</div>
-                </div>
-                ${""}
-                ${t.spend.cost_micros||t.spend.max_cost_micros?h`<div class="stat">
-                      <div class="n">${oo(t.spend.cost_micros)}</div>
-                      <div class="l">spend${t.spend.max_cost_micros?` of ${oo(t.spend.max_cost_micros)}`:""}</div>
-                    </div>`:g}
-                <div class="stat">
-                  <div class="n">${t.spend.running}/${t.spend.max_concurrent}</div>
-                  <div class="l">running</div>
-                </div>`:g}
-              <div class="stat"><div class="n">${t.routes.length}</div><div class="l">routes</div></div>
-            </div>
-            ${""}
-            ${t.backlog?.total?h`<p class="breakdown">
-                  Queue: ${fi(t.backlog.by_state)} — <a href="/work">list them</a>
-                </p>`:g}
-            ${""}
-            ${t.spend&&ro(t.spend)?h`<p class="breakdown">Tokens: ${ro(t.spend)}</p>`:g}
-            ${""}
-            ${t.spend?.unmetered?h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>
-                  ${t.spend.unmetered} run(s) this window did not report a cost — the spend above is
-                  incomplete and claims are stopped until the window turns.
-                </jh-notification>`:g}
-            ${""}
-            ${t.spend?.unpriced?h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>
-                  ${t.spend.unpriced} run(s) this window reported tokens but no cost — the money
-                  figure above is incomplete and claims are stopped until the window turns.
-                </jh-notification>`:g}
-            ${t.spend?.refusing&&!t.spend.unmetered&&!t.spend.unpriced?h`<jh-notification appearance="neutral" type="banner" hide-dismiss-button>
-                  The meter is pacing work: the factory is idle because it is over budget, not because
-                  there is nothing to do.
-                </jh-notification>`:g}
-            ${t.exception_queue&&!t.exception_queue.met?h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>
-                  ${t.exception_queue.overdue} exception(s) have been parked longer than the
-                  ${z(t.exception_queue.objective_sec)} response-time objective — the oldest for
-                  ${z(t.exception_queue.oldest_age_sec)}.
-                </jh-notification>`:g}`})}
+      ${e}
+    `}};customElements.define("jh-list-item",Oo);var No=class extends g{static get styles(){return y`
+      @keyframes fadeInUp  {
+        0% {
+          opacity: 0;
+          transform: translateY(105%);
+        }
+        100% {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+      @keyframes fadeOutDown {
+        0% {
+          opacity: 1;
+          transform: translate3d(0, 0, 0);
+        }
+        100% {
+          opacity: 0;
+          transform: translate3d(0, 15%, 0);
+        }
+      }
+      :host {
+        z-index: var(--jh-toast-z-index, var(--jh-z-index-positive-1000));
+        font: var(--jh-font-body-regular-1);
+        animation: 0.75s cubic-bezier(0.1, 0.5, 0.1, 1) fadeInUp;
+        animation-delay: initial;
+        animation-iteration-count: 1;
+        animation-fill-mode: backwards;
+        animation-play-state: initial;
+        opacity: 1;
+        transform: translateY(0);
+        transition: opacity, transform cubic-bezier(0.1, 0.5, 0.1, 1) 0.75s;
+        will-change: opacity, transform;
+        box-sizing: border-box;
+        display: block;
+        position: relative;
+      }
+      :host(.remove) {
+        animation: 0.75s cubic-bezier(0.1, 0.5, 0.1, 1) fadeOutDown;
+        animation-delay: initial;
+        animation-iteration-count: 1;
+        animation-fill-mode: backwards;
+        animation-play-state: initial;
+        transition: opacity, transform cubic-bezier(0.1, 0.5, 0.1, 1) 0.75s;
+        opacity: 0;
+      }
+      jh-notification {
+        box-shadow: var(--jh-toast-shadow, var(--jh-shadow-200));
+      }
+    `}static get properties(){return{appearance:{type:String,reflect:!0},dismissButtonAccessibleLabel:{type:String,attribute:"dismiss-button-accessible-label"},hideDismissButton:{type:Boolean,attribute:"hide-dismiss-button"},stacked:{type:Boolean,reflect:!0},timeout:{type:Number}}}constructor(){super(),this.timeout=5e3,this.appearance="neutral",this.dismissButtonAccessibleLabel=null,this.hideDismissButton=!1,this.stacked=!1,this.addEventListener("jh-dismiss",this.#r)}firstUpdated(){this.#e()}#e(){this.timeout>0&&setTimeout(()=>{this.#t()},this.timeout)}#t(){this.#o("jh-dismiss")}#o(e){this.dispatchEvent(new CustomEvent(e,{bubbles:!0,cancelable:!0,composed:!0}))}#r(){this.classList.add("remove"),this.onanimationend=()=>{this.remove()}}#i(){let e=this.querySelectorAll("jh-button");for(let t of e)t.getAttribute("size")!=="small"&&t.setAttribute("size","small")}render(){return d`
+      <jh-notification
+        appearance=${this.appearance}
+        dismiss-button-accessible-label=${this.dismissButtonAccessibleLabel}
+        ?hide-dismiss-button=${this.hideDismissButton}
+        ?stacked=${this.stacked}>
+          <slot name="jh-toast-icon" slot="jh-notification-icon"></slot>
+          <slot></slot>
+          <slot name="jh-toast-action" slot="jh-notification-action" @slotchange=${this.#i}>
+          </slot>
+          <slot name="jh-toast-dismiss-icon" slot="jh-notification-dismiss-icon">
+            <jh-icon-xmark></jh-icon-xmark>
+          </slot>
+      </jh-notification>
+    `}};customElements.define("jh-toast",No);var Uo=class extends g{static get styles(){return y`
+      :host {
+        z-index: var(--jh-toast-controller-z-index, var(--jh-z-index-positive-1000));
+        bottom: var(--jh-space-800);
+        left: var(--jh-space-800);
+        position: fixed;
+      }
+      ::slotted(jh-toast) {
+        margin-top: var(--jh-space-200);
+      }
+    `}static get properties(){return{maxCount:{type:Number,attribute:"max-count"},role:{type:String}}}constructor(){super(),this.maxCount=3,this.role="status",window.addEventListener("jh-create-toast",this.#r.bind(this))}connectedCallback(){super.connectedCallback(),this.getAttribute("role")||this.setAttribute("role",this.role)}#e(){let e=this.children.length;if(e>this.maxCount){let t=e-this.maxCount;for(let o=0;o<t;o++)this.#t("jh-dismiss",this.children[o])}}#t(e,t){this.dispatchEvent(new CustomEvent(e,{bubbles:!0,cancelable:!0,composed:!0})),this.#o(t)}#o(e){e.classList.add("remove"),e.addEventListener("animationend",()=>{e.remove()})}#r(e){let t=document.createElement("jh-toast"),{toastAction:o,toastDismissIcon:i,text:a,toastIcon:s,dismissButtonAccessibleLabel:h,appearance:l,hideDismissButton:c,timeout:b,stacked:u}=e.detail;o&&(t.innerHTML+=o),i&&(t.innerHTML+=i),a&&(t.innerHTML+=a),s&&(t.innerHTML+=s),h&&t.setAttribute("dismiss-button-accessible-label",h),l&&t.setAttribute("appearance",l),c&&t.setAttribute("hide-dismiss-button",""),b>=0&&t.setAttribute("timeout",b),u&&t.setAttribute("stacked",""),this.appendChild(t)}render(){return d`
+      <slot @slotchange=${this.#e}></slot>
+    `}};customElements.define("jh-toast-controller",Uo);var zi=Symbol(),O=class{get taskComplete(){return this.t||(this.i===1?this.t=new Promise((e,t)=>{this.o=e,this.h=t}):this.i===3?this.t=Promise.reject(this.l):this.t=Promise.resolve(this.u)),this.t}constructor(e,t,o){this.p=0,this.i=0,(this._=e).addController(this);let i=typeof t=="object"?t:{task:t,args:o};this.v=i.task,this.j=i.args,this.m=i.argsEqual??Ci,this.k=i.onComplete,this.A=i.onError,this.autoRun=i.autoRun??!0,"initialValue"in i&&(this.u=i.initialValue,this.i=2,this.O=this.T?.())}hostUpdate(){this.autoRun===!0&&this.S()}hostUpdated(){this.autoRun==="afterUpdate"&&this.S()}T(){if(this.j===void 0)return;let e=this.j();if(!Array.isArray(e))throw Error("The args function must return an array");return e}async S(){let e=this.T(),t=this.O;this.O=e,e===t||e===void 0||t!==void 0&&this.m(t,e)||await this.run(e)}async run(e){let t,o;e??=this.T(),this.O=e,this.i===1?this.q?.abort():(this.t=void 0,this.o=void 0,this.h=void 0),this.i=1,this.autoRun==="afterUpdate"?queueMicrotask(()=>this._.requestUpdate()):this._.requestUpdate();let i=++this.p;this.q=new AbortController;let a=!1;try{t=await this.v(e,{signal:this.q.signal})}catch(s){a=!0,o=s}if(this.p===i){if(t===zi)this.i=0;else{if(a===!1){try{this.k?.(t)}catch{}this.i=2,this.o?.(t)}else{try{this.A?.(o)}catch{}this.i=3,this.h?.(o)}this.u=t,this.l=o}this._.requestUpdate()}}abort(e){this.i===1&&this.q?.abort(e)}get value(){return this.u}get error(){return this.l}get status(){return this.i}render(e){switch(this.i){case 0:return e.initial?.();case 1:return e.pending?.();case 2:return e.complete?.(this.value);case 3:return e.error?.(this.error);default:throw Error("Unexpected status: "+this.i)}}},Ci=(r,e)=>r===e||r.length===e.length&&r.every((t,o)=>!Fe(t,e[o]));var Mo={live:["pending","claimed","waiting","handedoff"],ready:["pending","handedoff"],blocked:["pending","handedoff","waiting"],pending:["pending"],claimed:["claimed"],waiting:["waiting"],handedoff:["handedoff"],parked:["parked"],done:["done"],all:[]},xa={ready:r=>!!r.ready,blocked:r=>(r.blocked_by?.length??0)>0},Ti=[{key:"state",label:"State",get:r=>r.state},{key:"work",label:"Work",get:r=>E(r.task)||r.id},{key:"why",label:"Blocked by",get:r=>Ut(r)},{key:"stage",label:"Stage",get:r=>r.stage??""},{key:"holder",label:"Held by",get:r=>r.runner??""},{key:"origin",label:"Origin",get:r=>ee(r)},{key:"age",label:"Age",get:r=>r.age_sec??0}],gt=r=>n`<jh-tag size="small" class=${Hr[r]??"neutral"} label=${r}></jh-tag>`,Wo=r=>n`<jh-tag size="small" class=${Ir(r)} label=${r}></jh-tag>`,K=r=>n`<jh-progress accessible-label=${`Loading ${r}`}></jh-progress>`,he=r=>n`<jh-notification appearance="negative" type="alert" hide-dismiss-button>${r.message}</jh-notification>`,wa=$`
+  .chips { display: flex; gap: var(--jh-space-100); flex-wrap: wrap; }
+  .chips button {
+    font: var(--jh-font-helper-medium); cursor: pointer; padding: 4px var(--jh-space-300);
+    border-radius: var(--jh-border-radius-pill); border: 1px solid var(--jh-color-control-enabled);
+    background: transparent; color: var(--jh-color-content-primary-enabled);
+  }
+  .chips button:hover { background: var(--jh-color-container-secondary-hover); }
+  .chips button[aria-pressed="true"] { background: var(--jh-color-container-secondary-selected); border-color: transparent; font-weight: 600; }
+`,Li=$`
+  dl.facts { display: grid; grid-template-columns: max-content 1fr; gap: var(--jh-space-100) var(--jh-space-400); margin: 0; }
+  dl.facts dt { font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+  dl.facts dd { margin: 0; overflow-wrap: anywhere; }
+  @media (max-width: 560px) { dl.facts { grid-template-columns: 1fr; } dl.facts dd { margin-bottom: var(--jh-space-200); } }
+`,Do=class extends j{static styles=[z,Li,$`
+    :host { display: grid; gap: var(--jh-space-400); }
+    .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: var(--jh-space-300); margin-bottom: var(--jh-space-400); }
+    .tile { display: block; padding: var(--jh-space-300); border-radius: var(--jh-border-radius-200);
+            background: var(--jh-color-container-secondary-enabled); color: inherit; text-decoration: none; }
+    a.tile:hover { background: var(--jh-color-container-secondary-hover); }
+    .tile .n { font: var(--jh-font-heading-medium-4); }
+    .tile .l { font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+    .tile .s { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .tile.negative .n { color: var(--jh-color-content-negative-enabled); }
+    .tile.positive .n { color: var(--jh-color-content-positive-enabled); }
+    .foot { display: flex; align-items: center; gap: var(--jh-space-300); flex-wrap: wrap; margin-top: var(--jh-space-400);
+            padding-top: var(--jh-space-300); border-top: 1px solid var(--jh-color-divider-secondary); }
+    ol.feed { list-style: none; margin: 0; padding: 0; max-height: 480px; overflow-y: auto; }
+    ol.feed li { display: grid; grid-template-columns: minmax(92px, max-content) 1fr max-content; gap: var(--jh-space-300);
+                 align-items: baseline; padding: var(--jh-space-200) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    ol.feed .what { overflow-wrap: anywhere; }
+    ol.feed .by { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    ol.feed .t { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); white-space: nowrap; }
+    .row { display: flex; gap: var(--jh-space-300); align-items: center; flex-wrap: wrap; margin-bottom: var(--jh-space-300); }
+  `];_status=new O(this,{task:async(e,{signal:t})=>Ce(t),args:()=>[]});_items=new O(this,{task:async(e,{signal:t})=>Tt([],t),args:()=>[]});_activity=new N(this,{onEvent:()=>this._refresh()});_refresh(){clearTimeout(this._timer),this._timer=setTimeout(()=>{this._status.run(),this._items.run()},400)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer)}async _reload(){try{let e=await Rr();R(`Configuration reloaded: ${e.reloaded}`,"positive")}catch(e){R(e.message,"negative",1e4)}}_tile(e,t,{href:o,sub:i,tone:a}={}){let s=n`<div class="n">${e}</div><div class="l">${t}</div>${i?n`<div class="s">${i}</div>`:p}`;return o?n`<a class=${"tile "+(a??"")} href=${o}>${s}</a>`:n`<div class=${"tile "+(a??"")}>${s}</div>`}_statusCard(e){let t=e.exception_queue,o=e.spend;return n`
+      <div class="tiles">
+        ${this._tile(e.pending,"pending",{href:"/work",sub:"owed a run"})}
+        ${this._tile(e.exceptions,"exceptions",{href:"/exceptions",sub:"waiting on a person",tone:e.exceptions?"negative":""})}
+        ${t?.parked?this._tile(k(t.oldest_age_sec),"oldest parked",{href:"/exceptions",sub:`objective ${k(t.objective_sec)}`,tone:t.met?"":"negative"}):p}
+        ${this._tile(e.claims?.stopped?"Stopped":"Running","claims",{sub:e.claims?.actor?`by ${e.claims.actor}`:"never touched",tone:e.claims?.stopped?"negative":"positive"})}
+        ${o?this._tile(`${o.running}/${o.max_concurrent}`,"running now",{href:"/sessions",sub:o.started?`${o.started} started this window`:""}):p}
+        ${o?this._tile(Z(o.tokens),"tokens",{sub:o.max_tokens?`of ${Z(o.max_tokens)} this window`:"this window"}):p}
+        ${o&&(o.cost_micros||o.max_cost_micros)?this._tile(Xe(o.cost_micros),"spend",{sub:o.max_cost_micros?`of ${Xe(o.max_cost_micros)}`:"this window"}):p}
+      </div>
+      <dl class="facts">
+        <dt>Queue</dt>
+        <dd>${e.backlog?.total?n`${Dr(e.backlog.by_state)} · <a href="/work">list them</a>`:"empty"}</dd>
+        ${o&&Je(o)?n`<dt>Tokens</dt><dd>${Je(o)}</dd>`:p}
+        <dt>Routes</dt>
+        <dd>${e.routes?.length?n`<jh-tag-group>${e.routes.map(i=>n`<jh-tag size="small" label=${i} href="/submit"></jh-tag>`)}</jh-tag-group>`:n`<span class="muted">none configured — nothing can be submitted</span>`}</dd>
+        <dt>Daemon</dt>
+        <dd>${e.runner} ${e.version}, up ${k(e.uptime_sec)}, serving tenant <b>${e.tenant}</b> box <b>${e.box}</b></dd>
+      </dl>
+      ${""}
+      ${o?.unmetered?n`
+        <jh-notification appearance="negative" type="alert" hide-dismiss-button>
+          ${o.unmetered} run(s) this window did not report a cost — the spend above is incomplete and claims are stopped until the window turns.
+        </jh-notification>`:p}
+      ${o?.unpriced?n`
+        <jh-notification appearance="negative" type="alert" hide-dismiss-button>
+          ${o.unpriced} run(s) this window reported tokens but no cost — the money figure above is incomplete and claims are stopped until the window turns.
+        </jh-notification>`:p}
+      ${o?.refusing&&!o.unmetered&&!o.unpriced?n`
+        <jh-notification appearance="neutral" type="alert" hide-dismiss-button>
+          The meter is pacing work: the factory is idle because it is over budget, not because there is nothing to do.
+        </jh-notification>`:p}
+      ${t&&!t.met?n`
+        <jh-notification appearance="negative" type="alert" hide-dismiss-button>
+          <span>${t.overdue} exception(s) have waited longer than the ${k(t.objective_sec)} response-time objective — the oldest for ${k(t.oldest_age_sec)}. <a href="/exceptions">Work the queue</a></span>
+        </jh-notification>`:p}
+      <div class="foot">
+        <jh-button appearance="tertiary" size="small" label="Reload configuration" @click=${this._reload}>
+          <span slot="jh-button-icon-left">${V("rotate","x-small")}</span>
+        </jh-button>
+        <span class="helper">Re-reads box.yaml on the running daemon. Routes, executors and budget swap hot; tenant, store and socket are identity and are refused.</span>
+      </div>`}_inFlight(e){let t=(e??[]).filter(o=>Mo.live.includes(o.state));return t.length===0?n`<p class="empty">Nothing in flight.</p>`:n`
+      <jh-list-group accessible-label="In-flight work">
+        ${t.map(o=>n`
+          <jh-list-item
+            primary-text=${E(o.task)||o.id}
+            secondary-text=${o.note?_(o.note):ee(o)||te(o)}
+            primary-metadata=${o.stage??""}
+            secondary-metadata=${o.stage?`${k(o.in_state_sec)} in stage`:`${k(o.age_sec)} old`}
+            show-divider>
+            <span slot="jh-list-item-left">${gt(o.state)}</span>
+            <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
+              label="Open" accessible-label=${`Open ${E(o.task)||o.id}`} href=${"/items/"+o.id}></jh-button>
+          </jh-list-item>`)}
+      </jh-list-group>`}_feed(e){let t=this._activity.events.slice().reverse();return t.length===0?n`<p class="empty">Nothing yet.</p>`:n`
+      <ol class="feed" aria-label="Activity feed">
+        ${t.map(o=>{let i=Dt(o);return n`
+            <li>
+              ${Wo(o.kind)}
+              <div>
+                <div class="what">${tt(o,e)}${i?n` · <a href=${"/items/"+i}>open</a>`:p}</div>
+                <div class="by">${o.actor}${o.scope&&!i?n` · ${o.scope}`:p}</div>
+              </div>
+              <span class="t"><box-when .at=${o.at}></box-when></span>
+            </li>`})}
+      </ol>`}render(){let e=Object.fromEntries((this._items.value??[]).map(t=>[t.id,t.task]));return n`
+      <jh-card header-title="Factory status" header-subtitle="The numbers an operator watches, and what each is made of" padding="medium">
+        ${this._status.render({pending:()=>K("status"),error:he,complete:t=>this._statusCard(t)})}
       </jh-card>
       <jh-card header-title="In flight" header-subtitle="What the factory is doing right now, unit by unit" padding="medium">
-        ${this._running.render({pending:()=>h`<jh-progress accessible-label="Loading in-flight work"></jh-progress>`,error:t=>h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${t.message}</jh-notification>`,complete:t=>(t?.length??0)===0?h`<p class="idle">Nothing in flight.</p>`:h`<jh-list-group accessible-label="In-flight work">
-                ${t.map(e=>h`
-                  <jh-list-item
-                    primary-text=${e.task||e.id}
-                    secondary-text=${e.note||Zt(e)}
-                    primary-metadata=${e.stage??""}
-                    secondary-metadata=${z(e.in_state_sec)+" in stage"}
-                    show-divider>
-                    <jh-tag slot="jh-list-item-left" size="small" label=${e.state}></jh-tag>
-                    <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
-                      label="Open" href=${"/items/"+e.id}></jh-button>
-                  </jh-list-item>`)}
-              </jh-list-group>`})}
+        ${this._items.render({pending:()=>K("in-flight work"),error:he,complete:t=>this._inFlight(t)})}
       </jh-card>
       <jh-card header-title="Activity" header-subtitle="Everything the factory does, as it does it" padding="medium">
-        <div class="live">${this._activity.connected?"live":"reconnecting\u2026"}</div>
-        <div class="feed">
-          <jh-list-group accessible-label="Activity feed">
-            ${this._activity.events.slice().reverse().map(t=>h`
-              <jh-list-item
-                primary-text=${t.subject}
-                secondary-text=${t.scope}
-                primary-metadata=${new Date(t.at).toLocaleTimeString()}
-                show-divider>
-                <jh-tag slot="jh-list-item-left" size="small" label=${t.kind}></jh-tag>
-              </jh-list-item>`)}
-          </jh-list-group>
-        </div>
+        ${this._feed(e)}
       </jh-card>
-    `}};customElements.define("box-dashboard",so);var ao=class extends x{static styles=A`
+    `}};customElements.define("box-dashboard",Do);var Ho=class extends j{static styles=[z,wa,$`
     :host { display: block; }
-    .filters { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
-    .filters button {
-      font: inherit; font-size: .8rem; cursor: pointer; padding: 4px 10px; border-radius: 999px;
-      border: 1px solid var(--jh-color-border-primary-enabled, #ccc);
-      background: transparent; color: var(--jh-color-content-primary-enabled);
-    }
-    .filters button[aria-pressed="true"] {
-      background: var(--jh-color-container-secondary-enabled); font-weight: 600;
-    }
+    .bar { display: flex; align-items: center; gap: var(--jh-space-300); flex-wrap: wrap; margin-bottom: var(--jh-space-300); }
     .wrap { overflow-x: auto; }
-    table { border-collapse: collapse; width: 100%; font-size: .85rem; }
-    caption { text-align: left; padding-bottom: 8px; color: var(--jh-color-content-secondary-enabled); font-size: .8rem; }
-    th, td { text-align: left; vertical-align: top; padding: 6px 10px 6px 0;
-             border-bottom: 1px solid var(--jh-color-border-primary-enabled, #e0e0e0); }
-    th { white-space: nowrap; }
-    thead th button {
-      font: inherit; font-weight: 600; cursor: pointer; padding: 0; border: 0;
-      background: transparent; color: inherit;
-    }
+    table { border-collapse: collapse; width: 100%; min-width: 820px; table-layout: fixed; }
+    caption { text-align: left; padding-bottom: var(--jh-space-200); font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    th, td { text-align: left; vertical-align: top; padding: var(--jh-space-200) var(--jh-space-300) var(--jh-space-200) 0;
+             border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    thead th { white-space: nowrap; font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+    thead th button { font: inherit; cursor: pointer; padding: 0; border: 0; background: transparent; color: inherit; }
     thead th[aria-sort="ascending"] button::after { content: ' \\2191'; }
     thead th[aria-sort="descending"] button::after { content: ' \\2193'; }
-    .note { white-space: pre-wrap; font-size: .8rem; color: var(--jh-color-content-secondary-enabled); }
-    .muted { color: var(--jh-color-content-secondary-enabled); }
-    .ready { color: var(--jh-color-content-positive-enabled, #146c2e); font-weight: 600; }
-    .lapsed { color: var(--jh-color-content-negative-enabled, #b3261e); font-weight: 600; }
-    .empty { color: var(--jh-color-content-secondary-enabled); }
-    .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); margin-bottom: 8px; }
-  `;static properties={_filter:{state:!0},_sort:{state:!0},_desc:{state:!0}};constructor(){super(),this._filter="live",this._sort="",this._desc=!1,this._activity=new Y(this,{limit:1,onEvent:()=>this._refresh()})}_task=new E(this,{task:async([t],{signal:e})=>ce(io[t],e),args:()=>[this._filter]});_refresh(){clearTimeout(this._timer),this._timer=setTimeout(()=>this._task.run(),400)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer)}_sortBy(t){if(this._sort===t){this._desc=!this._desc;return}this._sort=t,this._desc=!1}_rows(t){let e=yi[this._filter],o=(t??[]).filter(a=>e?e(a):!0),i=Hr.find(a=>a.key===this._sort);if(!i)return o;let s=this._desc?-1:1;return o.slice().sort((a,c)=>{let n=i.get(a),l=i.get(c);return typeof n=="number"&&typeof l=="number"?(n-l)*s:String(n).localeCompare(String(l))*s})}render(){return h`
+    tbody th { font-weight: 500; }
+    tbody th a { text-decoration: none; }
+    tbody th a:hover { text-decoration: underline; }
+    .note { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+            font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); margin-top: 2px; }
+    .stack { display: grid; gap: 4px; justify-items: start; }
+    .ready { font: var(--jh-font-micro-medium); color: var(--jh-color-content-positive-enabled); text-transform: uppercase; }
+    .lapsed { color: var(--jh-color-content-negative-enabled); font-weight: 600; }
+    .nowrap { white-space: nowrap; }
+  `];static properties={_filter:{state:!0},_sort:{state:!0},_desc:{state:!0}};constructor(){super(),this._filter="live",this._sort="",this._desc=!1,this._activity=new N(this,{limit:1,onEvent:()=>this._refresh()})}_task=new O(this,{task:async([e],{signal:t})=>Tt(Mo[e],t),args:()=>[this._filter]});_refresh(){clearTimeout(this._timer),this._timer=setTimeout(()=>this._task.run(),400)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer)}_sortBy(e){if(this._sort===e){this._desc=!this._desc;return}this._sort=e,this._desc=!1}_rows(e){let t=xa[this._filter],o=(e??[]).filter(s=>t?t(s):!0),i=Ti.find(s=>s.key===this._sort);if(!i)return o;let a=this._desc?-1:1;return o.slice().sort((s,h)=>{let l=i.get(s),c=i.get(h);return typeof l=="number"&&typeof c=="number"?(l-c)*a:String(l).localeCompare(String(c))*a})}render(){return n`
       <jh-card header-title="Work" header-subtitle="The frontier: what is runnable, what is blocked, and on what" padding="medium">
-        <div class="filters" role="group" aria-label="Filter work">
-          ${Object.keys(io).map(t=>h`
-            <button type="button" aria-pressed=${this._filter===t?"true":"false"}
-              @click=${()=>{this._filter=t}}>${t}</button>`)}
+        <div class="bar">
+          <div class="chips" role="group" aria-label="Show">
+            ${Object.keys(Mo).map(e=>n`
+              <button type="button" aria-pressed=${this._filter===e?"true":"false"}
+                @click=${()=>{this._filter=e}}>${e}</button>`)}
+          </div>
         </div>
-        <div class="live">${this._activity.connected?"live":"reconnecting\u2026"}</div>
-        ${this._task.render({pending:()=>h`<jh-progress accessible-label="Loading work"></jh-progress>`,error:t=>h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${t.message}</jh-notification>`,complete:t=>this._table(this._rows(t))})}
-      </jh-card>`}_table(t){return t.length===0?h`<p class="empty">Nothing in this lane.</p>`:h`
+        ${this._task.render({pending:()=>K("work"),error:he,complete:e=>this._table(this._rows(e))})}
+      </jh-card>`}_table(e){return e.length===0?n`<p class="empty">Nothing in this lane.</p>`:n`
       <div class="wrap">
         <table>
-          <caption>${t.length} item(s), ${this._sort?`sorted by ${this._sort}`:"oldest first"}</caption>
+          <caption>${e.length} item(s), ${this._sort?`sorted by ${this._sort}`:"oldest first"}</caption>
+          <colgroup>
+            <col style="width: 108px"><col><col style="width: 150px"><col style="width: 110px">
+            <col style="width: 160px"><col style="width: 150px"><col style="width: 64px">
+          </colgroup>
           <thead>
-            <tr>${Hr.map(e=>h`
-              <th scope="col" aria-sort=${this._sort===e.key?this._desc?"descending":"ascending":"none"}>
-                <button type="button" @click=${()=>this._sortBy(e.key)}>${e.label}</button>
+            <tr>${Ti.map(t=>n`
+              <th scope="col" aria-sort=${this._sort===t.key?this._desc?"descending":"ascending":"none"}>
+                <button type="button" @click=${()=>this._sortBy(t.key)}>${t.label}</button>
               </th>`)}
             </tr>
           </thead>
           <tbody>
-            ${t.map(e=>h`
+            ${e.map(t=>n`
               <tr>
-                <td>
-                  <jh-tag size="small" label=${e.state}></jh-tag>
-                  ${e.ready?h`<div class="ready">ready</div>`:g}
-                </td>
+                <td><div class="stack">${gt(t.state)}${t.ready?n`<span class="ready">ready</span>`:p}</div></td>
                 <th scope="row">
-                  <a href=${"/items/"+e.id}>${e.task||e.id}</a>
-                  ${e.note?h`<div class="note">${e.note}</div>`:g}
+                  <a href=${"/items/"+t.id}>${E(t.task)||t.id}</a>
+                  ${t.note?n`<div class="note" title=${t.note}>${_(t.note)}</div>`:p}
                 </th>
-                <td>${Dr(e)||h`<span class="muted">—</span>`}</td>
-                <td>${e.stage??""}
-                  ${e.stage?h`<div class="muted">${z(e.in_state_sec)}</div>`:g}</td>
-                <td class=${e.lease_lapsed?"lapsed":""}>${ji(e)||h`<span class="muted">—</span>`}</td>
-                <td class="muted">${Zt(e)}</td>
-                <td>${z(e.age_sec)}</td>
+                <td>${t.blocked_by?.length?t.blocked_by.map((o,i)=>n`${i?", ":""}<a href=${"/items/"+o}>${H(o)}</a>`):Ut(t)||n`<span class="muted">—</span>`}</td>
+                <td class="nowrap">${t.stage??""}
+                  ${t.stage?n`<div class="helper">${k(t.in_state_sec)}</div>`:p}</td>
+                <td class=${t.lease_lapsed?"lapsed":""}>${et(t)||n`<span class="muted">—</span>`}</td>
+                <td class="muted">${ee(t)||te(t)}</td>
+                <td class="nowrap">${k(t.age_sec)}</td>
               </tr>`)}
           </tbody>
         </table>
-      </div>`}};customElements.define("box-work",ao);function $i(r){switch(r.kind){case"started":return"agent started";case"tool":return r.tool||"(unnamed \u2014 nothing for policy to match)";case"denied":return`${r.tool} \u2014 REFUSED by policy at the stream`;case"escalate":return r.reason;case"handoff":return r.reason;default:return r.text??""}}var xi={denied:"negative",escalate:"negative",handoff:"neutral",started:"positive"},no=class extends x{static styles=A`
+      </div>`}};customElements.define("box-work",Ho);function _a(r){switch(r.kind){case"started":return"agent started";case"tool":return r.tool||"(unnamed \u2014 nothing for policy to match)";case"denied":return`${r.tool} \u2014 refused by policy at the stream`;case"escalate":return r.reason;case"handoff":return r.reason;default:return r.text??""}}var ka={denied:"negative",escalate:"negative",handoff:"neutral",started:"positive"},Io=class extends j{static styles=[z,$`
     :host { display: block; }
-    .grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); align-items: start; }
-    .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); margin-bottom: 8px; }
-    .empty { color: var(--jh-color-content-secondary-enabled); }
-    .meta { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: .8rem;
-            color: var(--jh-color-content-secondary-enabled); margin-bottom: 8px; }
-    .layers { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
-    .layer { font-size: .7rem; padding: 2px 6px; border-radius: 4px;
+    .grid { display: grid; gap: var(--jh-space-400); grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); align-items: start; }
+    .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; font: var(--jh-font-helper-regular);
+            color: var(--jh-color-content-secondary-enabled); margin-bottom: var(--jh-space-200); }
+    .layers { display: flex; gap: var(--jh-space-100); flex-wrap: wrap; margin-bottom: var(--jh-space-200); }
+    .layer { font: var(--jh-font-micro-medium); padding: 2px var(--jh-space-200); border-radius: var(--jh-border-radius-100);
              background: var(--jh-color-container-secondary-enabled); }
-    h4 { margin: 12px 0 4px; font-size: .8rem; color: var(--jh-color-content-secondary-enabled); }
-    ol { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font-size: .8rem; }
-    li { display: grid; grid-template-columns: 62px 70px 1fr; gap: 8px; padding: 3px 0;
-         border-bottom: 1px solid var(--jh-color-border-primary-enabled, #eee); }
+    h4 { margin: var(--jh-space-300) 0 var(--jh-space-100); font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+    ol { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font: var(--jh-font-helper-regular); }
+    li { display: grid; grid-template-columns: 64px 72px 1fr; gap: var(--jh-space-200); padding: 3px 0;
+         border-bottom: 1px solid var(--jh-color-divider-secondary); }
     li .t { color: var(--jh-color-content-secondary-enabled); font-variant-numeric: tabular-nums; }
     li .k { font-weight: 600; }
     li .x { white-space: pre-wrap; overflow-wrap: anywhere; }
-    li.negative .k { color: var(--jh-color-content-negative-enabled, #b3261e); }
-    .blind { color: var(--jh-color-content-secondary-enabled); font-style: italic; }
-    code { font-size: .75rem; }
-  `;static properties={_frames:{state:!0}};constructor(){super(),this._frames={},this._activity=new Y(this,{limit:1,onEvent:()=>this._refresh(),onSession:t=>{this._frames={...this._frames,[t.item]:[...this._frames[t.item]??[],t]}}})}_task=new E(this,{task:async(t,{signal:e})=>Ko(e),args:()=>[]});_refresh(){clearTimeout(this._timer),this._timer=setTimeout(()=>this._task.run(),400)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer)}_timeline(t){let e=new Set((t.timeline??[]).map(o=>o.seq));return[...t.timeline??[],...(this._frames[t.id]??[]).filter(o=>!e.has(o.seq))]}render(){return h`
-      <div class="live">${this._activity.connected?"live":"reconnecting\u2026"}</div>
-      ${this._task.render({pending:()=>h`<jh-progress accessible-label="Loading sessions"></jh-progress>`,error:t=>h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${t.message}</jh-notification>`,complete:t=>(t?.length??0)===0?h`<p class="empty">No unit is running. Claimed work appears here as it starts.</p>`:h`<div class="grid">${t.map(e=>this._card(e))}</div>`})}`}_card(t){let e=this._timeline(t);return h`
-      <jh-card header-title=${t.task||t.id} header-subtitle=${Zt(t)} padding="medium">
+    li.negative .k { color: var(--jh-color-content-negative-enabled); }
+    li.positive .k { color: var(--jh-color-content-positive-enabled); }
+    .blind { color: var(--jh-color-content-secondary-enabled); font-style: italic; margin: 0; }
+  `];static properties={_frames:{state:!0}};constructor(){super(),this._frames={},this._activity=new N(this,{limit:1,onEvent:()=>this._refresh(),onSession:e=>{this._frames={...this._frames,[e.item]:[...this._frames[e.item]??[],e]}}})}_task=new O(this,{task:async(e,{signal:t})=>Er(t),args:()=>[]});_refresh(){clearTimeout(this._timer),this._timer=setTimeout(()=>this._task.run(),400)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer)}_timeline(e){let t=new Set((e.timeline??[]).map(o=>o.seq));return[...e.timeline??[],...(this._frames[e.id]??[]).filter(o=>!t.has(o.seq))]}render(){return this._task.render({pending:()=>n`<jh-card header-title="Sessions" padding="medium">${K("sessions")}</jh-card>`,error:e=>n`<jh-card header-title="Sessions" padding="medium">${he(e)}</jh-card>`,complete:e=>(e?.length??0)===0?n`<jh-card header-title="Sessions" header-subtitle="Each running unit, and what its agent is doing right now" padding="medium">
+            <p class="empty">No unit is running. Claimed work appears here as it starts.</p>
+          </jh-card>`:n`<div class="grid">${e.map(t=>this._card(t))}</div>`})}_card(e){let t=this._timeline(e);return n`
+      <jh-card header-title=${E(e.task)||e.id} header-subtitle=${ee(e)||te(e)} padding="medium">
         <div class="meta">
-          <jh-tag size="small" label=${t.state}></jh-tag>
-          ${t.stage?h`<jh-tag size="small" label=${t.stage}></jh-tag><span>${z(t.in_state_sec)} in stage</span>`:g}
-          ${t.seat?h`<span>seat <strong>${t.seat}</strong></span>`:g}
-          ${t.agentref?h`<code title=${t.agentref}>${t.agentref.slice(0,12)}</code>`:g}
-          ${t.head?h`<a href=${"/provenance/"+t.head}><code>${t.head.slice(0,12)}</code></a>`:g}
-          <a href=${"/items/"+t.id}>${t.id}</a>
+          ${gt(e.state)}
+          ${e.stage?n`<jh-tag size="small" label=${e.stage}></jh-tag><span>${k(e.in_state_sec)} in stage</span>`:p}
+          ${e.seat?n`<span>seat <b>${e.seat}</b></span>`:p}
+          ${e.runner?n`<span>${et(e)}</span>`:p}
+        </div>
+        <div class="meta">
+          <span>item <box-hash label="item id" .value=${e.id} href=${"/items/"+e.id} chars="18"></box-hash></span>
+          ${e.agentref?n`<span>agent <box-hash label="agentref" .value=${e.agentref}></box-hash></span>`:p}
+          ${e.head?n`<span>head <box-hash label="commit" .value=${e.head} href=${"/provenance/"+e.head}></box-hash></span>`:p}
         </div>
         ${""}
-        ${t.layers?.length?h`<div class="layers">${t.layers.map(o=>h`
-              <span class="layer" title=${`${o.source} ${o.digest}`}>${o.scope}:${o.name}</span>`)}</div>`:g}
+        ${e.layers?.length?n`<div class="layers" aria-label="Agent layers">${e.layers.map(o=>n`
+              <span class="layer" title=${`${o.source} ${o.digest}`}>${o.scope}:${o.name}</span>`)}</div>`:p}
         <h4>Timeline</h4>
-        ${e.length===0?t.watching?h`<p class="empty">Started; nothing said yet.</p>`:h`<p class="blind">No live stream here — another runner holds this, or the window has rolled.
-                     Silence about the run, not an idle agent.</p>`:h`<ol>${e.map(o=>h`
-              <li class=${xi[o.kind]??""}>
-                <span class="t">${new Date(o.at).toLocaleTimeString()}</span>
+        ${t.length===0?e.watching?n`<p class="empty">Started; nothing said yet.</p>`:n`<p class="blind">No live stream here — another runner holds this, or the window has rolled.
+                     Silence about the run, not an idle agent.</p>`:n`<ol aria-label="Agent timeline">${t.map(o=>n`
+              <li class=${ka[o.kind]??""}>
+                <span class="t"><box-when .at=${o.at}></box-when></span>
                 <span class="k">${o.kind}</span>
-                <span class="x">${$i(o)}</span>
+                <span class="x">${_a(o)}</span>
               </li>`)}
             </ol>`}
-      </jh-card>`}};customElements.define("box-sessions",no);var lo=class extends x{static styles=A`
-    :host { display: block; }
-    .empty { color: var(--jh-color-content-secondary-enabled); }
-    .overdue { color: var(--jh-color-content-negative-enabled, #b3261e); font-weight: 600; }
-    .told { font-size: .8rem; color: var(--jh-color-content-secondary-enabled); }
-  `;_task=new E(this,{task:async(t,{signal:e})=>Io(e),args:()=>[]});render(){return h`
-      <jh-card header-title="Exception queue" header-subtitle="Parked work waiting on a person" padding="medium">
-        ${this._task.render({pending:()=>h`<jh-progress accessible-label="Loading exceptions"></jh-progress>`,error:t=>h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${t.message}</jh-notification>`,complete:t=>(t?.length??0)===0?h`<p class="empty">Nothing here — the factory has nothing waiting on a person.</p>`:h`<jh-list-group accessible-label="Parked items">
-                ${t.map(e=>h`
-                  <jh-list-item primary-text=${e.id} secondary-text=${e.note}
-                    secondary-metadata=${z(e.age_sec)+" parked"} show-divider>
-                    <jh-tag slot="jh-list-item-left" size="small" label=${e.severity??"medium"}></jh-tag>
-                    <div slot="jh-list-item-content">
-                      ${e.overdue?h`<div class="overdue">past the response-time objective</div>`:g}
-                      ${e.escalations?h`<div class="told">escalated out of band ${e.escalations}×</div>`:g}
-                    </div>
-                    <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
-                      label="Open" href=${"/items/"+e.id}></jh-button>
-                  </jh-list-item>`)}
-              </jh-list-group>`})}
-      </jh-card>`}};customElements.define("box-exceptions",lo);var ho=class extends x{static properties={itemId:{attribute:!1}};static styles=A`
-    :host { display: grid; gap: 16px; }
-    pre { white-space: pre-wrap; word-break: break-all; font-size: .8rem;
-          background: var(--jh-color-container-secondary-enabled); padding: 8px; border-radius: 6px; }
-    .live { font-size: .75rem; color: var(--jh-color-content-secondary-enabled); margin-bottom: 8px; }
-  `;constructor(){super(),this._activity=new Y(this,{limit:1,onEvent:t=>{t.scope===`workitem/${this.itemId}`&&this._refresh()}})}_task=new E(this,{task:async([t],{signal:e})=>{let[o,i]=await Promise.all([Bo(t,e),qo(t,e)]);return{item:o,evidence:i}},args:()=>[this.itemId]});_refresh(){clearTimeout(this._timer),this._timer=setTimeout(()=>this._task.run(),400)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer)}render(){return this._task.render({pending:()=>h`<jh-progress accessible-label="Loading item"></jh-progress>`,error:t=>h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${t.message}</jh-notification>`,complete:({item:t,evidence:e})=>h`
-        <jh-card header-title=${t.id} header-subtitle=${t.task} padding="medium">
-          <p><jh-tag size="small" label=${t.state}></jh-tag>
-             ${t.head?h` <a href=${"/provenance/"+t.head}><code>${t.head.slice(0,12)}</code></a>`:g}</p>
-          ${t.note?h`<pre>${t.note}</pre>`:g}
+      </jh-card>`}};customElements.define("box-sessions",Io);var Bo=class extends j{static styles=[z,$`
+    :host { display: grid; gap: var(--jh-space-400); }
+    .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; font: var(--jh-font-helper-regular);
+            color: var(--jh-color-content-secondary-enabled); margin-bottom: var(--jh-space-300); }
+    .overdue { color: var(--jh-color-content-negative-enabled); font-weight: 600; }
+    .note { margin: 0 0 var(--jh-space-300); padding: var(--jh-space-300); border-radius: var(--jh-border-radius-200);
+            background: var(--jh-color-container-secondary-enabled); white-space: pre-wrap; overflow-wrap: anywhere; }
+    .summary { display: flex; gap: var(--jh-space-400); flex-wrap: wrap; align-items: center; }
+  `];_task=new O(this,{task:async(e,{signal:t})=>wr(t),args:()=>[]});constructor(){super(),this._activity=new N(this,{limit:1,onEvent:e=>{/index\/exceptions|workitem\//.test(e.scope)&&this._refresh()}})}_refresh(){clearTimeout(this._timer),this._timer=setTimeout(()=>this._task.run(),400)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer)}_done(e,t){R(`${e}: ${E(t.task)||t.id}`,"positive"),this._refresh()}render(){return this._task.render({pending:()=>n`<jh-card header-title="Exception queue" padding="medium">${K("exceptions")}</jh-card>`,error:e=>n`<jh-card header-title="Exception queue" padding="medium">${he(e)}</jh-card>`,complete:e=>n`
+        <jh-card header-title="Exception queue" header-subtitle="Parked work waiting on a person, loudest and oldest first" padding="medium">
+          ${(e?.length??0)===0?n`<p class="empty">Nothing here — the factory has nothing waiting on a person.</p>`:n`<div class="summary">
+                <span><b>${e.length}</b> parked</span>
+                <span class=${e.some(t=>t.overdue)?"overdue":""}><b>${e.filter(t=>t.overdue).length}</b> past the response-time objective</span>
+                <span class="helper">Retry hands the unit back to the factory. Resolve closes it with your reason on the record.</span>
+              </div>`}
         </jh-card>
-        <jh-card header-title="Timeline" header-subtitle="What this run did, in order" padding="medium">
-          <div class="live">${this._activity.connected?"live":"reconnecting\u2026"}</div>
-          <jh-list-group accessible-label="Run timeline">
-            ${(e??[]).map(o=>h`
-              <jh-list-item
-                primary-text=${o.Kind}
-                secondary-text=${mi(o)}
-                primary-metadata=${o.At?new Date(o.At).toLocaleTimeString():""}
-                secondary-metadata=${o.Actor}
-                show-divider></jh-list-item>`)}
-          </jh-list-group>
-        </jh-card>`})}};customElements.define("box-item",ho);var co=class extends x{static properties={sha:{attribute:!1}};static styles=A`:host { display: block; }`;_task=new E(this,{task:async([t],{signal:e})=>t?Vo(t,e):[],args:()=>[this.sha]});render(){return h`
-      <jh-card header-title="Provenance" header-subtitle="Everything recorded about one commit" padding="medium">
-        ${this._task.render({pending:()=>h`<jh-progress accessible-label="Loading provenance"></jh-progress>`,error:t=>h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${t.message}</jh-notification>`,complete:t=>(t?.length??0)===0?h`<p>Nothing recorded about <code>${this.sha}</code>.</p>`:h`<jh-list-group accessible-label="Provenance records">
-                ${t.map(e=>h`
-                  <jh-list-item primary-text=${e.Kind} secondary-text=${e.Scope}
-                    primary-metadata=${"seq "+e.Seq} secondary-metadata=${e.Actor} show-divider></jh-list-item>`)}
-              </jh-list-group>`})}
-      </jh-card>`}};customElements.define("box-provenance",co);var po=class extends x{static styles=A`
+        ${(e??[]).map(t=>this._card(t))}`})}_card(e){return n`
+      <jh-card header-title=${E(e.task)||e.id} header-subtitle=${ee(e)||te(e)} padding="medium">
+        <div class="meta">
+          <jh-tag size="small" class=${Mt[e.severity??"medium"]??"neutral"} label=${`severity ${e.severity??"medium"}`}></jh-tag>
+          ${e.stage?n`<jh-tag size="small" label=${`at ${e.stage}`}></jh-tag>`:p}
+          <span>parked <box-when .at=${e.parked}></box-when></span>
+          ${e.overdue?n`<span class="overdue">past the response-time objective</span>`:p}
+          ${e.escalations?n`<span>escalated out of band ${e.escalations}×</span>`:p}
+          <span>item <box-hash label="item id" .value=${e.id} href=${"/items/"+e.id} chars="18"></box-hash></span>
+        </div>
+        ${e.note?n`<p class="note">${e.note}</p>`:p}
+        <div class="actions">
+          <box-reason label="Retry" confirm="Retry" appearance="primary" glyph="rotate" prompt=${`Retry ${E(e.task)}`}
+            .action=${t=>Rt(e.id,t)} @box-done=${()=>this._done("Retried",e)}></box-reason>
+          <box-reason label="Resolve" confirm="Resolve" appearance="secondary" glyph="check" prompt=${`Resolve ${E(e.task)}`}
+            .action=${t=>Lt(e.id,t)} @box-done=${()=>this._done("Resolved",e)}></box-reason>
+          <jh-button appearance="tertiary" size="small" label="Open" accessible-label=${`Open ${E(e.task)||e.id}`} href=${"/items/"+e.id}></jh-button>
+        </div>
+      </jh-card>`}};customElements.define("box-exceptions",Bo);var qo=class extends j{static properties={itemId:{attribute:!1}};static styles=[z,Li,$`
+    :host { display: grid; gap: var(--jh-space-400); }
+    .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; margin-bottom: var(--jh-space-300); }
+    .note { margin: var(--jh-space-300) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    details { margin-top: var(--jh-space-300); }
+    summary { cursor: pointer; font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; font: var(--jh-font-code-regular-2); margin: var(--jh-space-200) 0 0;
+          padding: var(--jh-space-300); border-radius: var(--jh-border-radius-200); background: var(--jh-color-container-secondary-enabled); }
+    .actions { margin-top: var(--jh-space-400); }
+    .lapsed { color: var(--jh-color-content-negative-enabled); font-weight: 600; }
+    ol.chain { list-style: none; margin: 0; padding: 0; }
+    ol.chain li { display: grid; grid-template-columns: minmax(92px, max-content) 1fr max-content; gap: var(--jh-space-300);
+                  align-items: baseline; padding: var(--jh-space-200) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    ol.chain .what { overflow-wrap: anywhere; }
+    ol.chain .by { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    ol.chain .t { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); white-space: nowrap; }
+  `];constructor(){super(),this._activity=new N(this,{limit:1,onEvent:e=>{(e.scope===`workitem/${this.itemId}`||e.subject===this.itemId)&&this._refresh()}})}_task=new O(this,{task:async([e],{signal:t})=>{let[o,i,a]=await Promise.all([_r(e,t),zr(e,t).catch(()=>({})),kr(e,t)]);return{item:{...i,...o,note:o.note??i.note},evidence:a}},args:()=>[this.itemId]});_refresh(){clearTimeout(this._timer),this._timer=setTimeout(()=>this._task.run(),400)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer)}_done(e,t){R(`${e}: ${E(t.task)||t.id}`,"positive"),this._refresh()}_head(e){let t=Ur(e.task),o=e.state==="parked"||e.state==="failed",i=o?"negative":e.state==="done"?"positive":"neutral";return n`
+      <jh-card header-title=${E(e.task)||e.id} header-subtitle=${ee(e)||te(e)} padding="medium">
+        <div class="meta">
+          ${gt(e.state)}
+          ${e.stage&&e.stage!==e.state?n`<jh-tag size="small" label=${`at ${e.stage}`}></jh-tag>`:p}
+          ${e.severity?n`<jh-tag size="small" class=${Mt[e.severity]??"neutral"} label=${`severity ${e.severity}`}></jh-tag>`:p}
+          ${t?n`<jh-button appearance="tertiary" size="small" label=${/github\.com/.test(t)?"Open on GitHub":"Open link"} href=${t} target="_blank">
+              <span slot="jh-button-icon-right">${V("external","x-small")}</span>
+            </jh-button>`:p}
+        </div>
+        ${e.note?n`
+          <jh-notification appearance=${i} type="alert" hide-dismiss-button>
+            <div class="note">${e.note}</div>
+          </jh-notification>`:p}
+        <dl class="facts" style="margin-top: var(--jh-space-400)">
+          <dt>Item</dt><dd><box-hash label="item id" .value=${e.id} chars="24"></box-hash></dd>
+          <dt>Where</dt><dd>${te(e)||n`<span class="muted">—</span>`}${e.requester?n` · requested by ${e.requester}`:p}</dd>
+          <dt>Ingress</dt><dd><box-hash label="ingress id" .value=${e.ingress} chars="24"></box-hash></dd>
+          ${e.head?n`<dt>Head</dt><dd><box-hash label="commit" .value=${e.head} href=${"/provenance/"+e.head}></box-hash> <span class="helper">landed commit — its provenance</span></dd>`:p}
+          ${e.built&&e.built!==e.head?n`<dt>Built</dt><dd><box-hash label="commit" .value=${e.built} href=${"/provenance/"+e.built}></box-hash></dd>`:p}
+          ${e.seat?n`<dt>Seat</dt><dd>${e.seat}${e.agentref?n` · agent <box-hash label="agentref" .value=${e.agentref}></box-hash>`:p}</dd>`:p}
+          ${e.runner?n`<dt>Held by</dt><dd class=${e.lease_lapsed?"lapsed":""}>${et(e)}</dd>`:p}
+          ${e.blocked_by?.length?n`<dt>Blocked by</dt><dd>${e.blocked_by.map((a,s)=>n`${s?", ":""}<a href=${"/items/"+a}>${a}</a>`)}</dd>`:p}
+          ${e.root?n`<dt>Cascaded from</dt><dd><a href=${"/items/"+e.root}>${e.root}</a></dd>`:p}
+          ${e.depends_on?.length?n`<dt>Depends on</dt><dd>${e.depends_on.map((a,s)=>n`${s?", ":""}<a href=${"/items/"+a}>${a}</a>`)}</dd>`:p}
+          ${e.prior?n`<dt>Prior attempt</dt><dd>carried into this run</dd>`:p}
+          ${e.opened?n`<dt>Opened</dt><dd><box-when .at=${e.opened} abs></box-when> <span class="helper">(<box-when .at=${e.opened}></box-when>)</span></dd>`:p}
+          ${e.changed?n`<dt>Last change</dt><dd><box-when .at=${e.changed} abs></box-when> <span class="helper">(${k(e.in_state_sec)} in this state)</span></dd>`:p}
+          ${e.hops?n`<dt>Sessions</dt><dd>${e.hops+1}, after ${e.hops} handoff(s)</dd>`:p}
+        </dl>
+        <details>
+          <summary>Full task text</summary>
+          <pre>${e.task}</pre>
+        </details>
+        <div class="actions">
+          ${o?n`
+            <box-reason label="Retry" confirm="Retry" appearance="primary" glyph="rotate" prompt="Retry this item"
+              .action=${a=>Rt(e.id,a)} @box-done=${()=>this._done("Retried",e)}></box-reason>
+            <box-reason label="Resolve" confirm="Resolve" appearance="secondary" glyph="check" prompt="Resolve this item"
+              .action=${a=>Lt(e.id,a)} @box-done=${()=>this._done("Resolved",e)}></box-reason>
+            <span class="helper">Retry hands the unit back to the factory; resolve closes it with your reason on the record.</span>`:e.state==="claimed"?n`<jh-button appearance="tertiary" size="small" label="Watch the session" href="/sessions"></jh-button>
+                     <span class="helper">A running unit can only be stopped with the rest of the factory — the cord is at the top of the page.</span>`:n`<span class="helper">Retry and resolve apply to parked or failed work.</span>`}
+        </div>
+      </jh-card>`}_chain(e){return(e?.length??0)===0?n`<p class="empty">Nothing recorded yet.</p>`:n`
+      <ol class="chain" aria-label="Run timeline">
+        ${e.map(t=>n`
+          <li>
+            ${Wo(t.Kind)}
+            <div>
+              <div class="what">${tt(t)}</div>
+              <div class="by">${t.Actor}${t.Subject&&t.Subject!==this.itemId?n` · ${H(t.Subject)}`:p}</div>
+            </div>
+            <span class="t"><box-when .at=${t.At}></box-when></span>
+          </li>`)}
+      </ol>`}render(){return this._task.render({pending:()=>K("item"),error:he,complete:({item:e,evidence:t})=>n`
+        ${this._head(e)}
+        <jh-card header-title="Timeline" header-subtitle="What this unit did, in order, from its own evidence chain" padding="medium">
+          ${this._chain(t)}
+        </jh-card>`})}};customElements.define("box-item",qo);var Vo=class extends j{static properties={sha:{attribute:!1}};static styles=[z,$`
     :host { display: block; }
-    form { display: grid; gap: 16px; max-width: 560px; }
-    form .actions { padding-top: 8px; }
-  `;static properties={_routes:{state:!0},_route:{state:!0},_key:{state:!0},_payload:{state:!0},_result:{state:!0},_error:{state:!0},_pending:{state:!0}};constructor(){super(),this._routes=[],this._route="",this._key="",this._payload="",this._result=null,this._error="",this._pending=!1}connectedCallback(){super.connectedCallback(),he().then(t=>{this._routes=t.routes,!this._route&&t.routes.length&&(this._route=t.routes[0])}).catch(t=>{this._error=t.message})}async _submit(t){t.preventDefault(),this._pending=!0,this._error="",this._result=null;try{this._result=await Fo(this._route,this._key,this._payload)}catch(e){this._error=e.message}finally{this._pending=!1}}render(){return h`
+    .sha { margin: 0 0 var(--jh-space-300); }
+    ol { list-style: none; margin: 0; padding: 0; }
+    li { display: grid; grid-template-columns: minmax(92px, max-content) 1fr max-content; gap: var(--jh-space-300);
+         align-items: baseline; padding: var(--jh-space-200) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    .by { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .t { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); white-space: nowrap; }
+  `];_task=new O(this,{task:async([e],{signal:t})=>e?Ar(e,t):[],args:()=>[this.sha]});render(){return n`
+      <jh-card header-title="Provenance" header-subtitle="Everything recorded about one commit, across every chain that names it" padding="medium">
+        <p class="sha">Commit <box-hash label="commit" .value=${this.sha} chars="16"></box-hash></p>
+        ${this._task.render({pending:()=>K("provenance"),error:he,complete:e=>(e?.length??0)===0?n`<p class="empty">Nothing is recorded about this commit. Either it did not come through this factory, or it has not landed yet.</p>`:n`<ol aria-label="Provenance records">
+                ${e.map(t=>{let o=Dt(t);return n`
+                    <li>
+                      ${Wo(t.Kind)}
+                      <div>
+                        <div>${tt(t)}${o?n` · <a href=${"/items/"+o}>open the item</a>`:p}</div>
+                        <div class="by">${t.Actor} · ${t.Scope} #${t.Seq}</div>
+                      </div>
+                      <span class="t"><box-when .at=${t.At}></box-when></span>
+                    </li>`})}
+              </ol>`})}
+      </jh-card>`}};customElements.define("box-provenance",Vo);var Zo=class extends j{static styles=[z,$`
+    :host { display: block; }
+    form { display: grid; gap: var(--jh-space-400); max-width: 560px; }
+    form .actions { padding-top: var(--jh-space-200); }
+  `];static properties={_routes:{state:!0},_route:{state:!0},_key:{state:!0},_payload:{state:!0},_result:{state:!0},_error:{state:!0},_pending:{state:!0}};constructor(){super(),this._routes=null,this._route="",this._key="",this._payload="",this._result=null,this._error="",this._pending=!1}connectedCallback(){super.connectedCallback(),Ce().then(e=>{this._routes=e.routes??[],!this._route&&this._routes.length&&(this._route=this._routes[0])}).catch(e=>{this._error=e.message,this._routes=[]})}async _submit(e){e.preventDefault(),this._pending=!0,this._error="",this._result=null;try{this._result=await Cr(this._route,this._key.trim(),this._payload),R(`${this._result.opened?"Opened":"Already open"}: ${E(this._payload)}`,"positive")}catch(t){this._error=t.message}finally{this._pending=!1}}render(){return n`
       <jh-card header-title="Submit work" header-subtitle="Open an ingress; the daemon's next tick takes it from there" padding="medium">
         <form @submit=${this._submit}>
-          <jh-radio-group label="Route" name="route" .value=${this._route}
-            helper-text="Routes are the operator's configuration; work inherits the route's target and authority"
-            @jh-change=${t=>{this._route=t.target.value}}>
-            ${this._routes.map(t=>h`<jh-radio label=${t} value=${t} ?checked=${t===this._route}></jh-radio>`)}
-          </jh-radio-group>
+          ${""}
+          ${this._routes===null?K("routes"):this._routes.length===0?n`<jh-notification appearance="neutral" type="alert" hide-dismiss-button>No routes are configured, so nothing can be submitted. Routes are operator configuration in box.yaml.</jh-notification>`:n`
+                <jh-radio-group label="Route" name="route" .value=${this._route}
+                  helper-text="Routes are the operator's configuration; work inherits the route's target and authority"
+                  @jh-change=${e=>{this._route=e.target.value}}>
+                  ${this._routes.map(e=>n`<jh-radio label=${e} value=${e} ?checked=${e===this._route}></jh-radio>`)}
+                </jh-radio-group>`}
           <jh-input label="Occurrence key" required
             helper-text="The same key always names the same work — redelivery is safe"
             .value=${this._key}
-            @jh-change=${t=>{this._key=t.target.value}}
-            @input=${t=>{this._key=t.composedPath()[0].value??this._key}}></jh-input>
-          <jh-input type="textarea" label="Task" rows="3" auto-grow required
-            helper-text="What should be done, in plain words"
+            @jh-change=${e=>{this._key=e.target.value}}
+            @input=${e=>{this._key=e.composedPath()[0].value??this._key}}></jh-input>
+          <jh-input type="textarea" label="Task" rows="5" required
+            helper-text="What should be done, in plain words. The first line is how the room will name it."
             .value=${this._payload}
-            @jh-change=${t=>{this._payload=t.target.value}}
-            @input=${t=>{this._payload=t.composedPath()[0].value??this._payload}}></jh-input>
+            @jh-change=${e=>{this._payload=e.target.value}}
+            @input=${e=>{this._payload=e.composedPath()[0].value??this._payload}}></jh-input>
           <div class="actions">
             <jh-button submit appearance="primary" label="Open ingress"
-              ?pending=${this._pending} ?disabled=${!this._route||!this._key||!this._payload}></jh-button>
+              ?pending=${this._pending} ?disabled=${!this._route||!this._key.trim()||!this._payload.trim()}></jh-button>
+            ${!this._route||!this._key.trim()||!this._payload.trim()?n`<span class="helper">Needs a route, a key and a task.</span>`:p}
           </div>
         </form>
-        ${this._error?h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${this._error}</jh-notification>`:g}
-        ${this._result?h`
-          <jh-notification appearance="positive" type="banner" hide-dismiss-button>
+        ${this._error?n`<jh-notification appearance="negative" type="alert" hide-dismiss-button>${this._error}</jh-notification>`:p}
+        ${this._result?n`
+          <jh-notification appearance="positive" type="alert" hide-dismiss-button>
             ${this._result.opened?"Opened":"Already open"} — item
             <a href=${"/items/"+this._result.item}>${this._result.item}</a>
-          </jh-notification>`:g}
-      </jh-card>`}};customElements.define("box-submit",po);Mo();var uo=class extends x{static styles=A`
-    :host { display: block; max-width: 960px; margin: 0 auto; padding: 16px; }
-    header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
-    h1 { font-size: 1.2rem; margin: 0; }
-    nav { display: flex; gap: 4px; flex: 1; }
-    nav a { text-decoration: none; padding: 6px 10px; border-radius: 6px;
-            color: var(--jh-color-content-primary-enabled); font-size: .9rem; }
-    nav a.active { background: var(--jh-color-container-secondary-enabled); font-weight: 600; }
-    .controls { display: flex; gap: 8px; align-items: end; }
-    main { display: block; }
-  `;static properties={_reason:{state:!0},_controlError:{state:!0}};constructor(){super(),this._reason="",this._controlError=""}_router=new bt(this,[{path:"/",render:()=>h`<box-dashboard></box-dashboard>`},{path:"/work",render:()=>h`<box-work></box-work>`},{path:"/sessions",render:()=>h`<box-sessions></box-sessions>`},{path:"/exceptions",render:()=>h`<box-exceptions></box-exceptions>`},{path:"/items/:id",render:({id:t})=>h`<box-item .itemId=${t}></box-item>`},{path:"/provenance/:sha",render:({sha:t})=>h`<box-provenance .sha=${t}></box-provenance>`},{path:"/submit",render:()=>h`<box-submit></box-submit>`}],{fallback:{render:()=>h`<jh-notification appearance="neutral" type="banner" hide-dismiss-button>No such page.</jh-notification>`}});_active(t){return location.pathname===t?"active":""}async _control(t){this._controlError="";try{await(t==="stop"?Zo(this._reason):Go(this._reason)),this._reason="",this.requestUpdate()}catch(e){this._controlError=e.message}}render(){return h`
-      <header>
-        <h1>Box Control Room</h1>
-        <nav>
-          <a href="/" class=${this._active("/")}>Dashboard</a>
-          <a href="/work" class=${this._active("/work")}>Work</a>
-          <a href="/sessions" class=${this._active("/sessions")}>Sessions</a>
-          <a href="/exceptions" class=${this._active("/exceptions")}>Exceptions</a>
-          <a href="/submit" class=${this._active("/submit")}>Submit</a>
-        </nav>
-        <div class="controls">
-          <jh-input size="small" label="Reason" .value=${this._reason}
-            @jh-change=${t=>{this._reason=t.target.value}}></jh-input>
-          <jh-button appearance="danger" size="small" label="Stop"
-            ?disabled=${!this._reason} @click=${()=>this._control("stop")}></jh-button>
-          <jh-button appearance="secondary" size="small" label="Resume"
-            ?disabled=${!this._reason} @click=${()=>this._control("resume")}></jh-button>
+          </jh-notification>`:p}
+      </jh-card>`}};customElements.define("box-submit",Zo);xr();var Aa=[{href:"/",label:"Dashboard"},{href:"/work",label:"Work"},{href:"/sessions",label:"Sessions"},{href:"/exceptions",label:"Exceptions"},{href:"/submit",label:"Submit"}],Fo=class extends j{static properties={_theme:{state:!0}};static styles=[z,$`
+    .seg { display: inline-flex; border: 1px solid var(--jh-color-control-enabled);
+           border-radius: var(--jh-border-radius-pill); overflow: hidden; }
+    button { display: inline-flex; align-items: center; gap: var(--jh-space-100);
+             font: var(--jh-font-helper-medium); cursor: pointer; padding: 4px var(--jh-space-300);
+             border: 0; background: transparent; color: var(--jh-color-content-secondary-enabled); }
+    button + button { border-left: 1px solid var(--jh-color-control-enabled); }
+    button:hover { color: var(--jh-color-content-primary-enabled); background: var(--jh-color-container-secondary-hover); }
+    button[aria-pressed="true"] { background: var(--jh-color-container-secondary-selected);
+                                  color: var(--jh-color-content-primary-enabled); font-weight: 600; }
+    button:focus-visible { border-radius: 0; position: relative; z-index: 1; }
+    jh-icon { --jh-icon-color-fill: currentColor; }
+    @media (max-width: 720px) { button span { display: none; } }
+  `];constructor(){super(),this._theme=Te(),this._onTheme=e=>{this._theme=e.detail.theme}}connectedCallback(){super.connectedCallback(),window.addEventListener("box-theme",this._onTheme)}disconnectedCallback(){super.disconnectedCallback(),window.removeEventListener("box-theme",this._onTheme)}render(){return n`
+      <div class="seg" role="group" aria-label="Theme">
+        ${Pt.map(e=>n`
+          <button type="button" aria-pressed=${this._theme===e.id?"true":"false"}
+            title=${`${e.label} theme`} @click=${()=>Or(e.id)}>
+            ${V(e.icon,"x-small")}<span>${e.label}</span>
+          </button>`)}
+      </div>`}};customElements.define("box-theme",Fo);var Ko=class extends j{static properties={_status:{state:!0},_error:{state:!0}};static styles=[z,$`
+    :host { display: block; }
+    .strip { display: flex; align-items: center; gap: var(--jh-space-300); flex-wrap: wrap;
+             padding: var(--jh-space-200) var(--jh-space-400);
+             background: var(--jh-color-container-primary-enabled);
+             border: 1px solid var(--jh-color-divider-secondary);
+             border-radius: var(--jh-border-radius-300); }
+    .state { display: flex; align-items: center; gap: var(--jh-space-300); flex: 1; min-width: 240px; flex-wrap: wrap; }
+    .who { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); flex: 1 1 220px; }
+    .who b { color: var(--jh-color-content-primary-enabled); font-weight: 600; }
+    .id { display: flex; gap: var(--jh-space-300); flex-wrap: wrap; font: var(--jh-font-helper-regular);
+          color: var(--jh-color-content-secondary-enabled); }
+    .id b { color: var(--jh-color-content-primary-enabled); font-weight: 500; }
+    .live { display: inline-flex; align-items: center; gap: var(--jh-space-100); font: var(--jh-font-helper-medium); }
+    .live jh-icon { --jh-icon-color-fill: var(--jh-color-content-positive-enabled); }
+    .live.down jh-icon { --jh-icon-color-fill: var(--jh-color-content-negative-enabled); }
+  `];constructor(){super(),this._status=null,this._error="",this._activity=new N(this,{limit:1,onEvent:e=>{(e.scope==="control/claims"||e.kind==="config-reloaded")&&this._refresh()}})}connectedCallback(){super.connectedCallback(),this._refresh(),this._onDone=()=>this._refresh(),window.addEventListener("box-done",this._onDone)}disconnectedCallback(){super.disconnectedCallback(),clearTimeout(this._timer),window.removeEventListener("box-done",this._onDone)}_refresh(){clearTimeout(this._timer),this._timer=setTimeout(async()=>{try{this._status=await Ce(),this._error=""}catch(e){this._error=e.message}},150)}render(){let e=this._status,t=e?.claims,o=this._activity.connected;return n`
+      <div class="strip">
+        <span class=${"live"+(o?"":" down")} role="status">
+          ${V("dot","x-small")}${o?"Live":"Reconnecting\u2026"}
+        </span>
+        <div class="state">
+          ${e?n`
+            <jh-tag size="small" class=${t?.stopped?"negative":"positive"}
+              label=${t?.stopped?"Claims stopped":"Claims running"}></jh-tag>
+            ${t?.actor?n`
+              <span class="who">${t.stopped?"stopped":"resumed"} <box-when .at=${t.at}></box-when>
+                by <b>${t.actor}</b>${t.reason?n` — ${t.reason}`:p}</span>`:n`<span class="who">nobody has pulled the cord</span>`}
+            ${t?.stopped?n`<box-reason floating label="Resume claims" confirm="Resume" appearance="primary" glyph="play"
+                  prompt="Resume claims" .action=${i=>Lr(i).then(()=>R("Claims resumed","positive"))}></box-reason>`:n`<box-reason floating label="Stop claims" confirm="Stop" appearance="danger" glyph="stop"
+                  prompt="Stop claims" .action=${i=>Tr(i).then(()=>R("Claims stopped \u2014 in-flight runs settle, nothing new starts","negative"))}></box-reason>`}`:n`<span class="who">${this._error||"Reading the factory\u2026"}</span>`}
         </div>
+        ${e?n`
+          <div class="id" aria-label="Daemon">
+            <span>tenant <b>${e.tenant}</b></span>
+            <span>box <b>${e.box}</b></span>
+            <span>runner <b>${e.runner}</b></span>
+            <span>version <b>${e.version}</b></span>
+            <span>up <b>${k(e.uptime_sec)}</b></span>
+          </div>`:p}
+      </div>`}};customElements.define("box-claims",Ko);var Yo=class extends j{static styles=[z,$`
+    :host { display: block; max-width: 1080px; margin: 0 auto; padding: var(--jh-space-400); }
+    .skip { position: absolute; left: -999px; top: var(--jh-space-200); padding: var(--jh-space-200) var(--jh-space-300);
+            background: var(--jh-color-container-primary-enabled); border-radius: var(--jh-border-radius-200);
+            box-shadow: var(--jh-shadow-300); z-index: 10; }
+    .skip:focus { left: var(--jh-space-400); }
+    header { display: flex; align-items: center; gap: var(--jh-space-400); flex-wrap: wrap; margin-bottom: var(--jh-space-300); }
+    h1 { font: var(--jh-font-heading-medium-4); margin: 0; }
+    nav { display: flex; gap: var(--jh-space-100); flex: 1; flex-wrap: wrap; }
+    nav a { text-decoration: none; padding: 6px var(--jh-space-300); border-radius: var(--jh-border-radius-pill);
+            color: var(--jh-color-content-primary-enabled); font: var(--jh-font-body-medium-1); }
+    nav a:hover { background: var(--jh-color-container-secondary-hover); }
+    nav a[aria-current="page"] { background: var(--jh-color-container-secondary-selected); font-weight: 600; }
+    main { display: block; margin-top: var(--jh-space-400); }
+    main:focus { outline: none; }
+  `];_router=new ze(this,[{path:"/",render:()=>n`<box-dashboard></box-dashboard>`},{path:"/work",render:()=>n`<box-work></box-work>`},{path:"/sessions",render:()=>n`<box-sessions></box-sessions>`},{path:"/exceptions",render:()=>n`<box-exceptions></box-exceptions>`},{path:"/items/:id",render:({id:e})=>n`<box-item .itemId=${e}></box-item>`},{path:"/provenance/:sha",render:({sha:e})=>n`<box-provenance .sha=${e}></box-provenance>`},{path:"/submit",render:()=>n`<box-submit></box-submit>`}],{fallback:{render:()=>n`
+        <jh-card header-title="No such page" padding="medium">
+          <p class="empty">Nothing lives at <code>${location.pathname}</code>. <a href="/">Back to the dashboard</a>.</p>
+        </jh-card>`}});_current(e){return location.pathname===e?"page":p}render(){return n`
+      <a class="skip" href="#main">Skip to content</a>
+      <header>
+        <h1>Box control room</h1>
+        <nav aria-label="Primary">
+          ${Aa.map(e=>n`<a href=${e.href} aria-current=${this._current(e.href)}>${e.label}</a>`)}
+        </nav>
+        <box-theme></box-theme>
       </header>
-      ${this._controlError?h`<jh-notification appearance="negative" type="banner" hide-dismiss-button>${this._controlError}</jh-notification>`:""}
-      <main>${this._router.outlet()}</main>
-    `}};customElements.define("box-app",uo);export{uo as BoxApp};
+      <box-claims></box-claims>
+      <main id="main" tabindex="-1">${this._router.outlet()}</main>
+      <jh-toast-controller></jh-toast-controller>
+    `}};customElements.define("box-app",Yo);export{Yo as BoxApp,Ko as BoxClaims,Fo as BoxTheme};
 /*! Bundled license information:
 
 @lit/reactive-element/css-tag.js:

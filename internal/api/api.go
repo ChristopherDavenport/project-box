@@ -168,15 +168,19 @@ func (s *Server) room(r *http.Request) *control.Room {
 
 // Status is /v1/status.
 type Status struct {
-	Tenant     tenant.ID `json:"tenant"`
-	Box        string    `json:"box"`
-	Runner     string    `json:"runner"`
-	Stopped    bool      `json:"stopped"`
-	Pending    int       `json:"pending"`
-	Exceptions int       `json:"exceptions"`
-	UptimeSec  int64     `json:"uptime_sec"`
-	Routes     []string  `json:"routes"`
-	Version    string    `json:"version"`
+	Tenant  tenant.ID `json:"tenant"`
+	Box     string    `json:"box"`
+	Runner  string    `json:"runner"`
+	Stopped bool      `json:"stopped"`
+	// Claims is Stopped with its record attached: who stopped or resumed
+	// claims, when, and the reason they gave. The bit alone sent an operator
+	// to the activity feed to find out whether the stop was theirs.
+	Claims     queue.Control `json:"claims"`
+	Pending    int           `json:"pending"`
+	Exceptions int           `json:"exceptions"`
+	UptimeSec  int64         `json:"uptime_sec"`
+	Routes     []string      `json:"routes"`
+	Version    string        `json:"version"`
 	// ExceptionQueue is the count's missing half: how old the oldest parked
 	// item is, and whether that clears the objective. A count alone cannot
 	// distinguish a queue being worked from one nobody has opened in a week.
@@ -194,7 +198,7 @@ type Status struct {
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	stopped, err := s.Queue.Stopped(ctx, s.Tenant)
+	claims, err := s.Queue.Control(ctx, s.Tenant)
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
@@ -219,7 +223,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	st := Status{
-		Tenant: s.Tenant, Box: s.Box, Runner: s.Runner, Stopped: stopped,
+		Tenant: s.Tenant, Box: s.Box, Runner: s.Runner, Stopped: claims.Stopped, Claims: claims,
 		Pending: backlog.Pending, Backlog: backlog,
 		Exceptions: health.Parked, ExceptionQueue: health,
 		UptimeSec: int64(time.Since(s.Started).Seconds()), Routes: s.routeNames(),

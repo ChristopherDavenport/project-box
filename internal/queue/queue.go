@@ -649,11 +649,37 @@ func (q *Queue) Resume(ctx context.Context, t tenant.ID, actor, why string) erro
 
 // Stopped reports the current stop state: the head of the control chain.
 func (q *Queue) Stopped(ctx context.Context, t tenant.ID) (bool, error) {
+	c, err := q.Control(ctx, t)
+	return c.Stopped, err
+}
+
+// Control is the claims switch as a fact rather than a bit: whether claims
+// are stopped, and the record that made it so — who, when, and the reason
+// they gave. A room that could only say "stopped" left the operator reading
+// the activity feed to learn why, and an andon cord whose pull has no name on
+// it is one nobody dares release.
+type Control struct {
+	Stopped bool `json:"stopped"`
+	// Actor pressed it; Reason is what they wrote; At is when. All three are
+	// empty on a tenant nobody has ever stopped or resumed.
+	Actor  string    `json:"actor,omitempty"`
+	Reason string    `json:"reason,omitempty"`
+	At     time.Time `json:"at,omitzero"`
+}
+
+// Control reads the head of the control chain.
+func (q *Queue) Control(ctx context.Context, t tenant.ID) (Control, error) {
 	head, err := q.Store.Log().Head(ctx, t, "control/claims")
 	if err != nil {
-		return false, err
+		return Control{}, err
 	}
-	return head.Seq > 0 && head.Kind == "stop", nil
+	if head.Seq == 0 {
+		return Control{}, nil
+	}
+	return Control{
+		Stopped: head.Kind == "stop",
+		Actor:   head.Actor, Reason: string(head.Body), At: head.At,
+	}, nil
 }
 
 func (q *Queue) controlRecord(ctx context.Context, t tenant.ID, kind, actor, why string) error {
