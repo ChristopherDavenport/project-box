@@ -305,8 +305,11 @@ func (m *Meter) now() time.Time {
 	return time.Now()
 }
 
-// Acquire takes one execution slot, returning its release. The spend is
-// evidence; so is the first refusal of each window.
+// Acquire takes one execution slot, returning its release. The first refusal
+// of each window is evidence; a start is not, here — a claim can still be
+// sent back to Wait before it ever builds, so Acquire checks MaxPerWindow
+// against starts already on the books but leaves recording a new one, and its
+// evidence record, to [Meter.Start] once the run actually begins.
 func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 	m.mu.Lock()
 	maxC := m.Budget.MaxConcurrent
@@ -399,14 +402,34 @@ func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 		}
 	}
 	m.running++
-	m.started++
 	m.mu.Unlock()
-	m.record(ctx, "spend", what, fmt.Sprintf(`{"running":%d,"started_this_window":%d}`, m.running, m.started))
 	return func() {
 		m.mu.Lock()
 		m.running--
 		m.mu.Unlock()
 	}, nil
+}
+
+// Start records that a run Acquire already admitted has actually begun
+// building, as distinct from having merely claimed a concurrency slot.
+//
+// A claim can still lose the section lease and go back to Wait before the
+// builder ever runs; charging the start at Acquire counted that claim twice —
+// once for the wait that went nowhere and again for the run that later
+// carried it to completion — while a run that stayed in Wait forever spent a
+// start it never used. Start is the one point that has both facts: the slot
+// was granted, and the agent is now building. It never refuses and never
+// checks a budget; MaxPerWindow already checked what it needed to at Acquire,
+// against the started count as of that moment.
+func (m *Meter) Start(ctx context.Context, what string) {
+	m.mu.Lock()
+	if w := m.windowAt(m.now()); !w.Equal(m.windowStart) {
+		m.resetWindow(w)
+	}
+	m.started++
+	running, started := m.running, m.started
+	m.mu.Unlock()
+	m.record(ctx, "spend", what, fmt.Sprintf(`{"running":%d,"started_this_window":%d}`, running, started))
 }
 
 // Charge records what a finished run actually cost. Only the agent stream

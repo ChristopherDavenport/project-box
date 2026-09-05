@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
@@ -150,5 +151,154 @@ func TestARepositoryWithNoSectionsLeasesNothing(t *testing.T) {
 	item := e.submit(t, "plain-1", nil)
 	if item, err := e.loop.Run(context.Background(), item); err != nil || item.State != queue.StateDone {
 		t.Fatalf("run: %v %+v", err, item)
+	}
+}
+
+// TestOneStartPerRunNotPerClaim is issue #45 by name: a claim that reaches
+// leaseSections and finds its section held goes to Wait without ever
+// touching the builder, and must not be charged a start it never used. The
+// same item claimed again once the section frees runs to completion and is
+// charged exactly one — not two for having been claimed twice, and not zero
+// for having waited once.
+func TestOneStartPerRunNotPerClaim(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	meter := &capacity.Meter{Store: e.store, Tenant: tn, Actor: "runner-1", Budget: capacity.Budget{MaxConcurrent: 2}}
+	e.loop.Meter = meter
+
+	holder := hold(t, e, "api", "wi-elsewhere")
+	item := e.submit(t, "api-1", func(w *queue.WorkItem) { w.Sections = []string{"api"} })
+
+	release, err := meter.Acquire(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	item, err = e.loop.Run(ctx, item)
+	release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("want waiting on the held section, got %s: %s", item.State, item.Note)
+	}
+	if got := meter.Report().Started; got != 0 {
+		t.Fatalf("a wait must not charge a start, got %d", got)
+	}
+
+	if err := e.store.Leaser("runner-1").Release(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+
+	release, err = meter.Acquire(ctx, item.ID)
+	if err != nil {
+		t.Fatalf("second acquire, once the section frees: %v", err)
+	}
+	item, err = e.loop.Run(ctx, item)
+	release()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("want done once the section frees, got %s: %s", item.State, item.Note)
+	}
+	if got := meter.Report().Started; got != 1 {
+		t.Fatalf("want exactly one start across the wait and the run that finished it, got %d", got)
+	}
+}
+
+// TestDisjointSectionsEachChargeTheirOwnStart: two units in disjoint declared
+// sections of the same repo, run without contention, produce exactly two
+// starts — the count is additive across real runs, not shared by the repo.
+func TestDisjointSectionsEachChargeTheirOwnStart(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	meter := &capacity.Meter{Store: e.store, Tenant: tn, Actor: "runner-1", Budget: capacity.Budget{MaxConcurrent: 2}}
+	e.loop.Meter = meter
+
+	web := e.submit(t, "web-2", func(w *queue.WorkItem) { w.Sections = []string{"web"} })
+	release, err := meter.Acquire(ctx, web.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	web, err = e.loop.Run(ctx, web)
+	release()
+	if err != nil || web.State != queue.StateDone {
+		t.Fatalf("web run: %v %+v", err, web)
+	}
+
+	api := e.submit(t, "api-2", func(w *queue.WorkItem) { w.Sections = []string{"api"} })
+	release, err = meter.Acquire(ctx, api.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	api, err = e.loop.Run(ctx, api)
+	release()
+	if err != nil || api.State != queue.StateDone {
+		t.Fatalf("api run: %v %+v", err, api)
+	}
+
+	if got := meter.Report().Started; got != 2 {
+		t.Fatalf("two uncontended runs should charge two starts, got %d", got)
+	}
+}
+
+// TestARestoredMeterAgreesWithTheLiveStartCount closes the loop on Restore's
+// `case "spend": m.started++`: it was already correct, once "spend" records
+// exist only for real starts. A fresh meter over the same store, after a mix
+// of a wait-then-run and an uncontended run, must read back the same started
+// count the live meter holds in memory.
+func TestARestoredMeterAgreesWithTheLiveStartCount(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	budget := capacity.Budget{MaxConcurrent: 2, Window: time.Hour}
+	meter := &capacity.Meter{Store: e.store, Tenant: tn, Actor: "runner-1", Budget: budget}
+	e.loop.Meter = meter
+
+	holder := hold(t, e, "api", "wi-elsewhere")
+	waited := e.submit(t, "api-3", func(w *queue.WorkItem) { w.Sections = []string{"api"} })
+	release, err := meter.Acquire(ctx, waited.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waited, err = e.loop.Run(ctx, waited)
+	release()
+	if err != nil || waited.State != queue.StateWaiting {
+		t.Fatalf("expected a wait: %v %+v", err, waited)
+	}
+	if err := e.store.Leaser("runner-1").Release(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+	release, err = meter.Acquire(ctx, waited.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	waited, err = e.loop.Run(ctx, waited)
+	release()
+	if err != nil || waited.State != queue.StateDone {
+		t.Fatalf("expected the wait to complete once the section freed: %v %+v", err, waited)
+	}
+
+	web := e.submit(t, "web-3", func(w *queue.WorkItem) { w.Sections = []string{"web"} })
+	release, err = meter.Acquire(ctx, web.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	web, err = e.loop.Run(ctx, web)
+	release()
+	if err != nil || web.State != queue.StateDone {
+		t.Fatalf("expected the disjoint run to complete without contention: %v %+v", err, web)
+	}
+
+	live := meter.Report().Started
+	if live != 2 {
+		t.Fatalf("want two live starts (one wait-then-run, one uncontended), got %d", live)
+	}
+
+	fresh := &capacity.Meter{Store: e.store, Tenant: tn, Actor: "runner-1", Budget: budget}
+	if err := fresh.Restore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := fresh.Report().Started; got != live {
+		t.Fatalf("a restored meter disagreed with the live one: restored=%d live=%d", got, live)
 	}
 }

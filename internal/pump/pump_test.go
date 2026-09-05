@@ -48,6 +48,7 @@ type world struct {
 	router  *ingress.StoreRouter
 	pump    *Pump
 	q       *queue.Queue
+	meter   *capacity.Meter
 }
 
 func setup(t *testing.T, budget capacity.Budget) *world {
@@ -80,22 +81,27 @@ func setup(t *testing.T, budget capacity.Budget) *world {
 		t.Fatal(err)
 	}
 	q := &queue.Queue{Store: s, Runner: "pump-runner", TTL: time.Hour}
+	// One meter, shared by the pump (which acquires the concurrency slot at
+	// claim) and the loop (which starts it at build) — the same account, seen
+	// from both sides of the seam this issue is about.
+	meter := &capacity.Meter{Store: s, Tenant: tn, Actor: "pump-runner", Budget: budget, Now: now}
 	return &world{
-		store: s, remote: remote, q: q,
+		store: s, remote: remote, q: q, meter: meter,
 		advance: func(d time.Duration) { mu.Lock(); defer mu.Unlock(); offset += d },
 		router:  &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "pump-runner"},
 		pump: &Pump{
 			Store: s, Tenant: tn, Runner: "pump-runner", Queue: q,
 			Kinds: kind.Seeded("shop"), Decomposers: plan.Default(),
 			Plans: &plan.Store{Log: s.Log(), Actor: "pump-runner"},
-			Meter: &capacity.Meter{Store: s, Tenant: tn, Actor: "pump-runner", Budget: budget, Now: now},
+			Meter: meter,
 			Loops: map[string]*loop.Loop{"shop": {
 				Store: s, Runner: "pump-runner", Mirror: m, Repo: repo, Branch: "main",
 				Builder: fixer{}, Lane: forge.LaneOptimistic,
 				Gates: func(ws forge.Workspace) []forge.Gate {
 					return []forge.Gate{gate.Command{Label: "post-land", Dir: ws.Dir, Commands: [][]string{{"test", "-f", "ok.txt"}}}}
 				},
-				TTL: time.Hour,
+				TTL:   time.Hour,
+				Meter: meter,
 			}},
 		},
 	}
