@@ -488,10 +488,10 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		// tool_call_update. Keying on the call id rather than the shape is
 		// what keeps the count right when a dialect prefers one spelling.
 		seenCalls = map[string]bool{}
-		// callNames is the name each call was first seen by, and titled says
-		// whether a frame has yet said what that call is doing.
+		// callNames is the name each call was first seen by, and lastTitle
+		// the title its latest frame carried.
 		callNames = map[string]string{}
-		titled    = map[string]bool{}
+		lastTitle = map[string]string{}
 		// flushed is how much of res.Text has already gone out as progress. A
 		// cursor rather than a second buffer, so the live account cannot drift
 		// from the settled one.
@@ -588,6 +588,12 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		case "session/update":
 			var u sessionUpdate
 			if err := json.Unmarshal(params, &u); err != nil {
+				// A notification's error goes nowhere on the wire, and one
+				// that went nowhere on the record either is how a drift hid
+				// for two rounds. Counted where the result can show it.
+				mu.Lock()
+				res.noteUnknown("session/update:unparsed")
+				mu.Unlock()
 				return nil, err
 			}
 			if w := u.usage(); w != nil {
@@ -624,13 +630,10 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				first := !seenCalls[key]
 				seenCalls[key] = true
 				title := u.Update.Title
-				// A title that only repeats the name says nothing a watcher
-				// did not already have from the name.
-				said := title != "" && title != name
 				if first {
 					res.ToolCalls = append(res.ToolCalls, name)
 					callNames[key] = name
-					titled[key] = said
+					lastTitle[key] = title
 					// The stable name is what policy matches; the title is
 					// what the call is doing — "Read internal/api/api.go",
 					// the Bash command line — and is the half a watcher
@@ -645,14 +648,15 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 						res.Unenforced++
 						res.noteUnknown("tool_call:unnamed")
 					}
-				} else if said && !titled[key] {
-					// The adapter names a Read or a Bash before it has the
-					// path or the command line, and sends the title on the
-					// update that follows. Dropped, the timeline said "Read"
-					// and "Bash" and nothing else about the two tools that
-					// say the most. Said once: the first update that carries
-					// a title, under the name the call was first seen by.
-					titled[key] = true
+				} else if title != "" && title != lastTitle[key] {
+					// The adapter announces a call before it knows what the
+					// call is doing — "Read File", "Terminal" — and titles it
+					// properly on the update that follows, then repeats the
+					// title on the ones after. A frame for each title the
+					// call has had, once per title, under the name it was
+					// first seen by; the room folds them by call id and shows
+					// the latest.
+					lastTitle[key] = title
 					emit(Update{Kind: UpdateTool, Call: u.Update.ToolCallID, Tool: callNames[key], Text: title})
 				}
 				mu.Unlock()
@@ -669,7 +673,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				}
 			case "agent_message_chunk":
 				mu.Lock()
-				res.Text += u.Update.Content.Text
+				res.Text += u.text()
 				mu.Unlock()
 			case "usage_update":
 				mu.Lock()
@@ -1045,9 +1049,13 @@ type sessionUpdate struct {
 		SessionUpdate string `json:"sessionUpdate"`
 		ToolCallID    string `json:"toolCallId"`
 		Title         string `json:"title"`
-		Content       struct {
-			Text string `json:"text"`
-		} `json:"content"`
+		// Content is one shape on a message chunk — an object with the text
+		// — and another on a tool call: a list of what the call produced.
+		// Decoded lazily by text(), because a field typed for the first
+		// shape made the decoder refuse the second, and the handler then
+		// dropped the whole event: every titled tool call the adapter sent
+		// with content, which is most of them, and every completion.
+		Content json.RawMessage `json:"content"`
 		// Cost rides usage_update, and is the only place the agent says what
 		// a turn cost in money rather than tokens. Cumulative for the turn.
 		Cost *struct {
@@ -1068,6 +1076,21 @@ type sessionUpdate struct {
 		Meta *wireMeta `json:"_meta,omitempty"`
 	} `json:"update"`
 	Meta *wireMeta `json:"_meta,omitempty"`
+}
+
+// text is the chunk's text when content is the message-chunk object, and
+// empty for every other shape content takes.
+func (u sessionUpdate) text() string {
+	var c struct {
+		Text string `json:"text"`
+	}
+	if len(u.Update.Content) == 0 || u.Update.Content[0] != '{' {
+		return ""
+	}
+	if err := json.Unmarshal(u.Update.Content, &c); err != nil {
+		return ""
+	}
+	return c.Text
 }
 
 // rateLimit finds the account's limit report on an update, at either place

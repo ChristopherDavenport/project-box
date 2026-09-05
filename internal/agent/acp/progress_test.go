@@ -162,14 +162,16 @@ func TestNoProgressHookIsNoWork(t *testing.T) {
 	}
 }
 
-// TestATitleThatArrivesLateIsStillSaid: the adapter announces a Read or a
-// Bash before it knows the path or the command line and titles the call on
-// the update that follows. Round 6's timeline read "Read" and "Bash" with
-// nothing after them because only a call's first appearance became a frame.
-// The late title is said once, under the call's id and the name it was first
-// seen by; a title said again is not; a call titled from the first is one
-// frame; and the tally still counts each call once.
-func TestATitleThatArrivesLateIsStillSaid(t *testing.T) {
+// TestEveryTitleACallHasHadIsSaid: the adapter announces a Read or a Bash
+// under a placeholder — "Read File", "Terminal" — and titles it on the update
+// that follows, with the call's content beside it. The runtime dropped every
+// tool event whose content was a list, which is all of them but the bare
+// one, so two rounds of timelines said "Read" and "Bash" and nothing after.
+// Each title a call has had is a frame, once per title, under the call's id
+// and the name it was first seen by; a repeated title is not; the tally
+// still counts each call once; a chunk's text still lands; and nothing went
+// unparsed.
+func TestEveryTitleACallHasHadIsSaid(t *testing.T) {
 	got, res := collect(t, "latetitle")
 	var tools []Update
 	for _, u := range got {
@@ -178,14 +180,21 @@ func TestATitleThatArrivesLateIsStillSaid(t *testing.T) {
 		}
 	}
 	want := []Update{
-		{Kind: UpdateTool, Call: "t-1", Tool: "Read"},
-		{Kind: UpdateTool, Call: "t-1", Tool: "Read", Text: "Read main.go"},
-		{Kind: UpdateTool, Call: "t-2", Tool: "Edit", Text: "Edit main.go"},
+		{Kind: UpdateTool, Call: "t-1", Tool: "Read", Text: "Read File"},
+		{Kind: UpdateTool, Call: "t-1", Tool: "Read", Text: "Read README.md"},
+		{Kind: UpdateTool, Call: "t-2", Tool: "Bash", Text: "Terminal"},
+		{Kind: UpdateTool, Call: "t-2", Tool: "Bash", Text: "ls hack"},
 	}
 	if !slices.Equal(tools, want) {
 		t.Fatalf("tool frames = %+v\nwant %+v", tools, want)
 	}
-	if !slices.Equal(res.ToolCalls, []string{"Read", "Edit"}) {
+	if !slices.Equal(res.ToolCalls, []string{"Read", "Bash"}) {
 		t.Fatalf("tool calls tallied = %v, want each call once", res.ToolCalls)
+	}
+	if res.Text != "DONE" {
+		t.Fatalf("text = %q, want the chunk's text", res.Text)
+	}
+	if len(res.UnknownUpdates) != 0 {
+		t.Fatalf("unknown updates = %v, want none: every shape here is the dialect", res.UnknownUpdates)
 	}
 }
