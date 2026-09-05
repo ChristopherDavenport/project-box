@@ -244,6 +244,11 @@ type Delivery struct {
 	// Payload is the source's own representation, retained so a wrongly routed
 	// event can be diagnosed against what actually arrived.
 	Payload []byte
+	// Title is what a human reads in the control room, when the source
+	// supplied one — an issue's title, an alert's summary line. Optional:
+	// empty leaves [Ingress.Title] empty, and a reader falls back to the
+	// task text the same way it always has.
+	Title string
 	// Depth is set only by the factory reopening its own work; see
 	// [Ingress.Depth]. An external delivery leaves it zero.
 	Depth int

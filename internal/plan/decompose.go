@@ -162,7 +162,7 @@ func (Identity) Replayable() bool { return true }
 
 // Decompose emits the ingress as one unit of work.
 func (Identity) Decompose(_ context.Context, ing ingress.Ingress, _ kind.Declaration) (Result, error) {
-	return Result{Nodes: []Node{{ID: IdentityNode, Task: TaskOf(ing), Repo: ing.Repo}}}, nil
+	return Result{Nodes: []Node{{ID: IdentityNode, Task: TaskOf(ing), Repo: ing.Repo, Summary: ing.Title}}}, nil
 }
 
 // TaskOf is what an origination asks for in one line, falling back through the
