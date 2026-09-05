@@ -30,8 +30,10 @@ import (
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/pump"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/seat"
@@ -69,6 +71,7 @@ func run() error {
 	buildCmd := flag.String("build", "", "builder command run in the workspace (commits its own change)")
 	agentBin := flag.String("agent", "", "ACP agent binary (e.g. claude-agent-acp); overrides -build with a real agent")
 	seatName := flag.String("seat", "mason", "seat identity for the agent's continuity")
+	model := flag.String("model", "", "model the agent runs, by the value it lists; empty = the agent's own default")
 	checkCmd := flag.String("check", "go test ./...", "gate/check command")
 	otlp := flag.String("otlp", "", "collector endpoint (host:port); empty = telemetry off")
 	listen := flag.String("listen", "unix:boxd.sock", "the daemon's unix socket (network exposure is boxgate's job)")
@@ -126,6 +129,7 @@ func run() error {
 				Source:       agent.Source{Kind: agent.SourceInline, Digest: "boxd-default-role"},
 				Instructions: "You are a build agent in an automated factory. Make the requested change precisely and minimally.",
 				Tools:        agent.ToolPolicy{PermissionMode: "acceptEdits"},
+				Model:        *model,
 			}}},
 			Seat:   &seat.Seat{Name: *seatName, Base: &knowledge.Base{Store: s, Tenant: t}},
 			Mirror: m,
@@ -139,6 +143,12 @@ func run() error {
 	q := &queue.Queue{Store: s, Runner: *runner, TTL: 30 * time.Minute}
 	p := &pump.Pump{
 		Store: s, Tenant: t, Runner: *runner, Queue: q,
+		// The flag-configured bootstrap takes the shipped declarations under
+		// an empty ceiling: the whole loop, and no authority anywhere, because
+		// there is no reviewed file here for a capability grant to live in.
+		// box.yaml is where a box declares its own — see internal/boxcfg.
+		Kinds: kind.Seeded(*box), Decomposers: plan.Default(),
+		Plans: &plan.Store{Log: s.Log(), Actor: *runner},
 		Meter: meter,
 		Loops: map[string]*loop.Loop{*box: {
 			Store: s, Runner: *runner, Mirror: m, Repo: repo, Branch: *branch,
@@ -153,7 +163,7 @@ func run() error {
 	}
 
 	routes := map[string]ingress.Route{
-		"issues": {Name: "issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue,
+		"issues": {Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue,
 			Box: *box, Requester: *runner},
 	}
 	apiSrv := &api.Server{

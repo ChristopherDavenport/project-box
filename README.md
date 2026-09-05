@@ -69,10 +69,22 @@ boxes:
   - name: shop
     agent: /path/to/claude-agent-acp   # or per-repo `build:` commands
     seat: mason
+    model: sonnet                      # by the value the agent lists; empty = its default
+    roles:
+      planner: {model: opus[1m]}       # a role's tier wins over the box's for that role
+    kinds:
+      - name: issue
+        decompose: {decomposer: planner}   # judge every issue into units first
+        completion: {graph: true}
     repos:
       - name: api
         remote: git@github.com:you/api.git
         check: go test ./...
+        sections:                      # where work is expressed; see below
+          - name: handlers
+            purpose: the HTTP surface
+            paths: [internal/http]
+            check: go test ./internal/http/...
 ```
 
 `confine:` puts the agent in a container whose filesystem is the three
@@ -109,15 +121,69 @@ precondition for a budget, not a feature of one, and a budget that reads
 unknown as zero is not a budget. `allow_unmetered: true` proceeds blind, and
 the saying so is on the record.
 
+`window_reserve` is the brake in the currency that actually binds on a
+subscription: every run reports the account's own window — status, which
+window, utilization, reset time — and above this share the meter refuses new
+starts until it resets, so the factory yields to the human on the same
+account instead of finishing their window. It reads the last report, so it
+binds only as tightly as runs report. `hack/dogfood/window.py` asks the
+harness the same question for a few hundred tokens, before a round starts.
+
 `build_timeout` bounds one build (default 30m; a negative duration means no
 bound). Nothing else does: the lease TTL is renewed while a run holds it, so
 without this an agent that hangs runs until the daemon stops.
+
+## Where work is expressed
+
+A repository's `sections:` are its named regions — paths, a purpose the
+planner reads, the check a builder runs while iterating there, and optionally
+a tier. They are a property of the software, not a person or a role. A unit
+of work names the sections its paths fall in: two units in disjoint sections
+run at once, two in the same section take turns, and a unit that names none
+is the whole repository and waits for every section. The loop holds a
+section as a lease before it builds, so fan-out is safe by construction
+rather than by hoping two agents' edits rebase cleanly; a conflicting replay
+is rebuilt by an agent, and the lease spends a tick to save a session. A
+repository that declares no sections has one region, itself, exactly as
+before.
+
+`roles:` sets a tier per role — what the planner judges on, what the builder
+expresses on — winning over the box's `model:` for that role's runs. A
+section's tier wins over the role's, and a plan node's over the section's:
+the cheapest model the unit's difficulty allows, chosen as close to the unit
+as anyone was willing to say.
+
+A kind declared with `decompose: {decomposer: planner}` is judged into units
+before it is work: an agent under the planner role reads a read-only tree at
+the branch head, is shown the sections, and answers with a graph — each unit's
+task, sections, dependencies and tier. The plan is recorded on the
+origination's chain with the model that judged, the units become items that
+carry where and on what, and the planner's handoff notes wake its next plan
+from its own seat. It is not a coordinator: one run, one agentref, one record,
+and it is opt-in per kind because a judgement on the default intake path would
+put an agent on the critical path of admitting work. A planner that fails
+parks the origination itself in the exception queue — there is no item yet —
+and `retry` and `resolve` reach it from the room like any item.
 
 ## What the builders load
 
 A box's `harness:` block is its agentic surface — plugins, skills, MCP — and
 all of it is resolved into the bundle before the agent starts, so the
 `agentref` answers "what could this agent do" as well as "what was it told".
+
+`model:` and `session:` are the session the builders run, in the protocol's
+own terms: the model by the value the agent lists for its model option, and
+every other option — effort, a fast mode, a sub-agent — by the id the agent
+gives it. Both are applied through `session/set_config_option` once the
+session opens and asserted back from the agent's answer; a value the agent
+does not list, or answers with something else, fails the run before a prompt
+is sent. Left empty, the agent's own default runs — for claude-agent-acp,
+whatever the machine's settings say, which is a choice nobody made. Either
+way the `agent-session` record on the item's chain says what the agent
+answered: the model in force, the mode, every option with the values it
+offered, and every command (skills among them) it made available. The
+`agent-run` record says what was asked, as a digest; this says what was
+delivered, in the clear.
 
 ```yaml
     harness:
@@ -192,13 +258,18 @@ which is gitignored; the harness is not.
 
 ## Web control room
 
-`web/` (Lit + @lit-labs/router + Jack Henry Design System). `dist/` is
-committed and embedded into boxd — CI stays a Go toolchain. Rebuild after
-changing `web/src/`:
+`web/` (Lit + @lit-labs/router + Jack Henry Design System). The bundle is
+generated, not committed, and go:embed reads it at build time — so building
+the daemon needs node once, up front, and a tree that has not generated does
+not compile:
 
 ```sh
-cd web && npm install && npm run build
+go generate ./web          # npm ci + esbuild → web/dist (gitignored)
+go build ./cmd/boxd
 ```
+
+`hack/check.sh` is the check CI and the factory's own gate both run: generate,
+build, test.
 
 The room is themed with jh-core's tokens: the light set lives on `:root`, the
 dark set on a `.jh-theme-dark` class that `index.html` puts on `<html>` before

@@ -317,6 +317,26 @@ func fakeAgent(scenario string) {
 	}
 	mode := ""
 	var sessionID string
+	// The session configuration the fake exposes, shaped like the real
+	// adapter's: a model option tagged with the protocol's model category
+	// (one plain value and one group, so flattening is exercised), an
+	// effort option, and a boolean. Defaults stand in for "whatever the
+	// machine says".
+	model, effort, fast := "opus", "high", false
+	configOptions := func() []map[string]any {
+		return []map[string]any{
+			{"id": "mode", "name": "Mode", "category": "mode", "type": "select", "currentValue": mode,
+				"options": []map[string]any{{"value": "default", "name": "Default"}, {"value": "acceptEdits", "name": "Accept edits"}}},
+			{"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
+				"options": []map[string]any{
+					{"value": "opus", "name": "Opus"},
+					{"group": "small", "name": "Small", "options": []map[string]any{{"value": "sonnet", "name": "Sonnet"}, {"value": "haiku", "name": "Haiku"}}},
+				}},
+			{"id": "effort", "name": "Effort", "category": "thought_level", "type": "select", "currentValue": effort,
+				"options": []map[string]any{{"value": "low", "name": "Low"}, {"value": "high", "name": "High"}}},
+			{"id": "fast_mode", "name": "Fast mode", "type": "boolean", "currentValue": fast},
+		}
+	}
 	// newMeta is what session/new carried, kept so a scenario can hand it
 	// back. The harness surface is delivered in that one call and nowhere
 	// else, so echoing it is the only way to assert from outside that what
@@ -339,12 +359,51 @@ func fakeAgent(scenario string) {
 					newMeta = string(b)
 				}
 			}
-			f.write(map[string]any{"id": id, "result": map[string]any{"sessionId": sessionID}})
+			result := map[string]any{"sessionId": sessionID}
+			if scenario != "nooptions" {
+				result["modes"] = map[string]any{"currentModeId": "default",
+					"availableModes": []map[string]any{{"id": "default", "name": "Default"}, {"id": "acceptEdits", "name": "Accept edits"}}}
+				result["configOptions"] = configOptions()
+			}
+			f.write(map[string]any{"id": id, "result": result})
+			// What the real adapter does the instant a session exists: list
+			// the commands — the plugin skills the bundle granted among them.
+			f.notify("session/update", map[string]any{"sessionId": sessionID,
+				"update": map[string]any{"sessionUpdate": "available_commands_update",
+					"availableCommands": []map[string]any{
+						{"name": "box-skills:go", "description": "Idiomatic Go"},
+						{"name": "box-skills:sqlite", "description": "SQLite best practices"},
+					}}})
 		case "session/set_mode":
 			if p, ok := m["params"].(map[string]any); ok {
 				mode, _ = p["modeId"].(string)
 			}
 			f.write(map[string]any{"id": id, "result": map[string]any{}})
+			f.notify("session/update", map[string]any{"sessionId": sessionID,
+				"update": map[string]any{"sessionUpdate": "current_mode_update", "currentModeId": mode}})
+		case "session/set_config_option":
+			p, _ := m["params"].(map[string]any)
+			configID, _ := p["configId"].(string)
+			switch {
+			case scenario == "stubborn":
+				// The real adapter's refusal: a JSON-RPC error naming the value.
+				f.write(map[string]any{"id": id, "error": map[string]any{"code": -32602,
+					"message": fmt.Sprintf("Invalid value for config option %s: %v", configID, p["value"])}})
+				continue
+			case scenario == "substitute" && configID == "model":
+				// Says yes, does its own thing: the answer is a model that
+				// was not asked for, which the runtime must catch.
+				model = "opus"
+			case configID == "model":
+				model, _ = p["value"].(string)
+			case configID == "effort":
+				effort, _ = p["value"].(string)
+			case configID == "fast_mode":
+				fast, _ = p["value"].(bool)
+			case configID == "mode":
+				mode, _ = p["value"].(string)
+			}
+			f.write(map[string]any{"id": id, "result": map[string]any{"configOptions": configOptions()}})
 		case "session/prompt":
 			var report string
 			switch scenario {
@@ -483,6 +542,48 @@ func fakeAgent(scenario string) {
 					"stopReason": "end_turn",
 					"usage":      map[string]any{"inputTokens": 10, "outputTokens": 5},
 				}})
+			case "session":
+				// Reports the session as it stands, so a test can assert that
+				// what was set is what is in force — and the protocol's
+				// account of context and the account's limit, as the real
+				// adapter sends them on usage_update.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "usage_update", "used": 12000, "size": 200000}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "usage_update", "used": 34000, "size": 200000,
+						"_meta": map[string]any{"_claude/rateLimit": map[string]any{
+							"status": "allowed_warning", "rateLimitType": "five_hour",
+							"utilization": 0.82, "resetsAt": 1788491400}}}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text",
+							"text": fmt.Sprintf("model:%s effort:%s fast:%v mode:%s", model, effort, fast, mode)}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn",
+					"usage": map[string]any{"inputTokens": 10, "outputTokens": 5}}})
+			case "planner", "planner-bad", "planner-noplan":
+				// A plan in the planner's own answer shape, with prose around
+				// it and a brace inside a task, the way an agent actually
+				// replies. "planner-bad" names a section the repository does
+				// not declare; "planner-noplan" never gets to the JSON.
+				section := "api"
+				if scenario == "planner-bad" {
+					section = "db"
+				}
+				answer := "Read the tree. Two units, the view after the endpoint.\n\n```json\n" +
+					`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets in internal/api (returns {\"widgets\":[]})","sections":["` + section + `"],"depends_on":[],"model":"haiku"},` +
+					`{"id":"room-view","task":"Render widgets in web/src","sections":["web"],"depends_on":["api-endpoint"]}],"why":"the view needs the endpoint"}` +
+					"\n```\nHANDOFF: widgets live under internal/api\n"
+				if scenario == "planner-noplan" {
+					answer = "I looked around and it all seems fine to me."
+				}
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": answer}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn",
+					"usage": map[string]any{"inputTokens": 900, "outputTokens": 120}}})
+			case "planner-escalate":
+				f.request("_box/escalate", map[string]any{"reason": "this origination is a question, not a change"})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "metered":
 				// The real dialect, copied from claude-agent-acp's
 				// sessionUsage() and turnOutcome(): usage on the prompt

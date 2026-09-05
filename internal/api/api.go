@@ -33,6 +33,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -54,6 +55,9 @@ type Server struct {
 	Routes map[string]ingress.Route
 	Router *ingress.StoreRouter
 	Queue  *queue.Queue
+	// Plans, when set, lets retry and resolve reach an origination whose
+	// planning failed — the one exception that exists before any item does.
+	Plans *plan.Store
 	// Meter, when set, puts the capacity window's account on /v1/status —
 	// what the factory has spent, and how much of that it could not measure.
 	// A cost brake nobody can read is a brake nobody trusts.
@@ -392,17 +396,43 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) { s.control(w, r
 // may START work, but an exception is by definition work the pump has already
 // given up on, and asking it to also be the path back would mean an operator
 // could not clear a queue the pump had stopped draining.
-func (s *Server) resolve(w http.ResponseWriter, r *http.Request) { s.reopen(w, r, s.Queue.Resolve) }
-func (s *Server) retry(w http.ResponseWriter, r *http.Request)   { s.reopen(w, r, s.Queue.Retry) }
+func (s *Server) resolve(w http.ResponseWriter, r *http.Request) {
+	s.reopen(w, r, s.Queue.Resolve, queue.StateDone, func(ctx context.Context, id, actor, note string) error {
+		return s.Plans.Resolve(ctx, s.Tenant, id, actor, note)
+	})
+}
 
+func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
+	s.reopen(w, r, s.Queue.Retry, queue.StatePending, func(ctx context.Context, id, actor, note string) error {
+		return s.Plans.Retry(ctx, s.Tenant, id, actor, note)
+	})
+}
+
+// reopen applies one of the two verbs off the exception queue. An origination
+// whose planning failed is on that queue before any item exists, so the same
+// verb reaches it through the plan store and answers in the item's shape.
 func (s *Server) reopen(w http.ResponseWriter, r *http.Request,
-	f func(context.Context, tenant.ID, string, string, string) (queue.WorkItem, error)) {
+	f func(context.Context, tenant.ID, string, string, string) (queue.WorkItem, error),
+	planned queue.State, g func(context.Context, string, string, string) error) {
 	var req ControlRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpErr(w, http.StatusBadRequest, "a JSON body with a reason is required")
 		return
 	}
-	item, err := f(r.Context(), s.Tenant, r.PathValue("id"), s.actor(r), req.Reason)
+	id := r.PathValue("id")
+	if ingress.IsID(id) {
+		if s.Plans == nil {
+			httpErr(w, http.StatusNotFound, "no plan store: "+id+" cannot be reopened here")
+			return
+		}
+		if err := g(r.Context(), id, s.actor(r), req.Reason); err != nil {
+			httpErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeJSON(w, queue.WorkItem{ID: id, Tenant: s.Tenant, Ingress: id, State: planned, Note: req.Reason})
+		return
+	}
+	item, err := f(r.Context(), s.Tenant, id, s.actor(r), req.Reason)
 	switch {
 	case errors.Is(err, queue.ErrNoItem):
 		httpErr(w, http.StatusNotFound, err.Error())

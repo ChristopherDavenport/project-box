@@ -52,6 +52,54 @@ type Repo struct {
 	Role   Role
 	// DefaultBranch is the integration branch changes land on.
 	DefaultBranch string
+	// Sections are the named regions of this repository — the unit a piece
+	// of work expresses itself in, and the unit two pieces of work are held
+	// apart by. Empty means the repository has one region: itself.
+	Sections []Section
+}
+
+// Section is a named region of a repository.
+//
+// It is a property of the software, not a person and not a role: declared
+// once per repository, it is what a plan's node names, what a run leases
+// before it builds, and what its builder is told to stay within. Two units in
+// disjoint sections run at once; two in the same section take turns; a unit
+// that names none is the whole repository and waits for all of them.
+type Section struct {
+	// Name is a plain token, unique within the repository.
+	Name string
+	// Purpose is one line for whoever plans: what lives here.
+	Purpose string
+	// Paths are repository-relative prefixes the section covers.
+	Paths []string
+	// Check is what a builder runs while iterating inside the section —
+	// narrower and faster than the repository's gate, which still runs whole
+	// at landing. Empty means the builder uses the repository's own.
+	Check string
+	// Model and Session are the tier this section's work runs on by default;
+	// empty inherits the role's, then the box's. Agent-plane values carried
+	// as data: the forge does not interpret them.
+	Model   string
+	Session map[string]string
+}
+
+// Section answers a section by name.
+func (r Repo) Section(name string) (Section, bool) {
+	for _, s := range r.Sections {
+		if s.Name == name {
+			return s, true
+		}
+	}
+	return Section{}, false
+}
+
+// SectionNames lists the declared sections in declaration order.
+func (r Repo) SectionNames() []string {
+	out := make([]string, 0, len(r.Sections))
+	for _, s := range r.Sections {
+		out = append(out, s.Name)
+	}
+	return out
 }
 
 // Commit is a resolved 40-character object ID. Refs are resolved to commits at

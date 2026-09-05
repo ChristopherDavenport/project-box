@@ -166,3 +166,68 @@ boxes:
 		t.Fatalf("window = %v", c.WindowDuration())
 	}
 }
+
+// TestModelAndSessionLoad: the box names the model by the value the agent
+// lists, and the rest of the session by option id.
+func TestModelAndSessionLoad(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    model: sonnet
+    session:
+      effort: medium
+      fast_mode: "true"
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	bx := c.Boxes[0]
+	if bx.Model != "sonnet" || bx.Session["effort"] != "medium" || bx.Session["fast_mode"] != "true" {
+		t.Fatalf("model=%q session=%v", bx.Model, bx.Session)
+	}
+}
+
+// TestSessionRefusesTheSpellingsThatHaveFields. Two ways to say the model
+// would be two places for the record to disagree with itself; the permission
+// mode is the tool policy's and travels through session/set_mode, never as an
+// option. Both are refused at load with the field they wanted.
+func TestSessionRefusesTheSpellingsThatHaveFields(t *testing.T) {
+	for _, tc := range []struct{ key, want string }{
+		{"model", "model has its own field"},
+		{"mode", "permission mode"},
+	} {
+		_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    session:
+      `+tc.key+`: x
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("session.%s: err = %v, want %q", tc.key, err, tc.want)
+		}
+	}
+	// And a session with no agent has nothing to configure.
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    model: sonnet
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: make
+`))
+	if err == nil || !strings.Contains(err.Error(), "no agent") {
+		t.Errorf("model without an agent: err = %v", err)
+	}
+}

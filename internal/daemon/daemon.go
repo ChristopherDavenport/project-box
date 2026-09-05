@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -32,14 +33,18 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/harness"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/pump"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/seat"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 	"github.com/ChristopherDavenport/project-box/web"
+
+	"gopkg.in/yaml.v3"
 )
 
 // SpendOf carries an agent's usage across the seam to the meter, whole.
@@ -51,12 +56,17 @@ import (
 // line before the only thing that could have used them, and left a charge
 // record no later reader could re-price.
 func SpendOf(u acp.Usage) capacity.Spend {
-	return capacity.Spend{
+	s := capacity.Spend{
 		Input: u.InputTokens, Output: u.OutputTokens,
 		CacheRead: u.CachedReadTokens, CacheWrite: u.CachedWriteTokens,
 		Total: u.Tokens, CostMicros: capacity.Micros(u.CostUSD),
 		Reported: u.Reported,
 	}
+	if u.RateLimit != nil {
+		s.Limit = &capacity.Limit{Status: u.RateLimit.Status, Window: u.RateLimit.Window,
+			Utilization: u.RateLimit.Utilization, ResetsAt: u.RateLimit.ResetsAt}
+	}
+	return s
 }
 
 // ShellBuilder runs a configured command in the workspace — the stand-in for
@@ -98,6 +108,12 @@ type Daemon struct {
 	live      *control.Live
 	compactor *evidence.Compactor
 	API       *api.Server
+	// planners is the judgement decomposer, registered once and filled per
+	// box at every assemble — a box with an agent has a planner, a box
+	// without one has none, and a declaration asking for one there is
+	// refused at load.
+	planners *acp.Planners
+	plans    *plan.Store
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -122,12 +138,23 @@ func New(path string) (*Daemon, error) {
 	}
 	d := &Daemon{
 		ConfigPath: path, store: s, tenant: t, mirror: m,
-		queue: &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
-		meter: &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
-		live:  &control.Live{},
-		cfg:   cfg, every: cfg.EveryDuration(),
+		queue:    &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
+		meter:    &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
+		live:     &control.Live{},
+		planners: &acp.Planners{},
+		plans:    &plan.Store{Log: s.Log(), Actor: cfg.Runner},
+		cfg:      cfg, every: cfg.EveryDuration(),
 	}
-	loops, routes, err := d.assemble(context.Background(), cfg)
+	// The deterministic, agent-free set, plus the one judgement this daemon
+	// can offer. Registering it here does not put an agent on the intake
+	// path: nothing runs it until a kind declaration names it, and a box
+	// that names it without an agent is refused at assemble.
+	decomposers := plan.Default()
+	if err := decomposers.Register(d.planners); err != nil {
+		s.Close()
+		return nil, err
+	}
+	loops, routes, kinds, err := d.assemble(context.Background(), cfg)
 	if err != nil {
 		s.Close()
 		return nil, err
@@ -136,7 +163,8 @@ func New(path string) (*Daemon, error) {
 		MaxPerWindow:       cfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   cfg.MaxCostMicros(),
-		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration()})
+		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration(),
+		WindowReserve: cfg.Budget.WindowReserve})
 	// The window's account outlives the process that spent it. Without this a
 	// restart is a fresh budget, so the brake is only ever as strong as the
 	// daemon's uptime.
@@ -144,7 +172,11 @@ func New(path string) (*Daemon, error) {
 		s.Close()
 		return nil, fmt.Errorf("daemon: restoring the capacity window: %w", err)
 	}
-	d.pump = &pump.Pump{Store: s, Tenant: t, Runner: cfg.Runner, Queue: d.queue, Meter: d.meter, Loops: loops}
+	d.pump = &pump.Pump{Store: s, Tenant: t, Runner: cfg.Runner, Queue: d.queue, Meter: d.meter, Loops: loops,
+		Kinds:       kinds,
+		Decomposers: decomposers,
+		Plans:       d.plans,
+	}
 	// The exception queue ages whether or not anybody is looking, so the
 	// sweep is what makes "nobody is looking" audible. The log is the weakest
 	// sink there is and the only one that needs no configuration; a real
@@ -152,6 +184,7 @@ func New(path string) (*Daemon, error) {
 	d.escalator = &control.Escalator{
 		Room:   &control.Room{Store: s, Tenant: t, Actor: cfg.Runner},
 		Notify: control.NotifierFunc(control.LogNotice),
+		Kinds:  kinds,
 	}
 	// Compaction is a standing chore beside the prune and the escalation
 	// sweep, and it is imperative Go for the reason those are: a compactor
@@ -170,6 +203,7 @@ func New(path string) (*Daemon, error) {
 		Store: s, Tenant: t, Routes: routes,
 		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner},
 		Queue:  d.queue, Meter: d.meter, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
+		Plans:   d.plans,
 		Live:    d.live,
 		Started: time.Now(),
 		Reload:  d.reloadForAPI,
@@ -183,12 +217,28 @@ func New(path string) (*Daemon, error) {
 // Close releases the daemon's resources.
 func (d *Daemon) Close() error { return d.store.Close() }
 
-// assemble builds the executor and route tables from a config — used at New
-// and again at every Reload.
-func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*loop.Loop, map[string]ingress.Route, error) {
+// assemble builds the executor, route and declaration tables from a config —
+// used at New and again at every Reload.
+func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*loop.Loop, map[string]ingress.Route, kind.Sets, error) {
 	loops := map[string]*loop.Loop{}
 	routes := map[string]ingress.Route{}
+	kinds := kind.Sets{}
 	for _, bx := range cfg.Boxes {
+		set, err := d.declarations(ctx, bx)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		kinds[bx.Name] = set
+		if len(bx.Agent) == 0 {
+			// A declaration asking for judgement in a box with nobody to
+			// judge would fail every origination it admitted, one exception
+			// at a time. Refused here, where the operator can see it coming.
+			for _, name := range set.Names() {
+				if decl, err := set.Lookup(name); err == nil && decl.Decomposer() == acp.PlannerName {
+					return nil, nil, nil, fmt.Errorf("daemon: box %s kind %s names the planner decomposer and the box has no agent — a build command cannot judge", bx.Name, name)
+				}
+			}
+		}
 		var agentBuilder *acp.Builder
 		if len(bx.Agent) > 0 {
 			agentBuilder = &acp.Builder{
@@ -208,6 +258,8 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					Skills:    skillRefs(bx.Harness.Skills),
 					MCP:       mcpRefs(bx.Harness.MCP),
 					Resolver:  d.mirror,
+					Model:     bx.Model,
+					Session:   bx.Session,
 				}},
 				Seat:            &seat.Seat{Name: bx.Seat, Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
 				Mirror:          d.mirror,
@@ -225,12 +277,19 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 						Kind: string(u.Kind), Tool: u.Tool, Text: u.Text, Reason: u.Reason,
 					})
 				},
+				// The kind declaration reaching the agent plane, which is the
+				// seat #17 built and could not fill. Per run, because the
+				// envelope belongs to the origination and one builder serves a
+				// whole box.
+				EnvelopeFor: d.envelopeFor(set),
 			}
 		}
+		var repos []forge.Repo
 		for _, r := range bx.Repos {
-			repo := forge.Repo{Name: r.Name, Remote: r.Remote, Role: forge.Role(r.Role), DefaultBranch: r.Branch}
+			repo := r.ForgeRepo()
+			repos = append(repos, repo)
 			if err := d.mirror.Fetch(ctx, repo); err != nil {
-				return nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
+				return nil, nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
 			}
 			check := r.Check
 			lp := &loop.Loop{
@@ -250,12 +309,110 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			}
 			loops[bx.Name+"/"+r.Name] = lp
 			routes[r.Route] = ingress.Route{
-				Name: r.Route, Kind: ingress.RouteIssue, Opens: ingress.KindIssue,
+				Name: r.Route, Kind: ingress.RouteIssue, Opens: kind.SeedIssue,
 				Box: bx.Name, Repo: r.Name, Requester: cfg.Runner,
 			}
 		}
+		if agentBuilder == nil {
+			d.planners.Delete(bx.Name)
+			continue
+		}
+		// The builder describes the sections the loop leases; both read the
+		// same repository definition. And the planner: the same agent, the
+		// same harness source under the planner role, its own seat for
+		// continuity, its own read-only trees, the same meter.
+		agentBuilder.Repos = repos
+		d.planners.Set(bx.Name, &acp.Planner{
+			Store: d.store, Tenant: d.tenant, Box: bx.Name,
+			Command: bx.Agent, MaxTokens: cfg.Budget.MaxTokensPerRun,
+			Composer: agentBuilder.Composer,
+			Seat:     &seat.Seat{Name: bx.Seat + "-planner", Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
+			Mirror:   d.mirror, Repos: repos,
+			Root:            filepath.Join(cfg.Root, "plans"),
+			InheritSettings: bx.Harness.Plugins == boxcfg.PluginsInherit,
+			Spend: func(ctx context.Context, run string, u acp.Usage) {
+				d.meter.Charge(ctx, run, SpendOf(u))
+			},
+		})
 	}
-	return loops, routes, nil
+	return loops, routes, kinds, nil
+}
+
+// declarations resolves one box's kind declarations: the seeds, then the
+// box's own on top of them, then the whole set validated against the box's
+// ceiling.
+//
+// A box declaration REPLACES a seed of the same name whole rather than merging
+// with it. Merging would be how a default quietly becomes a standard nobody
+// chose — a field the operator never wrote going on granting whatever the seed
+// granted, with the diff showing nothing.
+func (d *Daemon) declarations(ctx context.Context, bx boxcfg.Box) (*kind.Set, error) {
+	decls := kind.Seeds()
+	for _, k := range bx.Kinds {
+		decl, err := d.declaration(ctx, bx, k)
+		if err != nil {
+			return nil, err
+		}
+		decls = append(decls, decl)
+	}
+	set, err := kind.NewSet(bx.Capabilities, decls...)
+	if err != nil {
+		return nil, fmt.Errorf("daemon: box %s: %w", bx.Name, err)
+	}
+	return set, nil
+}
+
+// declaration resolves one configured kind, inline or pinned.
+func (d *Daemon) declaration(ctx context.Context, bx boxcfg.Box, k boxcfg.Kind) (kind.Declaration, error) {
+	if k.Ref == nil {
+		return k.Declaration(k.InlineSource(d.ConfigPath))
+	}
+	body, oid, err := d.mirror.ReadPinned(ctx, k.Ref.Repo, k.Ref.Commit, k.Ref.Path)
+	if err != nil {
+		return kind.Declaration{}, fmt.Errorf("daemon: box %s kind %s: %w", bx.Name, k.Name, err)
+	}
+	var pinned boxcfg.Kind
+	if err := yaml.Unmarshal(body, &pinned); err != nil {
+		return kind.Declaration{}, fmt.Errorf("daemon: box %s kind %s: %s at %s: %w", bx.Name, k.Name, k.Ref.Path, k.Ref.Commit, err)
+	}
+	if pinned.Ref != nil {
+		return kind.Declaration{}, fmt.Errorf("daemon: box %s kind %s: the pinned declaration is itself a ref — a chain of pins is a pin whose content nobody reviewed at the end of it", bx.Name, k.Name)
+	}
+	// The NAME comes from box.yaml, not from the pinned file. Which kind a
+	// declaration answers to is the operator's routing decision and belongs in
+	// the file the operator controls; letting the remote choose it would mean
+	// a commit in someone else's repository could silently take over "issue".
+	pinned.Name = k.Name
+	return pinned.Declaration(agent.Source{
+		Kind: agent.SourceGit, Repo: k.Ref.Repo, Commit: k.Ref.Commit,
+		Path: k.Ref.Path, Digest: oid,
+	})
+}
+
+// envelopeFor resolves a run's declared data envelope through its work item's
+// kind.
+//
+// An item with no kind resolves to no envelope rather than to an error. Items
+// submitted before there was a decomposition stage carry none, and refusing
+// them would stop a running factory on a field they could not have had — while
+// a box that has turned classification ON still refuses them, because the
+// composer's ceiling meets an undeclared envelope and says so. The permissive
+// case stays exactly as permissive as it was; the strict case stays strict.
+func (d *Daemon) envelopeFor(set *kind.Set) func(context.Context, string) (*agent.Envelope, error) {
+	return func(ctx context.Context, run string) (*agent.Envelope, error) {
+		item, err := d.queue.Load(ctx, d.tenant, run)
+		if err != nil {
+			return nil, err
+		}
+		if item.Kind == "" {
+			return nil, nil
+		}
+		decl, err := set.Lookup(item.Kind)
+		if err != nil {
+			return nil, err
+		}
+		return decl.Envelope, nil
+	}
 }
 
 // skillRefs turns configured pins into unresolved refs. Resolution — the
@@ -300,18 +457,21 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 			return "", fmt.Errorf("daemon: %s is the daemon's identity, not its configuration — changing it (%q -> %q) needs a restart; reload refused, old config still running", f.name, f.was, f.now)
 		}
 	}
-	loops, routes, err := d.assemble(ctx, ncfg)
+	loops, routes, kinds, err := d.assemble(ctx, ncfg)
 	if err != nil {
 		return "", fmt.Errorf("daemon: reload refused, old config still running: %w", err)
 	}
 
 	d.pump.SetLoops(loops)
+	d.pump.SetKinds(kinds)
+	d.escalator.Kinds = kinds
 	d.API.SetRoutes(routes)
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
 		MaxPerWindow:       ncfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   ncfg.MaxCostMicros(),
-		AllowUnmetered:     ncfg.Budget.AllowUnmetered, Window: ncfg.WindowDuration()})
+		AllowUnmetered:     ncfg.Budget.AllowUnmetered, Window: ncfg.WindowDuration(),
+		WindowReserve: ncfg.Budget.WindowReserve})
 	d.mu.Lock()
 	d.cfg = ncfg
 	d.every = ncfg.EveryDuration()

@@ -24,6 +24,8 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -125,6 +127,20 @@ func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
 			continue
 		}
 		seen[rec.Subject] = true
+		if ingress.IsID(rec.Subject) {
+			// An origination whose judgement failed before it had any item.
+			// Listed like an item — same columns, same verbs — because to
+			// the person it needs it IS one: work that stopped, with a
+			// reason, waiting on them.
+			ex, failed, err := r.failedPlan(ctx, rec.Subject, now, objective, told)
+			if err != nil {
+				return nil, err
+			}
+			if failed {
+				out = append(out, ex)
+			}
+			continue
+		}
 		item, parked, err := r.parked(ctx, rec.Subject)
 		if err != nil {
 			return nil, err
@@ -240,6 +256,19 @@ type QueueEntry struct {
 	Ingress string `json:"ingress,omitempty"`
 	Route   string `json:"route,omitempty"`
 	Key     string `json:"key,omitempty"`
+	// Kind is the declaration this work was opened under, and Plan the
+	// content address of the decomposition that called for it — the link the
+	// chain gained between the origination and its work.
+	//
+	// Shown because a fact one reader of the queue has and another does not is
+	// worse than one nobody has: an operator looking at six rows from one
+	// origination has no other way to ask whether they came from one decision
+	// or from six ticks of a decomposer over moving facts. Empty on items
+	// submitted before there was a decomposition stage, which is honest — no
+	// query reconstructs a plan that was never made.
+	Kind string `json:"kind,omitempty"`
+	Plan string `json:"plan,omitempty"`
+	Node string `json:"node,omitempty"`
 	// Task is the instruction's first line: enough to recognise the unit,
 	// never the whole prompt.
 	Task string `json:"task"`
@@ -533,6 +562,7 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 	}
 	e := QueueEntry{
 		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,
+		Kind: w.Kind, Plan: w.Plan, Node: w.Node,
 		Task: firstLine(w.Task), Note: w.Note, Severity: w.Severity,
 		Head: w.Head, Built: w.Built, Seat: ran.Seat, AgentRef: ran.AgentRef,
 		Stage: stage, DependsOn: w.DependsOn,
@@ -567,14 +597,15 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 	if w.Ingress != "" {
 		// Best effort: an item whose origination cannot be read is still a
 		// row worth showing, just a thinner one.
-		if head, err := r.Store.Log().Head(ctx, r.Tenant, "ingress/"+w.Ingress); err == nil && head.Seq > 0 {
-			var ing struct {
-				Route string `json:"route"`
-				Key   string `json:"key"`
-			}
-			if json.Unmarshal(head.Body, &ing) == nil {
-				e.Route, e.Key = ing.Route, ing.Key
-			}
+		//
+		// Through the fold, not the head. This was the THIRD reader of an
+		// origination's chain to unmarshal whatever record happened to be
+		// newest, and the failure was quiet in the way the others were: a plan
+		// record and a break-glass record are both valid JSON with no route in
+		// them, so the row simply came back with an empty route and an empty
+		// key and nothing anywhere said why.
+		if ing, ok, err := ingress.Load(ctx, r.Store.Log(), r.Tenant, w.Ingress); err == nil && ok {
+			e.Route, e.Key = ing.Route, ing.Key
 		}
 	}
 	return e, nil
@@ -684,4 +715,32 @@ func (r *Room) SignOff(ctx context.Context, itemID, verdict, note string) error 
 		Subject: itemID, Actor: r.Actor, Body: body,
 	})
 	return err
+}
+
+// failedPlan renders an origination whose planning failed as an exception,
+// or reports that it no longer is one: retried, resolved, or since planned.
+func (r *Room) failedPlan(ctx context.Context, id string, now time.Time, objective time.Duration, told map[string][]time.Time) (Exception, bool, error) {
+	plans := &plan.Store{Log: r.Store.Log(), Actor: r.Actor}
+	st, err := plans.Standing(ctx, r.Tenant, id)
+	if err != nil {
+		return Exception{}, false, err
+	}
+	if st.State != "failed" {
+		return Exception{}, false, nil
+	}
+	ing, ok, err := plans.Origination(ctx, r.Tenant, id)
+	if err != nil || !ok {
+		return Exception{}, false, err
+	}
+	age := now.Sub(st.At)
+	return Exception{
+		WorkItem: queue.WorkItem{
+			ID: id, Tenant: r.Tenant, Box: ing.Box, Ingress: id, Kind: string(ing.Kind),
+			Requester: ing.Requester, Repo: ing.Repo, Task: plan.TaskOf(ing),
+			State: queue.StateParked, Note: "planning failed: " + st.Reason, Severity: queue.SeverityMedium,
+		},
+		Parked: st.At, AgeSec: int64(age.Seconds()),
+		Escalations: countAfter(told[id], st.At),
+		Overdue:     age >= objective,
+	}, true, nil
 }
