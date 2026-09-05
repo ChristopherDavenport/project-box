@@ -124,6 +124,38 @@ func TestAnUnsealedPlanIsNotRecordable(t *testing.T) {
 	}
 }
 
+// TestByRefFindsAPlanByItsContentAddress. A ref is a sha256-derived content
+// address, so ByRef walks every scope naming it rather than one ingress's
+// own chain — the primitive a diff view needs when it is handed two refs
+// and no ingress id at all.
+func TestByRefFindsAPlanByItsContentAddress(t *testing.T) {
+	s := store(t)
+	ctx := context.Background()
+	ps := &Store{Log: s.Log(), Actor: "boxd"}
+	ing := issue("ing-1")
+	openOn(t, s, ing)
+	p, err := Make(ctx, Default(), ing, seed(t, kind.SeedIssue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.Record(ctx, ing, p); err != nil {
+		t.Fatal(err)
+	}
+
+	got, ok, err := ps.ByRef(ctx, tn, p.Ref)
+	if err != nil || !ok {
+		t.Fatalf("ByRef: %v %v", err, ok)
+	}
+	if got.Ref != p.Ref || got.Ingress != ing.ID || got.At.IsZero() {
+		t.Fatalf("round trip: %+v", got)
+	}
+
+	_, ok, err = ps.ByRef(ctx, tn, "plan-nonesuch")
+	if err != nil || ok {
+		t.Fatalf("an unknown ref should be a plain miss: %v %v", ok, err)
+	}
+}
+
 func openOn(t *testing.T, s *sqlite.Store, ing ingress.Ingress) {
 	t.Helper()
 	body, err := json.Marshal(ing)
