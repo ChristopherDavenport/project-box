@@ -75,6 +75,36 @@ type Spend struct {
 	// Reported is false when nothing said what the run cost at all. Absence
 	// is carried rather than collapsing into a zero total; see [ErrUnmetered].
 	Reported bool `json:"metered"`
+	// Limit is the account's own limit as the run reported it, when it did.
+	// It rides the charge record so a restart restores it with the rest.
+	Limit *Limit `json:"limit,omitempty"`
+}
+
+// Limit is the provider account's rate-limit state as an agent reported it:
+// not this meter's window but the account's — a subscription's five-hour or
+// seven-day allowance, shared with whoever else is using the account and
+// invisible to the meter until a run says. The one number the factory's own
+// accounting cannot produce, and the one that actually bound in round 4.
+type Limit struct {
+	// Status is allowed, allowed_warning, or rejected.
+	Status string `json:"status"`
+	// Window names the limit: five_hour, seven_day, and the model-specific
+	// weekly ones.
+	Window string `json:"window"`
+	// Utilization is how much of the window is used, 0 to 1.
+	Utilization float64 `json:"utilization"`
+	// ResetsAt is when the window turns, in unix seconds.
+	ResetsAt int64 `json:"resets_at"`
+}
+
+// Spent reports whether the account's window should refuse new starts at
+// this moment under a reserve: rejected outright, or at or above the reserve,
+// and not yet reset. A zero reserve refuses only a rejection.
+func (l *Limit) Spent(now time.Time, reserve float64) bool {
+	if l == nil || !now.Before(time.Unix(l.ResetsAt, 0)) {
+		return false
+	}
+	return l.Status == "rejected" || (reserve > 0 && l.Utilization >= reserve)
 }
 
 // Tokens is every token the run is billed for, cache reads included —
@@ -147,6 +177,18 @@ type Budget struct {
 	// fly blind can say so, and the saying is on the record.
 	AllowUnmetered bool
 	Window         time.Duration
+	// WindowReserve refuses new starts while the ACCOUNT's own window — the
+	// subscription's, as the last run reported it — is at or above this
+	// utilization, until it resets; zero means only a rejected status
+	// refuses. This is the brake denominated in the currency that bound in
+	// round 4: one run consumed the account's five-hour window and the
+	// factory's meter, counting its own tokens, refused nothing. Set it to
+	// the share of the window the human on the same account keeps for
+	// themselves.
+	//
+	// It reads the last report, so it binds only as tightly as runs report:
+	// the human's own use between runs is invisible until the next run says.
+	WindowReserve float64
 }
 
 // Meter enforces a budget and records what it does.
@@ -168,6 +210,10 @@ type Meter struct {
 	split       Spend // the same tokens, by kind — what makes the total priceable
 	unmetered   int   // runs this window that finished without saying what they cost
 	unpriced    int   // runs this window that reported tokens and no money
+	// limit is the account's window as the last run reported it. Not reset
+	// with the meter's window: the account's clock is its own, and the report
+	// says when it turns.
+	limit *Limit
 }
 
 // SetBudget swaps the budget (config reload). The window's spend is NOT
@@ -205,6 +251,14 @@ func (m *Meter) Restore(ctx context.Context) error {
 			return err
 		}
 		if rec.At.Before(start) {
+			// Outside the meter's window, but the account's window is its
+			// own clock: the last report still says whether it has reset.
+			if rec.Kind == "charge" {
+				var s Spend
+				if json.Unmarshal(rec.Body, &s) == nil && s.Limit != nil {
+					m.limit = s.Limit
+				}
+			}
 			continue
 		}
 		switch rec.Kind {
@@ -303,6 +357,19 @@ func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 		}
 		return nil, ErrUnpriced
 	}
+	if m.limit.Spent(m.now(), m.Budget.WindowReserve) {
+		first := !m.refused
+		m.refused = true
+		l := *m.limit
+		m.mu.Unlock()
+		if first {
+			m.record(ctx, "budget-refused", what,
+				fmt.Sprintf(`{"reason":"account-window","status":%q,"account_window":%q,"utilization":%.2f,"resets_at":%d,"reserve":%.2f}`,
+					l.Status, l.Window, l.Utilization, l.ResetsAt, m.Budget.WindowReserve))
+		}
+		return nil, fmt.Errorf("%w: the account's %s window is %s at %.0f%% (reserve %.0f%%), resets %s",
+			ErrBudget, l.Window, l.Status, l.Utilization*100, m.Budget.WindowReserve*100, time.Unix(l.ResetsAt, 0).Format(time.RFC3339))
+	}
 	if m.Budget.MaxTokensPerWindow > 0 {
 		if m.spent >= m.Budget.MaxTokensPerWindow {
 			first := !m.refused
@@ -398,6 +465,11 @@ func (m *Meter) Charge(ctx context.Context, what string, s Spend) {
 // counting it anyway would turn on a refusal for operators who never asked to
 // budget in dollars.
 func (m *Meter) accrue(s Spend) {
+	if s.Limit != nil {
+		// Kept whether or not the run was metered: a session that died at
+		// the account's limit is exactly the run whose report matters most.
+		m.limit = s.Limit
+	}
 	if !s.Reported {
 		m.unmetered++
 		return
@@ -447,6 +519,10 @@ type Report struct {
 	// say the factory is paced rather than idle. An operator watching nothing
 	// happen needs those told apart.
 	Refusing bool `json:"refusing"`
+	// AccountWindow is the account's own window as the last run reported it,
+	// and AccountReserve the utilization above which the meter refuses.
+	AccountWindow  *Limit  `json:"account_window,omitempty"`
+	AccountReserve float64 `json:"account_reserve,omitempty"`
 }
 
 // Report snapshots the window.
@@ -473,7 +549,8 @@ func (m *Meter) Report() Report {
 		Running: m.running, Started: m.started,
 		MaxConcurrent: maxC, MaxPerWindow: m.Budget.MaxPerWindow,
 		Window: m.Budget.Window, WindowSec: int64(m.Budget.Window.Seconds()),
-		Refusing: m.wouldRefuse(),
+		Refusing:      m.wouldRefuse(),
+		AccountWindow: m.limit, AccountReserve: m.Budget.WindowReserve,
 	}
 }
 
@@ -493,6 +570,8 @@ func (m *Meter) wouldRefuse() bool {
 	case m.unmetered > 0 && !m.Budget.AllowUnmetered:
 		return true
 	case m.unpriced > 0 && !m.Budget.AllowUnmetered:
+		return true
+	case m.limit.Spent(m.now(), m.Budget.WindowReserve):
 		return true
 	case m.Budget.MaxTokensPerWindow > 0 && m.spent >= m.Budget.MaxTokensPerWindow:
 		return true

@@ -56,12 +56,17 @@ import (
 // line before the only thing that could have used them, and left a charge
 // record no later reader could re-price.
 func SpendOf(u acp.Usage) capacity.Spend {
-	return capacity.Spend{
+	s := capacity.Spend{
 		Input: u.InputTokens, Output: u.OutputTokens,
 		CacheRead: u.CachedReadTokens, CacheWrite: u.CachedWriteTokens,
 		Total: u.Tokens, CostMicros: capacity.Micros(u.CostUSD),
 		Reported: u.Reported,
 	}
+	if u.RateLimit != nil {
+		s.Limit = &capacity.Limit{Status: u.RateLimit.Status, Window: u.RateLimit.Window,
+			Utilization: u.RateLimit.Utilization, ResetsAt: u.RateLimit.ResetsAt}
+	}
+	return s
 }
 
 // ShellBuilder runs a configured command in the workspace — the stand-in for
@@ -158,7 +163,8 @@ func New(path string) (*Daemon, error) {
 		MaxPerWindow:       cfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   cfg.MaxCostMicros(),
-		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration()})
+		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration(),
+		WindowReserve: cfg.Budget.WindowReserve})
 	// The window's account outlives the process that spent it. Without this a
 	// restart is a fresh budget, so the brake is only ever as strong as the
 	// daemon's uptime.
@@ -464,7 +470,8 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 		MaxPerWindow:       ncfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   ncfg.MaxCostMicros(),
-		AllowUnmetered:     ncfg.Budget.AllowUnmetered, Window: ncfg.WindowDuration()})
+		AllowUnmetered:     ncfg.Budget.AllowUnmetered, Window: ncfg.WindowDuration(),
+		WindowReserve: ncfg.Budget.WindowReserve})
 	d.mu.Lock()
 	d.cfg = ncfg
 	d.every = ncfg.EveryDuration()

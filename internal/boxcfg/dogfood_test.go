@@ -44,8 +44,14 @@ func TestDogfoodBoxIsNarrow(t *testing.T) {
 	if bx.Seat == "" {
 		t.Error("no seat: without one there is no continuity to carry between runs")
 	}
-	if c.Budget.MaxConcurrent != 1 {
-		t.Errorf("max_concurrent = %d, want 1", c.Budget.MaxConcurrent)
+	// Two, not one, since sections: the point of the dogfood is now also
+	// that two units in disjoint regions run side by side, and one seat
+	// cannot show that. Still bounded small — the spend is real.
+	if c.Budget.MaxConcurrent < 1 || c.Budget.MaxConcurrent > 2 {
+		t.Errorf("max_concurrent = %d, want 1 or 2", c.Budget.MaxConcurrent)
+	}
+	if c.Budget.WindowReserve <= 0 {
+		t.Error("no window_reserve: the account's window is the brake that actually bound in round 4")
 	}
 	if forge.Lane(r.Lane) != forge.LaneGated {
 		t.Errorf("lane = %q, want %q — gates then land, until the optimistic lane is rehearsed on a scratch mirror",
