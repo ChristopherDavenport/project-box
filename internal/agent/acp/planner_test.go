@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
@@ -181,4 +182,34 @@ func keysOf(m map[string]string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestThePlannerSaysWhatItIsDoing: a judgement is a run like any other and
+// the room should be able to watch it. The hook fires as the builder's does
+// — the start first, then the stream — tagged with the plan's run, which is
+// the id the live bus and the run log file it under.
+func TestThePlannerSaysWhatItIsDoing(t *testing.T) {
+	p, ing, _ := plannerRig(t, "planner")
+	var mu sync.Mutex
+	var runs []string
+	var got []Update
+	p.Progress = func(_ context.Context, run string, u Update) {
+		mu.Lock()
+		defer mu.Unlock()
+		runs = append(runs, run)
+		got = append(got, u)
+	}
+	if _, err := p.Decompose(context.Background(), ing, plannerDecl()); err != nil {
+		t.Fatalf("decompose: %v", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) == 0 || got[0].Kind != UpdateStarted {
+		t.Fatalf("the stream did not begin with the run starting: %+v", got)
+	}
+	for i, run := range runs {
+		if run != "plan-"+ing.ID {
+			t.Errorf("frame %d tagged %q, want plan-%s", i, run, ing.ID)
+		}
+	}
 }

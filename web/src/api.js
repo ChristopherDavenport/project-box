@@ -74,6 +74,8 @@ export const getPlanDiff = (ref, other, signal) =>
 export const getActivity = (signal) => fetchJSON('/v1/activity', signal);
 export const getSessions = (signal) => fetchJSON('/v1/sessions', signal);
 export const getSession = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/session`, signal);
+// The run log: what a run did, kept after it — a work item's id, or plan-<ingress> for a judgement.
+export const getRunFrames = (run, signal) => fetchJSON(`/v1/runs/${encodeURIComponent(run)}/frames`, signal);
 
 // The verbs. Every one that changes the factory carries a reason, because
 // every one becomes a record and a record needs one.

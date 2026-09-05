@@ -94,8 +94,14 @@ boxes:
     # box's `model:` unless stated here, and a section's or a plan node's
     # tier wins over both. Raise the planner's tier first if plans come back
     # wrong: a bad plan costs every unit under it.
+    # Round 6's configuration: effort high on both. Round 5 ran at xhigh,
+    # inherited from the machine's settings, and the write-up
+    # (docs/experiments/round5-2026-09-04.md) shows output and request count
+    # are the levers left — effort is the dial that moves both without
+    # touching the model. Applied on the next `kill -HUP`.
     roles:
-      planner: {model: sonnet}
+      planner: {model: sonnet, session: {effort: high}}
+      builder: {session: {effort: high}}
     # Every issue is planned by judgement before it is work: a graph of
     # units, each with its sections, its dependencies and its tier, recorded
     # on the origination's chain with the model that judged. Opt-in here and

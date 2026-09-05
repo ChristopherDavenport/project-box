@@ -24,6 +24,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/runlog"
 	"github.com/ChristopherDavenport/project-box/internal/store"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -715,6 +716,104 @@ func Run(t *testing.T, open func(t *testing.T) Harness) {
 		removed := []evidence.Record{stored[0], stored[2]}
 		if err := evidence.VerifyRecords(removed); err == nil {
 			t.Fatal("removed record must break the chain")
+		}
+	})
+
+	// The run log is telemetry beside the chain: ordered within a run, scoped
+	// to the tenant on every call, readable after the run, and pruned by age
+	// without a ceremony — which is exactly what the chain must never allow.
+	t.Run("runlog/ordered-within-a-run", func(t *testing.T) {
+		tn := tid(t)
+		rl := s.Runs()
+		at := time.Date(2026, 9, 5, 4, 26, 14, 985700924, time.UTC)
+		first, err := rl.Append(ctx, tn, runlog.Frame{Run: "wi-1", At: at, Kind: "started", Text: "agentref"})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if first.N != 1 || !first.At.Equal(at) {
+			t.Fatalf("first frame = n %d at %v, want n 1 at the moment given", first.N, first.At)
+		}
+		if _, err := rl.Append(ctx, tn, runlog.Frame{Run: "wi-1", Kind: "tool", Call: "t-1", Tool: "Read"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if _, err := rl.Append(ctx, tn, runlog.Frame{Run: "wi-1", Kind: "tool", Call: "t-1", Tool: "Read", Text: "Read main.go"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if _, err := rl.Append(ctx, tn, runlog.Frame{Run: "wi-2", Kind: "started"}); err != nil {
+			t.Fatalf("append to another run: %v", err)
+		}
+		got, err := rl.Frames(ctx, tn, "wi-1")
+		if err != nil {
+			t.Fatalf("frames: %v", err)
+		}
+		if len(got) != 3 {
+			t.Fatalf("frames for wi-1 = %d, want 3 (the other run's stay out)", len(got))
+		}
+		for i, f := range got {
+			if f.N != uint64(i+1) || f.Run != "wi-1" {
+				t.Errorf("frame %d = run %q n %d, want wi-1 n %d", i, f.Run, f.N, i+1)
+			}
+			if f.At.IsZero() {
+				t.Errorf("frame %d has no time; an unset At is stamped on append", i)
+			}
+		}
+		if got[2].Call != "t-1" || got[2].Text != "Read main.go" {
+			t.Errorf("third frame = %+v, want the titled Read with its call id", got[2])
+		}
+		if _, err := rl.Append(ctx, tn, runlog.Frame{Kind: "tool"}); err == nil {
+			t.Fatal("a frame with no run was accepted; a run log entry that names no run is unreadable")
+		}
+		if none, err := rl.Frames(ctx, tn, "wi-none"); err != nil || len(none) != 0 {
+			t.Fatalf("a run nothing was kept for = %v, %v; want nothing and no error", none, err)
+		}
+	})
+
+	t.Run("runlog/tenant-scoped", func(t *testing.T) {
+		a, b := tid(t, "a"), tid(t, "b")
+		rl := s.Runs()
+		if _, err := rl.Append(ctx, a, runlog.Frame{Run: "wi-1", Kind: "started"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if got, err := rl.Frames(ctx, b, "wi-1"); err != nil || len(got) != 0 {
+			t.Fatalf("tenant b reads tenant a's run: %v, %v", got, err)
+		}
+		if _, err := rl.Append(ctx, "", runlog.Frame{Run: "wi-1", Kind: "started"}); err == nil {
+			t.Fatal("an empty tenant was accepted")
+		}
+	})
+
+	t.Run("runlog/pruned-by-age", func(t *testing.T) {
+		a, b := tid(t, "a"), tid(t, "b")
+		rl := s.Runs()
+		old := time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
+		recent := old.Add(72 * time.Hour)
+		for _, f := range []runlog.Frame{
+			{Run: "wi-old", At: old, Kind: "started"},
+			{Run: "wi-old", At: old.Add(time.Second), Kind: "tool", Tool: "Read"},
+			{Run: "wi-new", At: recent, Kind: "started"},
+		} {
+			if _, err := rl.Append(ctx, a, f); err != nil {
+				t.Fatalf("append: %v", err)
+			}
+		}
+		if _, err := rl.Append(ctx, b, runlog.Frame{Run: "wi-old", At: old, Kind: "started"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		n, err := rl.Prune(ctx, a, old.Add(24*time.Hour))
+		if err != nil {
+			t.Fatalf("prune: %v", err)
+		}
+		if n != 2 {
+			t.Fatalf("pruned %d frames, want 2 (the old run's; the recent one and the other tenant's stay)", n)
+		}
+		if got, _ := rl.Frames(ctx, a, "wi-old"); len(got) != 0 {
+			t.Errorf("the old run still has %d frames after the prune", len(got))
+		}
+		if got, _ := rl.Frames(ctx, a, "wi-new"); len(got) != 1 {
+			t.Errorf("the recent run lost frames: %d left, want 1", len(got))
+		}
+		if got, _ := rl.Frames(ctx, b, "wi-old"); len(got) != 1 {
+			t.Errorf("tenant b's run was pruned by tenant a's policy: %d left, want 1", len(got))
 		}
 	})
 }

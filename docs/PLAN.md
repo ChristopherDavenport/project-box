@@ -1560,3 +1560,17 @@ answer becomes items with edges, a failed judgement is not re-run and is
 retried by a person, the API reaches it, the daemon refuses the agentless
 case, and the no-agent invariant still holds. The dogfood declares eight
 sections, a planner tier, and plans every issue. Round 5 measures.
+
+Round 5 (2026-09-04, on the merged stack, `docs/experiments/round5-2026-09-04.md`):
+#22 planned into two sectioned units, both landed on `factory`, $9.22 and
+14.95M tokens against round 4's $35.20 and 25.1M for one whole-repository
+run. The transcripts settle the cache question: every request re-reads its
+context as a cache hit, the stable harness prefix hits across sessions, and
+resuming or forking sessions would cost MORE because the inherited context
+is re-read on every later request — the levers left are request count,
+context growth, effort, a computed repository map for the planner, and
+tiering, in that order. Both brakes engaged at the end (volume 14.95M/15M,
+account window 91% against a 0.5 reserve). Round 6 runs #15 at effort
+`high` on both roles. Gas City's answer to the same arithmetic is metered
+billing and idle-is-free, not thrift; the credential decision is what
+remains.

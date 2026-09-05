@@ -121,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/items/{id}/evidence", s.itemEvidence)
 	mux.HandleFunc("GET /v1/items/{id}/session", s.session)
 	mux.HandleFunc("GET /v1/sessions", s.sessions)
+	mux.HandleFunc("GET /v1/runs/{run}/frames", s.runFrames)
 	mux.HandleFunc("GET /v1/provenance/{sha}", s.provenance)
 	mux.HandleFunc("GET /v1/provenance/{sha}/chain", s.provenanceChain)
 	mux.HandleFunc("GET /v1/provenance/{sha}/export", s.provenanceExport)
