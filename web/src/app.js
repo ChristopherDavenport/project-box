@@ -214,6 +214,7 @@ export class BoxApp extends LitElement {
     { path: '/exceptions', render: () => html`<box-exceptions></box-exceptions>` },
     { path: '/items/:id', render: ({ id }) => html`<box-item .itemId=${id}></box-item>` },
     { path: '/provenance/:sha', render: ({ sha }) => html`<box-provenance .sha=${sha}></box-provenance>` },
+    { path: '/plans/:ref', render: ({ ref }) => html`<box-plan .ref=${ref}></box-plan>` },
     { path: '/submit', render: () => html`<box-submit></box-submit>` },
   ], {
     fallback: {

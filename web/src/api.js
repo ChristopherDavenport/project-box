@@ -67,6 +67,10 @@ export const getItem = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent
 export const getItemEvidence = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/evidence`, signal);
 export const getProvenanceChain = (sha, signal) => fetchJSON(`/v1/provenance/${encodeURIComponent(sha)}/chain`, signal);
 export const provenanceExportURL = (sha) => `/v1/provenance/${encodeURIComponent(sha)}/export`;
+export const getPlan = (ref, signal) => fetchJSON(`/v1/plans/${encodeURIComponent(ref)}`, signal);
+export const getIngressPlans = (id, signal) => fetchJSON(`/v1/ingress/${encodeURIComponent(id)}/plans`, signal);
+export const getPlanDiff = (ref, other, signal) =>
+  fetchJSON(`/v1/plans/${encodeURIComponent(ref)}/diff/${encodeURIComponent(other)}`, signal);
 export const getActivity = (signal) => fetchJSON('/v1/activity', signal);
 export const getSessions = (signal) => fetchJSON('/v1/sessions', signal);
 export const getSession = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/session`, signal);
