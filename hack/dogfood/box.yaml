@@ -56,11 +56,15 @@ budget:
   # when it finally ran. Round 6's whole-repository unit was refused that
   # way with three real runs behind it. Raised by one until the meter
   # counts runs, not attempts.
-  # Eight for round 8: three issues at once, each a plan and at least one
-  # unit, on top of the double count above. Starts are the brake on a
-  # runaway, and three deliberate submissions are not one.
-  max_per_window: 8
-  max_tokens_per_window: 15000000
+  # Twenty since round 8: four issues at once, ten units, a retry and every
+  # wait on a section each a start under the double count above. Starts are
+  # the brake on a runaway, and four deliberate submissions are not one.
+  max_per_window: 20
+  # Twenty-two million since round 8: round 7 and round 8's three planners fell
+  # in one clock hour and put it at 19.6M against fifteen, with every unit
+  # refused until the hour turned. Volume is still the brake; a round is
+  # not a runaway.
+  max_tokens_per_window: 22000000
   window: 1h
   # The brake in the currency that actually bound. The account's five-hour
   # window is shared with the human on this machine and invisible to the
@@ -78,7 +82,10 @@ budget:
   # overshoot it prevents. 25M was round 4's whole-repository run on a
   # million-token window; a unit on Sonnet has a 200K window and a section,
   # so 12M is sixty full-context turns and still only catches pathology.
-  max_tokens_per_run: 12000000
+  # Twenty million since round 8: round 7's one unit for two sections read
+  # 11.24M against twelve, and a run killed at the ceiling spends it all and
+  # lands nothing. Above the most expensive legitimate run, as the note says.
+  max_tokens_per_run: 20000000
   # Deliberately absent: allow_unmetered. A run that will not say what it
   # cost should stop the factory — that is the whole finding from round 1.
 
