@@ -231,3 +231,32 @@ boxes:
 		t.Errorf("model without an agent: err = %v", err)
 	}
 }
+
+// TestForgeRepoCarriesTheRepositoryCheck: a unit that names no section still
+// needs a check to iterate on, and forge.Repo is where every consumer past
+// boxcfg reads it from — configured or defaulted, it must survive the
+// crossing (issue #46).
+func TestForgeRepoCarriesTheRepositoryCheck(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        check: ./hack/check.sh
+      - name: lib
+        remote: /tmp/lib.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repos := c.Boxes[0].Repos
+	if got := repos[0].ForgeRepo().Check; got != "./hack/check.sh" {
+		t.Fatalf("configured check: ForgeRepo().Check = %q, want %q", got, "./hack/check.sh")
+	}
+	if got := repos[1].ForgeRepo().Check; got != "true" {
+		t.Fatalf("defaulted check: ForgeRepo().Check = %q, want %q", got, "true")
+	}
+}

@@ -527,7 +527,7 @@ func (r Repo) forgeSections() []forge.Section {
 // ForgeRepo is the repository as the forge sees it, sections included.
 func (r Repo) ForgeRepo() forge.Repo {
 	return forge.Repo{Name: r.Name, Remote: r.Remote, Role: forge.Role(r.Role),
-		DefaultBranch: r.Branch, Sections: r.forgeSections()}
+		DefaultBranch: r.Branch, Sections: r.forgeSections(), Check: r.Check}
 }
 
 // Load reads and validates a config.

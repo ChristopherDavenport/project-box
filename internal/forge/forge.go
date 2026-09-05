@@ -56,6 +56,10 @@ type Repo struct {
 	// of work expresses itself in, and the unit two pieces of work are held
 	// apart by. Empty means the repository has one region: itself.
 	Sections []Section
+	// Check is what a builder runs while iterating on a unit that names no
+	// section — the same check the gate runs whole at landing. Empty means
+	// none is configured.
+	Check string
 }
 
 // Section is a named region of a repository.
