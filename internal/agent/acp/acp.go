@@ -422,6 +422,12 @@ type Result struct {
 	// Session is what the agent said it was, once it had opened: modes,
 	// configuration, commands. See [Session].
 	Session Session
+	// Prompted is true once session/prompt was sent. A run that failed
+	// before that — a session that would not open, a model it refused —
+	// spent nothing, and that is a known zero rather than an unknown:
+	// charging it as unmetered would stop the factory for an hour over a
+	// run that never reached a model.
+	Prompted bool
 	// UnknownUpdates lists session update kinds this runtime does not
 	// understand, deduped in first-seen order, plus "tool_call:untitled" for
 	// a tool call that arrived with no title for policy to match on.
@@ -734,13 +740,22 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	// protocol and asserted back. The Result travels with the refusal so the
 	// record can say what the agent offered instead of what was asked.
 	if err := rt.configure(ctx, conn, newRes.SessionID, b, &mu, &res.Session); err != nil {
-		return res, err
+		// Copied under the lock: the agent is still announcing its commands
+		// on the stream while this refusal goes back, and a Result read
+		// unlocked here is the race the detector caught on the first CI run.
+		mu.Lock()
+		refused := res
+		mu.Unlock()
+		return refused, err
 	}
 	var promptRes struct {
 		StopReason string     `json:"stopReason"`
 		Usage      *wireUsage `json:"usage,omitempty"`
 		Meta       *wireMeta  `json:"_meta,omitempty"`
 	}
+	mu.Lock()
+	res.Prompted = true
+	mu.Unlock()
 	err = conn.call(ctx, "session/prompt", map[string]any{
 		"sessionId": newRes.SessionID,
 		"prompt":    []map[string]any{{"type": "text", "text": prompt}},

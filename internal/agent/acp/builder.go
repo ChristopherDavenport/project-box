@@ -299,7 +299,10 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	// Cost is charged even when the run failed. A session that errored
 	// halfway still spent what it spent, and a meter that only charges for
 	// successes is a meter that undercounts exactly when things go wrong.
-	if b.Spend != nil {
+	// A run that never sent a prompt is the one exception: it spent nothing,
+	// knowably, and charging it as unknown would close the window over a
+	// refused model or a session that would not open.
+	if b.Spend != nil && res.Prompted {
 		b.Spend(ctx, ws.Run, res.Usage)
 	}
 	if err != nil {
