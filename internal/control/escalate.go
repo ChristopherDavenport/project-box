@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -35,6 +36,13 @@ type Notice struct {
 	Item     string         `json:"item"`
 	Box      string         `json:"box,omitempty"`
 	Severity queue.Severity `json:"severity"`
+	// Kind is the declaration this work was opened under, and Route the
+	// routing label that declaration carries. Route is opaque here on purpose:
+	// the room decides somebody must be told and knows nothing about telling
+	// them, so it passes the operator's own word for who — a rota, a channel,
+	// a queue name — straight through to the notifier.
+	Kind  string `json:"kind,omitempty"`
+	Route string `json:"route,omitempty"`
 	// Reason is the park note — what the factory said when it gave up. A
 	// notice without it is a page that tells nobody anything.
 	Reason       string    `json:"reason,omitempty"`
@@ -80,7 +88,8 @@ func (f NotifierFunc) Notify(ctx context.Context, n Notice) error { return f(ctx
 // same seam.
 func LogNotice(ctx context.Context, n Notice) error {
 	slog.ErrorContext(ctx, "exception escalated",
-		"item", n.Item, "severity", n.Severity, "age_sec", n.AgeSec,
+		"item", n.Item, "kind", n.Kind, "route", n.Route,
+		"severity", n.Severity, "age_sec", n.AgeSec,
 		"objective_sec", n.ObjectiveSec, "nth", n.Nth, "final", n.Final,
 		"reason", n.Reason)
 	return nil
@@ -106,6 +115,34 @@ type Escalator struct {
 	// how a page gets muted, and a muted page is worse than no page because
 	// it looks like coverage.
 	Max int
+	// Kinds lets an exception be measured against ITS OWN origination's
+	// promise rather than against one number for the whole factory.
+	//
+	// This is the home issue #4's policy never had. The mechanics landed —
+	// severity on a park, aging, loudest-then-oldest, a bounded notifier — and
+	// what they were measured against was a single objective, so an incident's
+	// parked leaf and a routine dependency bump waited the same four hours. A
+	// kind declaration carries its own objective, its own bound, its own
+	// routing label and a severity FLOOR; nil here, or a kind that declares
+	// none of them, falls back to the room's, which is the honest default: a
+	// kind that has said nothing has not asked for a tighter promise.
+	Kinds kind.Sets
+}
+
+// policy resolves the escalation declaration governing one exception. A kind
+// nobody declared gets the room's own policy rather than an error: the sweep
+// is a standing chore, and refusing to tell anybody about a parked item
+// because its declaration went missing would silence exactly the queue that
+// most needs reading.
+func (e *Escalator) policy(x Exception) kind.Escalation {
+	if e.Kinds == nil || x.Kind == "" {
+		return kind.Escalation{}
+	}
+	d, err := e.Kinds.Lookup(x.Box, x.Kind)
+	if err != nil {
+		return kind.Escalation{}
+	}
+	return d.Escalation
 }
 
 func (e *Escalator) threshold() queue.Severity {
@@ -119,13 +156,19 @@ func (e *Escalator) threshold() queue.Severity {
 // limit": the one reading an operator can never have meant by asking for
 // fewer re-escalations is unlimited ones.
 func (e *Escalator) max() int {
-	switch {
-	case e.Max == 0:
+	if e.Max == 0 {
 		return DefaultMaxReescalations
-	case e.Max < 0:
+	}
+	return boundOf(e.Max)
+}
+
+// boundOf reads a configured re-escalation bound the same way wherever it is
+// written — the room's field or a kind's declaration. Negative is none.
+func boundOf(n int) int {
+	if n < 0 {
 		return 0
 	}
-	return e.Max
+	return n
 }
 
 // Sweep tells somebody about every exception that has gone stale and returns
@@ -148,11 +191,25 @@ func (e *Escalator) Sweep(ctx context.Context) ([]Notice, error) {
 	if err != nil {
 		return nil, err
 	}
-	objective, threshold, max := e.Room.objective(), e.threshold(), e.max()
+	threshold := e.threshold()
 	var sent []Notice
 	var errs []error
 	for _, x := range items {
-		severity := x.Severity.OrDefault()
+		pol := e.policy(x)
+		objective := e.Room.objective()
+		if pol.Objective > 0 {
+			objective = pol.Objective
+		}
+		max := e.max()
+		if pol.MaxReescalations != 0 {
+			max = boundOf(pol.MaxReescalations)
+		}
+		// The kind's floor, applied where the parking stage was quieter than
+		// the origination. A cascaded leaf inherits its cause's severity and
+		// knows nothing about what opened the work three items upstream, so
+		// without the floor an incident's failure can reach the queue reading
+		// as routine.
+		severity := pol.Floor(x.Severity.OrDefault())
 		if !severity.AtLeast(threshold) {
 			continue
 		}
@@ -168,6 +225,7 @@ func (e *Escalator) Sweep(ctx context.Context) ([]Notice, error) {
 		}
 		n := Notice{
 			Tenant: e.Room.Tenant, Item: x.ID, Box: x.Box, Severity: severity,
+			Kind: x.Kind, Route: pol.Route,
 			Reason: x.Note, Parked: x.Parked, AgeSec: x.AgeSec,
 			ObjectiveSec: int64(objective.Seconds()),
 			Nth:          nth, Final: nth == max+1,

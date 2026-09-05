@@ -26,6 +26,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	git "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/render"
@@ -147,7 +148,7 @@ func (l *Ladder) PromoteToProd(ctx context.Context) (string, error) {
 func (l *Ladder) promote(ctx context.Context, env Env, cand string) error {
 	ing, _, err := l.Router.Open(ctx, ingress.Route{
 		Name: "promote-" + env.Name, Kind: ingress.RouteSchedule,
-		Opens: ingress.KindIssue, Box: l.Service.Box, Requester: l.Runner,
+		Opens: kind.SeedIssue, Box: l.Service.Box, Requester: l.Runner,
 	}, ingress.Delivery{Key: env.Name + "-" + cand})
 	if err != nil {
 		return err
