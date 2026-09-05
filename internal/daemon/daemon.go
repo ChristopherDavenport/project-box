@@ -39,6 +39,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/pump"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
+	"github.com/ChristopherDavenport/project-box/internal/runlog"
 	"github.com/ChristopherDavenport/project-box/internal/seat"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -272,11 +273,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// And the same argument for the stream: the adapter is the
 				// only place a run is visible while it is running, so it is
 				// where the room's live view has to be fed from.
-				Progress: func(_ context.Context, run string, u acp.Update) {
-					d.live.Append(run, control.Frame{
-						Kind: string(u.Kind), Tool: u.Tool, Text: u.Text, Reason: u.Reason,
-					})
-				},
+				Progress: d.progress,
 				// The kind declaration reaching the agent plane, which is the
 				// seat #17 built and could not fill. Per run, because the
 				// envelope belongs to the origination and one builder serves a
@@ -333,6 +330,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			Spend: func(ctx context.Context, run string, u acp.Usage) {
 				d.meter.Charge(ctx, run, SpendOf(u))
 			},
+			Progress: d.progress,
 		})
 	}
 	return loops, routes, kinds, nil
@@ -500,6 +498,32 @@ func (d *Daemon) Every() time.Duration {
 	return d.every
 }
 
+// progress is where a run's stream lands, for builders and the planner alike:
+// on the live bus, which the room watches, and in the run log, which the room
+// reads back once the run is over. One moment stamps both, so a frame seen
+// live and the same frame read later are the same frame. The log is
+// telemetry: a write that fails is warned about and the run goes on, because
+// a run that produced a change and no window on itself is still a run.
+func (d *Daemon) progress(ctx context.Context, run string, u acp.Update) {
+	at := time.Now().UTC()
+	d.live.Append(run, control.Frame{
+		At: at, Kind: string(u.Kind), Call: u.Call, Tool: u.Tool, Text: u.Text, Reason: u.Reason,
+	})
+	if _, err := d.store.Runs().Append(ctx, d.tenant, runlog.Frame{
+		Run: run, At: at, Kind: string(u.Kind), Call: u.Call, Tool: u.Tool, Text: u.Text, Reason: u.Reason,
+	}); err != nil {
+		slog.Warn("run log", "run", run, "err", err)
+	}
+}
+
+// runsKeepFor is the run log's age bound under the config in force; zero
+// keeps everything.
+func (d *Daemon) runsKeepFor() time.Duration {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.cfg.Runs.KeepForDuration()
+}
+
 func (d *Daemon) cfgRunner() string {
 	return d.cfg.Runner
 }
@@ -561,6 +585,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 					slog.Warn("compaction sweep", "err", err)
 				} else if len(sums) > 0 {
 					slog.Info("compacted", "scopes", len(sums))
+				}
+				if keep := d.runsKeepFor(); keep > 0 {
+					if n, err := d.store.Runs().Prune(workCtx, d.tenant, time.Now().Add(-keep)); err != nil {
+						slog.Warn("run log prune", "err", err)
+					} else if n > 0 {
+						slog.Info("run log pruned", "frames", n, "older_than", keep)
+					}
 				}
 			}
 		}

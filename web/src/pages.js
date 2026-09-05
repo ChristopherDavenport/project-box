@@ -6,7 +6,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { Task } from '@lit/task';
 import {
   getStatus, getItems, getExceptions, getItem, getItemEvidence, getProvenance, getSessions, getSession,
-  openIngress, reload, retryItem, resolveItem,
+  getRunFrames, openIngress, reload, retryItem, resolveItem,
 } from './api.js';
 import { ActivityController } from './sse.js';
 import {
@@ -412,6 +412,31 @@ function frameLine(f) {
 // The frame kinds an operator should notice without looking for them.
 const FRAME_APPEARANCE = { denied: 'negative', escalate: 'negative', handoff: 'neutral', started: 'positive' };
 
+/** collapse folds a call said twice into one row. The adapter announces a
+ *  Read or a Bash before it knows the path or the command line and titles it
+ *  on a later update; the runtime forwards both, under the same call id, and
+ *  the timeline should read as one call that now says what it did. Frames
+ *  without a call id are kept as they are. Oldest first in, oldest first out. */
+export function collapse(frames) {
+  const out = [];
+  const at = new Map();
+  for (const f of frames) {
+    const key = f.kind === 'tool' && f.call ? f.call : '';
+    if (key && at.has(key)) {
+      const i = at.get(key);
+      out[i] = { ...out[i], text: f.text || out[i].text };
+      continue;
+    }
+    if (key) at.set(key, out.length);
+    out.push(f);
+  }
+  return out;
+}
+
+/** frameKey names a frame the same way whether it came off the live stream
+ *  or out of the run log: the daemon stamps one moment on both. */
+const frameKey = (f) => `${f.at}|${f.kind}|${f.call ?? ''}|${f.tool ?? ''}`;
+
 /**
  * Sessions: one card per running unit — what it is, how far it has got, and
  * what its agent is doing right now.
@@ -477,7 +502,7 @@ export class BoxSessions extends LitElement {
   // and makes a quiet run look busy.
   _timeline(s) {
     const seen = new Set((s.timeline ?? []).map((f) => f.seq));
-    return [...(s.timeline ?? []), ...(this._frames[s.id] ?? []).filter((f) => !seen.has(f.seq))];
+    return collapse([...(s.timeline ?? []), ...(this._frames[s.id] ?? []).filter((f) => !seen.has(f.seq))]);
   }
 
   render() {
@@ -621,7 +646,7 @@ customElements.define('box-exceptions', BoxExceptions);
 
 /** One item: what it is, where it stands, what can be done, and its whole chain. */
 export class BoxItem extends LitElement {
-  static properties = { itemId: { attribute: false } };
+  static properties = { itemId: { attribute: false }, _live: { state: true } };
   static styles = [base, facts, css`
     :host { display: grid; gap: var(--jh-space-400); }
     .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; margin-bottom: var(--jh-space-300); }
@@ -638,16 +663,70 @@ export class BoxItem extends LitElement {
     ol.chain .what { overflow-wrap: anywhere; }
     ol.chain .by { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
     ol.chain .t { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); white-space: nowrap; }
+    ol.frames { list-style: none; margin: 0; padding: 0; }
+    ol.frames li { display: grid; grid-template-columns: 5.5em 6em 1fr; gap: var(--jh-space-300); align-items: baseline;
+                   padding: var(--jh-space-100) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    ol.frames .t { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); white-space: nowrap; }
+    ol.frames .k { font: var(--jh-font-helper-medium); }
+    ol.frames .x { white-space: pre-wrap; overflow-wrap: anywhere; }
+    ol.frames li.negative .k { color: var(--jh-color-content-negative-enabled); }
+    ol.frames li.positive .k { color: var(--jh-color-content-positive-enabled); }
   `];
   constructor() {
     super();
+    this._live = [];
     // A run's own records — the agent starting, each gate verdict, an
     // escalation and its reason — reach the feed, so this page follows a
-    // unit as it works instead of being a snapshot you reload.
+    // unit as it works instead of being a snapshot you reload. A terminal
+    // record also refetches the run log, so the frames that streamed are
+    // replaced by the frames that were kept.
     this._activity = new ActivityController(this, {
       limit: 1,
       onEvent: (a) => { if (a.scope === `workitem/${this.itemId}` || a.subject === this.itemId) this._refresh(); },
     });
+  }
+
+  // The item's own stream: what its agent is doing, as it does it, with the
+  // run so far replayed on connect. Scoped to the item server-side and
+  // re-opened when the page moves to another item.
+  willUpdate(changed) {
+    if (changed.has('itemId')) {
+      if (this._stream) { this.removeController(this._stream); this._stream.hostDisconnected(); }
+      this._live = [];
+      this._stream = new ActivityController(this, {
+        item: this.itemId, limit: 1,
+        onSession: (f) => { this._live = [...this._live, f]; },
+      });
+    }
+  }
+
+  // What the run did: the kept frames first, then whatever has streamed
+  // since that is not already among them. The daemon stamps one moment on a
+  // frame for both, so the same frame seen twice is recognised as one.
+  _frames(kept) {
+    const seen = new Set((kept ?? []).map(frameKey));
+    return collapse([...(kept ?? []), ...this._live.filter((f) => !seen.has(frameKey(f)))]);
+  }
+
+  _agent(item, kept) {
+    const frames = this._frames(kept);
+    const running = item.state === 'claimed';
+    const subtitle = running
+      ? 'What the agent is doing, as it does it — newest first'
+      : 'What the agent did, from the run log — newest first';
+    return html`
+      <jh-card header-title="Agent" header-subtitle=${subtitle} padding="medium">
+        ${frames.length === 0
+          ? html`<p class="empty">${running
+              ? 'Nothing streamed yet. The first frame is the agent starting.'
+              : 'Nothing was kept for this run — it ran before the run log existed, or its frames were pruned.'}</p>`
+          : html`<ol class="frames" aria-label="Agent timeline, newest first">${frames.slice().reverse().map((f) => html`
+              <li class=${FRAME_APPEARANCE[f.kind] ?? ''}>
+                <span class="t"><box-when .at=${f.at}></box-when></span>
+                <span class="k">${f.kind}</span>
+                <span class="x">${frameLine(f)}</span>
+              </li>`)}</ol>`}
+      </jh-card>`;
   }
 
   // Three reads, one page. The raw work item carries what the queue wrote —
@@ -656,12 +735,13 @@ export class BoxItem extends LitElement {
   // the lease. The room's entry has those and the chain has everything.
   _task = new Task(this, {
     task: async ([id], { signal }) => {
-      const [item, entry, evidence] = await Promise.all([
+      const [item, entry, evidence, kept] = await Promise.all([
         getItem(id, signal),
         getSession(id, signal).catch(() => ({})),
         getItemEvidence(id, signal),
+        getRunFrames(id, signal).catch(() => []),
       ]);
-      return { item: { ...entry, ...item, note: item.note ?? entry.note }, evidence };
+      return { item: { ...entry, ...item, note: item.note ?? entry.note }, evidence, kept };
     },
     args: () => [this.itemId],
   });
@@ -727,8 +807,7 @@ export class BoxItem extends LitElement {
               .action=${(r) => resolveItem(item.id, r)} @box-done=${() => this._done('Resolved', item)}></box-reason>
             <span class="helper">Retry hands the unit back to the factory; resolve closes it with your reason on the record.</span>`
             : item.state === 'claimed'
-              ? html`<jh-button appearance="tertiary" size="small" label="Watch the session" href="/sessions"></jh-button>
-                     <span class="helper">A running unit can only be stopped with the rest of the factory — the cord is at the top of the page.</span>`
+              ? html`<span class="helper">A running unit can only be stopped with the rest of the factory — the cord is at the top of the page.</span>`
               : html`<span class="helper">Retry and resolve apply to parked or failed work.</span>`}
         </div>
       </jh-card>`;
@@ -754,8 +833,9 @@ export class BoxItem extends LitElement {
     return this._task.render({
       pending: () => loading('item'),
       error: failed,
-      complete: ({ item, evidence }) => html`
+      complete: ({ item, evidence, kept }) => html`
         ${this._head(item)}
+        ${this._agent(item, kept)}
         <jh-card header-title="Timeline" header-subtitle="What this unit did, in order, from its own evidence chain" padding="medium">
           ${this._chain(evidence)}
         </jh-card>`,

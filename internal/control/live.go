@@ -32,7 +32,11 @@ type Frame struct {
 	// Kind is [acp.UpdateKind]'s string, carried as one rather than imported:
 	// the room renders what agents do and must not depend on the runtime that
 	// drives them.
-	Kind   string `json:"kind"`
+	Kind string `json:"kind"`
+	// Call is the tool call's id on the wire, so that a later frame about the
+	// same call — the title, once the adapter knows it — can be read as the
+	// same call and not as a second one.
+	Call   string `json:"call,omitempty"`
 	Tool   string `json:"tool,omitempty"`
 	Text   string `json:"text,omitempty"`
 	Reason string `json:"reason,omitempty"`
