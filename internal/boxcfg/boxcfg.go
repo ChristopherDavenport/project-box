@@ -135,6 +135,13 @@ type Budget struct {
 	// a position nobody chooses on purpose.
 	AllowUnmetered bool   `yaml:"allow_unmetered"`
 	Window         string `yaml:"window"`
+	// WindowReserve refuses new starts while the ACCOUNT's own window — the
+	// subscription's five-hour allowance, as the last run reported it — is
+	// at or above this utilization (0 to 1), until it resets. The share of
+	// the window the human on the same account keeps for themselves; `0.5`
+	// stops the factory at half. Zero means only a rejected status refuses.
+	// See capacity.Budget.WindowReserve for what it can and cannot see.
+	WindowReserve float64 `yaml:"window_reserve"`
 }
 
 // Argv is a command, written in YAML either as one string for the common
@@ -550,6 +557,9 @@ func (c *Config) validate() error {
 		if _, err := time.ParseDuration(c.Budget.Window); err != nil {
 			return fmt.Errorf("boxcfg: budget.window: %w", err)
 		}
+	}
+	if r := c.Budget.WindowReserve; r < 0 || r > 1 {
+		return fmt.Errorf("boxcfg: budget.window_reserve %v — a share of the account's window, 0 to 1", r)
 	}
 	if c.Retention.KeepFor != "" {
 		if _, err := time.ParseDuration(c.Retention.KeepFor); err != nil {

@@ -25,9 +25,6 @@ drain: 60s
 build_timeout: 30m
 
 budget:
-  # One at a time. Issue #18 (three concurrent runs producing one) is fixed,
-  # but the point of the dogfood is the agent, not the lease.
-  max_concurrent: 1
   # Sized from four rounds on a model nobody chose (see `model:` below):
   # 1.0M, 5.3M, 7.5M, 20.1M, then round 4's 25.1M — 98.5% of it cache reads
   # at ~206K of context a call. Neither brake here is the one that bound.
@@ -39,10 +36,21 @@ budget:
   # (status, window, utilization, reset), which is the currency a brake for
   # that has to be denominated in.
   #
-  # Kept as the runaway bound until Sonnet runs are measured; resize from
-  # those numbers, not these. Hot-reloadable: edit and `kill -HUP`.
-  max_tokens_per_window: 30000000
+  # Round 5's numbers, sized to not run out mid-round rather than to keep the
+  # seat busy: units are narrow and on Sonnet now, and the point is to
+  # measure them, not to fill the hour. Four starts an hour, fifteen million
+  # tokens of volume, two side by side so the section leases are exercised.
+  # Resize from what round 5 shows. Hot-reloadable: edit and `kill -HUP`.
+  max_concurrent: 2
+  max_per_window: 4
+  max_tokens_per_window: 15000000
   window: 1h
+  # The brake in the currency that actually bound. The account's five-hour
+  # window is shared with the human on this machine and invisible to the
+  # meter until a run ends; every run now reports it, and above this share
+  # the meter refuses new starts until the window resets. Half is Chris's.
+  # `hack/dogfood/window.py` asks the same question before a round starts.
+  window_reserve: 0.5
   # The runaway bound, which the window cannot express: the window gates
   # starts, so its real ceiling is "the limit, plus one whole run". That is
   # how 6M became 25,419,130 in round 3.
@@ -50,9 +58,10 @@ budget:
   # Set it ABOVE the most expensive legitimate run, not near it. A killed run
   # produces nothing at all, so a ceiling tight enough to truncate real work
   # spends the tokens and throws away the commit — strictly worse than the
-  # overshoot it prevents. 25M is the 20.1M measured above plus room; it is
-  # here to catch pathology, not to economise.
-  max_tokens_per_run: 25000000
+  # overshoot it prevents. 25M was round 4's whole-repository run on a
+  # million-token window; a unit on Sonnet has a 200K window and a section,
+  # so 12M is sixty full-context turns and still only catches pathology.
+  max_tokens_per_run: 12000000
   # Deliberately absent: allow_unmetered. A run that will not say what it
   # cost should stop the factory — that is the whole finding from round 1.
 

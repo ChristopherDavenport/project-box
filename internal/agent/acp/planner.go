@@ -105,7 +105,12 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 	// The tree the judgement is made over: read-only, at the exact commit
 	// the plan's facts name, reclaimed afterwards. A planner that could
 	// write would be a builder with a different name.
-	dir := filepath.Join(p.Root, run)
+	// Absolute, whatever the config's root was: the adapter refuses a
+	// relative cwd, and the first live planning run found out.
+	dir, err := filepath.Abs(filepath.Join(p.Root, run))
+	if err != nil {
+		return plan.Result{}, fmt.Errorf("acp: planner: %w", err)
+	}
 	if err := p.Mirror.MaterializeContext(ctx, dir, agent.ContextSet{Repos: []agent.ContextRepo{
 		{Repo: repo.Name, Commit: string(head)},
 	}}); err != nil {
@@ -180,7 +185,7 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 			Config: res.Session.Config, Commands: res.Session.Commands,
 		})
 	}
-	if p.Spend != nil {
+	if p.Spend != nil && res.Prompted {
 		p.Spend(ctx, run, res.Usage)
 	}
 	if err != nil {

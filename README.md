@@ -121,6 +121,14 @@ precondition for a budget, not a feature of one, and a budget that reads
 unknown as zero is not a budget. `allow_unmetered: true` proceeds blind, and
 the saying so is on the record.
 
+`window_reserve` is the brake in the currency that actually binds on a
+subscription: every run reports the account's own window — status, which
+window, utilization, reset time — and above this share the meter refuses new
+starts until it resets, so the factory yields to the human on the same
+account instead of finishing their window. It reads the last report, so it
+binds only as tightly as runs report. `hack/dogfood/window.py` asks the
+harness the same question for a few hundred tokens, before a round starts.
+
 `build_timeout` bounds one build (default 30m; a negative duration means no
 bound). Nothing else does: the lease TTL is renewed while a run holds it, so
 without this an agent that hangs runs until the daemon stops.
