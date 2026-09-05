@@ -192,18 +192,18 @@ func TestDelegateOverTheWire(t *testing.T) {
 	}
 
 	// Delegate: open an ingress over the wire.
-	res, err := c.OpenIngress(ctx, "issues", "issue-9", "ship the widget")
+	res, err := c.OpenIngress(ctx, "issues", "issue-9", "ship the widget", "")
 	if err != nil || !res.Opened {
 		t.Fatalf("open: %+v %v", res, err)
 	}
 	// Redelivery is idempotent over the wire too.
-	res2, _ := c.OpenIngress(ctx, "issues", "issue-9", "ship the widget")
+	res2, _ := c.OpenIngress(ctx, "issues", "issue-9", "ship the widget", "")
 	if res2.Opened || res2.Item != res.Item {
 		t.Fatalf("redelivery: %+v", res2)
 	}
 	// An unconfigured route is the caller asking for authority it does not
 	// have: refused.
-	if _, err := c.OpenIngress(ctx, "backdoor", "x", "y"); err == nil {
+	if _, err := c.OpenIngress(ctx, "backdoor", "x", "y", ""); err == nil {
 		t.Fatal("an unconfigured route was accepted")
 	}
 
@@ -235,7 +235,7 @@ func TestDelegateOverTheWire(t *testing.T) {
 	if err != nil || !st.Stopped || !st.Claims.Stopped || st.Claims.Reason != "investigating" || st.Claims.Actor != "chris" || st.Claims.At.IsZero() {
 		t.Fatalf("status after stop should carry the record: %+v %v", st.Claims, err)
 	}
-	if _, err := c.OpenIngress(ctx, "issues", "issue-10", "more work"); err != nil {
+	if _, err := c.OpenIngress(ctx, "issues", "issue-10", "more work", ""); err != nil {
 		t.Fatal(err) // intent is still writable...
 	}
 	if _, err := w.pump.Tick(ctx); err != nil {
@@ -269,6 +269,47 @@ func TestDelegateOverTheWire(t *testing.T) {
 	// A stop without a reason is refused: the reason is the record.
 	if err := c.Stop(ctx, "  "); err == nil {
 		t.Fatal("a reasonless stop was accepted")
+	}
+}
+
+// TestSubmitCarriesASummary confirms an origination gets a one-line name
+// distinct from its task paragraph when a submitter supplies one, and that
+// omitting it still opens exactly as before — no regression for callers who
+// never knew the field existed.
+func TestSubmitCarriesASummary(t *testing.T) {
+	w := rig(t)
+	ctx := context.Background()
+
+	sock := filepath.Join(t.TempDir(), "boxd.sock")
+	ln, err := Listen("unix:" + sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &http.Server{Handler: w.srv.Handler()}
+	go hs.Serve(ln)
+	t.Cleanup(func() { hs.Close() })
+
+	c, err := Dial("unix:"+sock, "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := c.OpenIngress(ctx, "issues", "issue-summary", "a whole paragraph of task text nobody wants as a room name", "fix the widget")
+	if err != nil || !res.Opened {
+		t.Fatalf("open: %+v %v", res, err)
+	}
+	if res.Ingress.Title != "fix the widget" {
+		t.Fatalf("title: got %q, want the supplied summary", res.Ingress.Title)
+	}
+
+	// Omitting the summary is not a regression: no summary means no title,
+	// the same as before this field existed.
+	res2, err := c.OpenIngress(ctx, "issues", "issue-no-summary", "another paragraph", "")
+	if err != nil || !res2.Opened {
+		t.Fatalf("open without summary: %+v %v", res2, err)
+	}
+	if res2.Ingress.Title != "" {
+		t.Fatalf("title: got %q, want empty when no summary was supplied", res2.Ingress.Title)
 	}
 }
 
@@ -310,7 +351,7 @@ func TestEventsStream(t *testing.T) {
 	}
 
 	c, _ := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
-	if _, err := c.OpenIngress(ctx, "issues", "issue-live", "streamed work"); err != nil {
+	if _, err := c.OpenIngress(ctx, "issues", "issue-live", "streamed work", ""); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(10 * time.Second)
@@ -387,7 +428,7 @@ func TestQueueOverTheWire(t *testing.T) {
 	for _, key := range []string{"issue-20", "issue-21"} {
 		// Distinct tasks: the rig's builder writes the task into one file, so
 		// two identical tasks would leave the second tree unchanged.
-		if _, err := c.OpenIngress(ctx, "issues", key, "make pending legible for "+key); err != nil {
+		if _, err := c.OpenIngress(ctx, "issues", key, "make pending legible for "+key, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -463,7 +504,7 @@ func TestTheCountAndTheListingAreOneFold(t *testing.T) {
 	}
 
 	for _, key := range []string{"issue-20a", "issue-20b", "issue-20c"} {
-		if _, err := c.OpenIngress(ctx, "issues", key, "make pending legible for "+key); err != nil {
+		if _, err := c.OpenIngress(ctx, "issues", key, "make pending legible for "+key, ""); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -557,7 +598,7 @@ func TestRunInternalsReachTheStream(t *testing.T) {
 	defer cancel()
 
 	c, _ := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
-	if _, err := c.OpenIngress(ctx, "issues", "issue-inner", "watch me work"); err != nil {
+	if _, err := c.OpenIngress(ctx, "issues", "issue-inner", "watch me work", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Intake first, so the item exists before the subscriber connects and is

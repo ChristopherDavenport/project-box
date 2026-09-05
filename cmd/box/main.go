@@ -557,13 +557,14 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		route := sub.String("route", "issues", "configured route name")
 		key := sub.String("key", "", "idempotency key for the occurrence")
 		task := sub.String("task", "", "what to do")
+		summary := sub.String("summary", "", "one-line name for the room; falls back to the task if omitted")
 		if err := sub.Parse(rest); err != nil {
 			return err
 		}
 		if *key == "" || *task == "" {
 			return fmt.Errorf("submit needs -key and -task")
 		}
-		res, err := c.OpenIngress(ctx, *route, *key, *task)
+		res, err := c.OpenIngress(ctx, *route, *key, *task, *summary)
 		if err != nil {
 			return err
 		}

@@ -175,9 +175,9 @@ func (c *Client) PlanDiff(ctx context.Context, ref, other string) (plan.Delta, e
 }
 
 // OpenIngress is the delegation verb.
-func (c *Client) OpenIngress(ctx context.Context, route, key, payload string) (OpenIngressResponse, error) {
+func (c *Client) OpenIngress(ctx context.Context, route, key, payload, summary string) (OpenIngressResponse, error) {
 	var out OpenIngressResponse
-	return out, c.do(ctx, "POST", "/v1/ingress", OpenIngressRequest{Route: route, Key: key, Payload: payload}, &out)
+	return out, c.do(ctx, "POST", "/v1/ingress", OpenIngressRequest{Route: route, Key: key, Payload: payload, Summary: summary}, &out)
 }
 
 // Stop presses the stop button; Resume lifts it.

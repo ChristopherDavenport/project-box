@@ -357,6 +357,7 @@ type OpenIngressRequest struct {
 	Route   string `json:"route"`
 	Key     string `json:"key"`
 	Payload string `json:"payload,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // OpenIngressResponse reports what the delivery named.
@@ -379,7 +380,7 @@ func (s *Server) openIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ing, opened, err := s.Router.Open(r.Context(), route, ingress.Delivery{
-		Key: req.Key, Payload: []byte(req.Payload), Received: time.Now().UTC(),
+		Key: req.Key, Payload: []byte(req.Payload), Title: req.Summary, Received: time.Now().UTC(),
 	})
 	if err != nil {
 		httpErr(w, 500, err.Error())
