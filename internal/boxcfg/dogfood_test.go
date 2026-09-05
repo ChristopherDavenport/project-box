@@ -78,3 +78,18 @@ func TestDogfoodMeasuresWhatItSpends(t *testing.T) {
 		t.Error("allow_unmetered: an agent whose spend is invisible is the position round 1 cost a morning to learn")
 	}
 }
+
+// TestDogfoodDeclaresItsModel: round 4's finding, held. A box that does not
+// say which model it runs runs whatever the machine's settings say — which
+// for four rounds was the most expensive model with a million-token window,
+// chosen by nobody and, until the session record existed, recorded nowhere.
+// The value is free to move; the field being set is not.
+func TestDogfoodDeclaresItsModel(t *testing.T) {
+	c, err := Load(dogfoodConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Boxes[0].Model == "" {
+		t.Error("no model: the builders would run whatever ~/.claude says, and the record would not say what that was")
+	}
+}

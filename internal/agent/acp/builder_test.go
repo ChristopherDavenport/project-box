@@ -430,3 +430,64 @@ func TestUnclassifiedWorkNeverReachesAnAgent(t *testing.T) {
 		t.Fatal("unclassified work moved the remote")
 	}
 }
+
+// TestTheSessionIsOnTheRecord. The agent-run record says what was asked, as
+// a digest. This says what was answered, in the clear: the model that ran,
+// the mode in force, every option and every command the agent offered — the
+// difference between "the skill was granted" and "the skill was delivered",
+// which round 4 of the dogfood could not tell apart from its own chain.
+func TestTheSessionIsOnTheRecord(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	ls := layers()
+	ls[0].Model = "sonnet"
+	ls[0].Session = map[string]string{"effort": "low"}
+	lp.Builder.(*Builder).Composer = &agent.Composer{Source: ls}
+	ctx := context.Background()
+	item := runItem(t, s, lp, router, "issue-session", "add the widget package")
+	if item.State != queue.StateDone {
+		t.Fatalf("item: %+v", item)
+	}
+	var session, result string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-issue-session", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch r.Kind {
+		case "agent-session":
+			session = string(r.Body)
+		case "agent-result":
+			result = string(r.Body)
+		}
+	}
+	if session == "" {
+		t.Fatal("no agent-session on the chain")
+	}
+	var rec struct {
+		Model    string                         `json:"model"`
+		Modes    struct{ Current string }       `json:"modes"`
+		Commands []string                       `json:"commands"`
+		Config   []struct{ ID, Current string } `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(session), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Model != "sonnet" || rec.Modes.Current != "acceptEdits" {
+		t.Fatalf("session record: %s", session)
+	}
+	if !strings.Contains(strings.Join(rec.Commands, ","), "box-skills:go") {
+		t.Fatalf("the delivered skills are not on the record: %s", session)
+	}
+	effort := ""
+	for _, c := range rec.Config {
+		if c.ID == "effort" {
+			effort = c.Current
+		}
+	}
+	if effort != "low" {
+		t.Fatalf("session option not on the record: %s", session)
+	}
+	// And the result names the model beside the tokens it explains.
+	if !strings.Contains(result, `"model":"sonnet"`) {
+		t.Fatalf("agent-result does not say which model ran:\n%s", result)
+	}
+}

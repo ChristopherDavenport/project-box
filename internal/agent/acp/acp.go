@@ -18,9 +18,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -68,14 +70,29 @@ var ErrTokenCeiling = errors.New("acp: run exceeded its token ceiling — sessio
 // below.
 const protocolVersion = 1
 
-// knownUpdates is every session update kind this runtime understands. The set
-// is explicit so that an unknown kind is a fact rather than a default branch:
-// see [Result.UnknownUpdates].
+// knownUpdates is every session update kind the protocol defines, and so
+// every kind this runtime understands. The set is explicit so that an unknown
+// kind is a fact rather than a default branch: see [Result.UnknownUpdates].
+//
+// It is the protocol's whole SessionUpdate union, taken from the schema the
+// pinned adapter ships against (@agentclientprotocol/sdk, types.gen.d.ts, as
+// of claude-agent-acp 0.70.0), not the subset a previous version of this
+// file happened to handle. A kind the protocol added and this list lacks
+// reads as drift, which is the right alarm; a kind this list has and the
+// protocol dropped is a stale line here, which the conformance replay shows.
 var knownUpdates = []string{
-	"tool_call", "tool_call_update", "agent_message_chunk", "agent_thought_chunk",
-	"user_message_chunk", "plan", "available_commands_update", "current_mode_update",
-	"usage_update",
+	"agent_message_chunk", "agent_thought_chunk", "available_commands_update",
+	"config_option_update", "current_mode_update", "plan", "plan_removed",
+	"plan_update", "session_info_update", "tool_call", "tool_call_update",
+	"usage_update", "user_message_chunk",
 }
+
+// ErrSessionConfig reports a session configuration the agent would not take
+// as asked: a model it does not list, a value it answered with something
+// else, an option it does not have. Fail closed, for the reason set_mode
+// does. A run on a model nobody chose is exactly the silence the session
+// record exists to end, and refusing a prompt is cheaper than billing one.
+var ErrSessionConfig = errors.New("acp: session configuration refused")
 
 // UpdateKind names what the stream said an agent did. The set is closed and
 // small on purpose: a live view is a timeline, not a log dump, and every kind
@@ -143,6 +160,125 @@ type Usage struct {
 	CostUSD float64
 	// Reported is false when nothing on the stream said what the run cost.
 	Reported bool
+	// ContextUsed is the most tokens the agent reported in context at once,
+	// and ContextSize the window it reported them against — both from
+	// usage_update, which the protocol defines as exactly that pair. Together
+	// they explain a cache-read figure: a run that re-reads 200K tokens a
+	// turn and one that re-reads 20K are identical in the four counters
+	// above and differ tenfold on the invoice. The dogfood's 25M-token run
+	// averaged 206K a call on a million-token window; nothing on its record
+	// could say so.
+	ContextUsed int64
+	ContextSize int64
+	// RateLimit is the last account the agent gave of the ACCOUNT's limits —
+	// status, which window, how full, when it resets — when the dialect
+	// carried one; nil when nothing said. This is the signal the factory's
+	// own meter cannot produce: a subscription's window is shared with
+	// whoever else is using the account, and the meter sees only its half.
+	RateLimit *RateLimit
+}
+
+// RateLimit is the account's rate-limit state as the agent reported it. The
+// adapter forwards it under _meta on usage_update; the protocol reserves
+// _meta for exactly this kind of agent-specific fact.
+type RateLimit struct {
+	// Status is allowed, allowed_warning, or rejected.
+	Status string `json:"status"`
+	// Window names the limit: five_hour, seven_day, and the model-specific
+	// weekly windows.
+	Window string `json:"window"`
+	// Utilization is how much of the window is used, 0 to 1.
+	Utilization float64 `json:"utilization"`
+	// ResetsAt is when the window turns, in unix seconds.
+	ResetsAt int64 `json:"resets_at"`
+}
+
+// Session is the agent's own account of the session it opened: the modes it
+// offers and the one in force, the configuration options it exposes with
+// their current values, and the commands — skills, slash commands — it made
+// available. All of it the protocol's; none of it this runtime's guess.
+//
+// These answer the questions a run's cost and conduct turn on and which the
+// agentref, being a digest of what was ASKED, cannot: which model actually
+// ran, at what effort, and whether the skills the bundle granted were offered
+// at all. Round 4 of the dogfood could answer none of them from its record —
+// the model was whatever the machine's settings said, and a granted skill the
+// agent never invoked looked identical to one it never received.
+type Session struct {
+	// Opened is true once session/new answered. A Result from a run that
+	// failed before that carries nothing here, and says so.
+	Opened bool
+	Modes  ModeState
+	Config []ConfigOption
+	// Commands are the names the agent listed on available_commands_update,
+	// in the order given. Plugin skills arrive as plugin:skill.
+	Commands []string
+}
+
+// ModeState is the protocol's session mode state: the mode in force and the
+// modes the agent offers.
+type ModeState struct {
+	Current   string   `json:"current"`
+	Available []string `json:"available"`
+}
+
+// ConfigOption is one session configuration option as the agent reported
+// it. Category is the protocol's semantic tag — "mode", "model",
+// "thought_level", or an agent's own — and is what a bundle's Model is
+// matched on, since ids are the agent's to choose.
+type ConfigOption struct {
+	ID       string `json:"id"`
+	Name     string `json:"name,omitempty"`
+	Category string `json:"category,omitempty"`
+	// Type is select or boolean.
+	Type string `json:"type,omitempty"`
+	// Current is the value in force; a boolean renders as true/false.
+	Current string `json:"current"`
+	// Values are the selectable values in the order offered, groups
+	// flattened. Empty for a boolean.
+	Values []string `json:"values,omitempty"`
+}
+
+// Option finds an option by id; nil when the agent offers none by that name.
+func (s Session) Option(id string) *ConfigOption {
+	for i := range s.Config {
+		if s.Config[i].ID == id {
+			return &s.Config[i]
+		}
+	}
+	return nil
+}
+
+// ByCategory finds the first option the agent tagged with a protocol
+// category; nil when none is.
+func (s Session) ByCategory(category string) *ConfigOption {
+	for i := range s.Config {
+		if s.Config[i].Category == category {
+			return &s.Config[i]
+		}
+	}
+	return nil
+}
+
+// Model is the model in force, from the option the agent tagged as such —
+// or named "model", for an agent that tags nothing. Empty when the agent
+// exposes no model at all, which is itself a fact worth the record.
+func (s Session) Model() string {
+	if o := s.ByCategory("model"); o != nil {
+		return o.Current
+	}
+	if o := s.Option("model"); o != nil {
+		return o.Current
+	}
+	return ""
+}
+
+func (s Session) ids() []string {
+	ids := make([]string, 0, len(s.Config))
+	for _, o := range s.Config {
+		ids = append(ids, o.ID)
+	}
+	return ids
 }
 
 // Total is every token the run is billed for, cache reads included — cheaper,
@@ -283,6 +419,9 @@ type Result struct {
 	// Usage is what the run cost, when the agent said. Silence is carried as
 	// Usage.Reported false, never as a zero total.
 	Usage Usage
+	// Session is what the agent said it was, once it had opened: modes,
+	// configuration, commands. See [Session].
+	Session Session
 	// UnknownUpdates lists session update kinds this runtime does not
 	// understand, deduped in first-seen order, plus "tool_call:untitled" for
 	// a tool call that arrived with no title for policy to match on.
@@ -341,6 +480,12 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		// cursor rather than a second buffer, so the live account cannot drift
 		// from the settled one.
 		flushed int
+		// Context occupancy and the account's limits, gathered from
+		// usage_update as separate facts from the spend: the usage merge
+		// below picks one source for the counters, and these belong to
+		// neither.
+		ctxUsed, ctxSize int64
+		rateLimit        *RateLimit
 	)
 	// flush releases the message the agent has written since its last action.
 	// Chunk-by-chunk would be a log dump — hundreds of frames a second saying
@@ -490,6 +635,36 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				mu.Lock()
 				res.Text += u.Update.Content.Text
 				mu.Unlock()
+			case "usage_update":
+				mu.Lock()
+				if u.Update.Size > 0 {
+					ctxSize = u.Update.Size
+				}
+				if u.Update.Used > ctxUsed {
+					ctxUsed = u.Update.Used
+				}
+				if rl := u.rateLimit(); rl != nil {
+					rateLimit = rl
+				}
+				mu.Unlock()
+			case "current_mode_update":
+				mu.Lock()
+				res.Session.Modes.Current = u.Update.CurrentModeID
+				mu.Unlock()
+			case "config_option_update":
+				mu.Lock()
+				if len(u.Update.ConfigOptions) > 0 {
+					res.Session.Config = configOptions(u.Update.ConfigOptions)
+				}
+				mu.Unlock()
+			case "available_commands_update":
+				names := make([]string, 0, len(u.Update.AvailableCommands))
+				for _, c := range u.Update.AvailableCommands {
+					names = append(names, c.Name)
+				}
+				mu.Lock()
+				res.Session.Commands = names
+				mu.Unlock()
 			default:
 				if !slices.Contains(knownUpdates, u.Update.SessionUpdate) {
 					mu.Lock()
@@ -524,7 +699,9 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			ErrProtocolDialect, protocolVersion, initRes.ProtocolVersion)
 	}
 	var newRes struct {
-		SessionID string `json:"sessionId"`
+		SessionID     string             `json:"sessionId"`
+		Modes         *wireModes         `json:"modes"`
+		ConfigOptions []wireConfigOption `json:"configOptions"`
 	}
 	if err := conn.call(ctx, "session/new", map[string]any{
 		"cwd": rt.Dir, "mcpServers": []any{},
@@ -532,6 +709,15 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	}, &newRes); err != nil {
 		return Result{}, fmt.Errorf("acp: session/new: %w", err)
 	}
+	// What the agent says it is, before anything is asked of it. Under the
+	// lock because the agent may already be announcing its commands.
+	mu.Lock()
+	res.Session.Opened = true
+	if newRes.Modes != nil {
+		res.Session.Modes = newRes.Modes.state()
+	}
+	res.Session.Config = configOptions(newRes.ConfigOptions)
+	mu.Unlock()
 	if mode := b.Tools.PermissionMode; mode != "" {
 		if err := conn.call(ctx, "session/set_mode", map[string]any{
 			"sessionId": newRes.SessionID, "modeId": mode,
@@ -540,6 +726,21 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			// harness-default trap this whole layer exists to prevent.
 			return Result{}, fmt.Errorf("acp: agent refused permission mode %q: %w", mode, err)
 		}
+		mu.Lock()
+		res.Session.Modes.Current = mode
+		mu.Unlock()
+	}
+	// The model and the rest of the session configuration, through the
+	// protocol and asserted back. The Result travels with the refusal so the
+	// record can say what the agent offered instead of what was asked.
+	if err := rt.configure(ctx, conn, newRes.SessionID, b, &mu, &res.Session); err != nil {
+		// Copied under the lock: the agent is still announcing its commands
+		// on the stream while this refusal goes back, and a Result read
+		// unlocked here is the race the detector caught on the first CI run.
+		mu.Lock()
+		refused := res
+		mu.Unlock()
+		return refused, err
 	}
 	var promptRes struct {
 		StopReason string     `json:"stopReason"`
@@ -577,6 +778,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		res.Usage = streamed
 	}
 	res.Usage.CostUSD = cost
+	res.Usage.ContextUsed, res.Usage.ContextSize, res.Usage.RateLimit = ctxUsed, ctxSize, rateLimit
 	if violated != nil {
 		return res, violated
 	}
@@ -677,6 +879,85 @@ func (rt *Runtime) harnessOptions(b agent.Bundle) map[string]any {
 	return opts
 }
 
+// configure applies the bundle's session configuration through the protocol
+// — the model first, matched on the option the agent tags with the model
+// category, then every option the bundle names by id — and asserts each one
+// back from the agent's own answer.
+//
+// The assertion is exact. An agent that resolves an alias to something it
+// prefers has changed the agent on the record, so the operator names the
+// value the agent lists and the record shows the list. Refusing costs a
+// session/new; running the wrong model costs a run.
+func (rt *Runtime) configure(ctx context.Context, conn *conn, sessionID string, b agent.Bundle, mu *sync.Mutex, s *Session) error {
+	set := func(opt ConfigOption, want string) error {
+		var value any = want
+		if opt.Type == "boolean" {
+			v, err := strconv.ParseBool(want)
+			if err != nil {
+				return fmt.Errorf("%w: %s is a boolean option and %q is not a boolean", ErrSessionConfig, opt.ID, want)
+			}
+			value, want = v, strconv.FormatBool(v)
+		}
+		var setRes struct {
+			ConfigOptions []wireConfigOption `json:"configOptions"`
+		}
+		if err := conn.call(ctx, "session/set_config_option", map[string]any{
+			"sessionId": sessionID, "configId": opt.ID, "value": value,
+		}, &setRes); err != nil {
+			return fmt.Errorf("%w: agent refused %s=%q (it offers %v): %v", ErrSessionConfig, opt.ID, want, opt.Values, err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if setRes.ConfigOptions != nil {
+			s.Config = configOptions(setRes.ConfigOptions)
+		}
+		got := s.Option(opt.ID)
+		if got == nil {
+			return fmt.Errorf("%w: asked for %s=%q and the agent's answer no longer lists %s at all", ErrSessionConfig, opt.ID, want, opt.ID)
+		}
+		if got.Current != want {
+			return fmt.Errorf("%w: asked for %s=%q, agent answered %s=%q (it offers %v)", ErrSessionConfig, opt.ID, want, opt.ID, got.Current, opt.Values)
+		}
+		return nil
+	}
+	if b.Model != "" {
+		mu.Lock()
+		opt := s.ByCategory("model")
+		if opt == nil {
+			opt = s.Option("model")
+		}
+		var chosen ConfigOption
+		if opt != nil {
+			chosen = *opt
+		}
+		ids := s.ids()
+		mu.Unlock()
+		if opt == nil {
+			return fmt.Errorf("%w: model %q requested and the agent offers no model option (its options: %v)", ErrSessionConfig, b.Model, ids)
+		}
+		if err := set(chosen, b.Model); err != nil {
+			return err
+		}
+	}
+	for _, id := range slices.Sorted(maps.Keys(b.Session)) {
+		mu.Lock()
+		opt := s.Option(id)
+		var chosen ConfigOption
+		if opt != nil {
+			chosen = *opt
+		}
+		ids := s.ids()
+		mu.Unlock()
+		if opt == nil {
+			return fmt.Errorf("%w: session option %q requested and the agent offers none by that id (its options: %v)", ErrSessionConfig, id, ids)
+		}
+		if err := set(chosen, b.Session[id]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // noteUnknown records a dialect surprise once. Callers hold mu.
 func (r *Result) noteUnknown(kind string) {
 	if kind == "" {
@@ -734,9 +1015,97 @@ type sessionUpdate struct {
 			Amount   float64 `json:"amount"`
 			Currency string  `json:"currency"`
 		} `json:"cost,omitempty"`
+		// Used and Size ride usage_update: tokens in context, and the window.
+		Used int64 `json:"used"`
+		Size int64 `json:"size"`
+		// CurrentModeID rides current_mode_update; ConfigOptions rides
+		// config_option_update as the full set; AvailableCommands rides
+		// available_commands_update.
+		CurrentModeID     string             `json:"currentModeId"`
+		ConfigOptions     []wireConfigOption `json:"configOptions"`
+		AvailableCommands []struct {
+			Name string `json:"name"`
+		} `json:"availableCommands"`
 		Meta *wireMeta `json:"_meta,omitempty"`
 	} `json:"update"`
 	Meta *wireMeta `json:"_meta,omitempty"`
+}
+
+// rateLimit finds the account's limit report on an update, at either place
+// the dialect may hang metadata. Nil when the update carried none.
+func (u sessionUpdate) rateLimit() *RateLimit {
+	for _, m := range []*wireMeta{u.Update.Meta, u.Meta} {
+		if m != nil && m.RateLimit != nil {
+			w := m.RateLimit
+			return &RateLimit{Status: w.Status, Window: w.RateLimitType,
+				Utilization: w.Utilization, ResetsAt: int64(w.ResetsAt)}
+		}
+	}
+	return nil
+}
+
+// wireModes is the protocol's SessionModeState as it arrives on session/new.
+type wireModes struct {
+	CurrentModeID  string `json:"currentModeId"`
+	AvailableModes []struct {
+		ID string `json:"id"`
+	} `json:"availableModes"`
+}
+
+func (m wireModes) state() ModeState {
+	s := ModeState{Current: m.CurrentModeID}
+	for _, a := range m.AvailableModes {
+		s.Available = append(s.Available, a.ID)
+	}
+	return s
+}
+
+// wireConfigOption is the protocol's SessionConfigOption. currentValue is a
+// string for a select and a bool for a boolean, so it is read raw and
+// rendered once; options are either values or groups of values, so the same
+// shape reads both and flattens.
+type wireConfigOption struct {
+	ID           string             `json:"id"`
+	Name         string             `json:"name"`
+	Category     string             `json:"category"`
+	Type         string             `json:"type"`
+	CurrentValue json.RawMessage    `json:"currentValue"`
+	Options      []wireSelectOption `json:"options"`
+}
+
+type wireSelectOption struct {
+	Value   string             `json:"value"`
+	Options []wireSelectOption `json:"options"` // present on a group
+}
+
+func (o wireConfigOption) current() string {
+	var s string
+	if json.Unmarshal(o.CurrentValue, &s) == nil {
+		return s
+	}
+	var b bool
+	if json.Unmarshal(o.CurrentValue, &b) == nil {
+		return strconv.FormatBool(b)
+	}
+	return ""
+}
+
+func configOptions(ws []wireConfigOption) []ConfigOption {
+	out := make([]ConfigOption, 0, len(ws))
+	for _, w := range ws {
+		o := ConfigOption{ID: w.ID, Name: w.Name, Category: w.Category, Type: w.Type, Current: w.current()}
+		for _, v := range w.Options {
+			if len(v.Options) > 0 {
+				for _, g := range v.Options {
+					o.Values = append(o.Values, g.Value)
+				}
+				continue
+			}
+			o.Values = append(o.Values, v.Value)
+		}
+		out = append(out, o)
+	}
+	return out
 }
 
 // tool names a call the way policy and the tally both want it named: the
@@ -768,6 +1137,14 @@ func (u sessionUpdate) usage() *wireUsage {
 
 type wireMeta struct {
 	Usage *wireUsage `json:"usage,omitempty"`
+	// RateLimit is claude-agent-acp's forwarding of the harness's
+	// rate_limit_event, on usage_update, under a key the adapter owns.
+	RateLimit *struct {
+		Status        string  `json:"status"`
+		ResetsAt      float64 `json:"resetsAt"`
+		RateLimitType string  `json:"rateLimitType"`
+		Utilization   float64 `json:"utilization"`
+	} `json:"_claude/rateLimit,omitempty"`
 	// ClaudeCode carries the harness's own account of a tool call. toolName is
 	// the STABLE identifier — "Bash", "Edit", "Read" — as against title, which
 	// is prose written for a human to read and for Bash is the whole command

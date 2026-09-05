@@ -69,9 +69,13 @@ func TestTheDialectIsPinned(t *testing.T) {
 			t.Errorf("agent_message_chunk %q was not accumulated:\n%s", want, res.Text)
 		}
 	}
+	// ContextUsed and ContextSize come from the same usage_update frame the
+	// cost rides on: the recorded dialect always carried the context
+	// occupancy, and until now the runtime read past it.
 	want := Usage{
 		InputTokens: 1200, OutputTokens: 300, CachedReadTokens: 9000, CachedWriteTokens: 500,
 		Tokens: 11000, CostUSD: 0.0432, Reported: true,
+		ContextUsed: 11000, ContextSize: 200000,
 	}
 	if res.Usage != want {
 		t.Errorf("usage = %+v, want %+v", res.Usage, want)

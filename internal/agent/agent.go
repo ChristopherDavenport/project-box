@@ -207,7 +207,24 @@ type Layer struct {
 	Tools        ToolPolicy
 	// Model overrides the runtime default. Empty inherits from the layer
 	// beneath.
+	//
+	// The value is the agent's own — what its model option lists, verbatim.
+	// The runtime applies it through the protocol after the session opens
+	// and asserts the answer; a value the agent does not list fails the run
+	// before a prompt is sent. Left empty everywhere, the agent runs its
+	// default, which for a harness that reads the machine's settings is
+	// whatever the machine says: a choice nobody made.
 	Model string
+	// Session is the rest of the session configuration, by the id the agent
+	// gives each option — what the protocol calls session config options:
+	// effort, a fast mode, a sub-agent, whatever this agent exposes. The
+	// same contract as Model: the agent's own values, applied through the
+	// protocol, asserted back, refused otherwise. Per key, the most specific
+	// non-empty value wins.
+	//
+	// Model is not spelled here. The protocol gives it a category of its
+	// own, every agent has one, and the record calls it out by name.
+	Session map[string]string
 }
 
 // Request asks for the agent that should run one piece of work.
@@ -256,6 +273,7 @@ type Bundle struct {
 	Context      ContextSet
 	Tools        ToolPolicy
 	Model        string
+	Session      map[string]string
 	// Envelope is the data handling actually in force — the origination's
 	// declaration intersected with the ceiling it ran under. It is part of the
 	// digest, so a different envelope is a different agent on the record,

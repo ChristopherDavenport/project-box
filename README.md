@@ -69,6 +69,7 @@ boxes:
   - name: shop
     agent: /path/to/claude-agent-acp   # or per-repo `build:` commands
     seat: mason
+    model: sonnet                      # by the value the agent lists; empty = its default
     repos:
       - name: api
         remote: git@github.com:you/api.git
@@ -118,6 +119,20 @@ without this an agent that hangs runs until the daemon stops.
 A box's `harness:` block is its agentic surface — plugins, skills, MCP — and
 all of it is resolved into the bundle before the agent starts, so the
 `agentref` answers "what could this agent do" as well as "what was it told".
+
+`model:` and `session:` are the session the builders run, in the protocol's
+own terms: the model by the value the agent lists for its model option, and
+every other option — effort, a fast mode, a sub-agent — by the id the agent
+gives it. Both are applied through `session/set_config_option` once the
+session opens and asserted back from the agent's answer; a value the agent
+does not list, or answers with something else, fails the run before a prompt
+is sent. Left empty, the agent's own default runs — for claude-agent-acp,
+whatever the machine's settings say, which is a choice nobody made. Either
+way the `agent-session` record on the item's chain says what the agent
+answered: the model in force, the mode, every option with the values it
+offered, and every command (skills among them) it made available. The
+`agent-run` record says what was asked, as a digest; this says what was
+delivered, in the clear.
 
 ```yaml
     harness:
