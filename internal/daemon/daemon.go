@@ -292,7 +292,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			check := r.Check
 			lp := &loop.Loop{
 				Store: d.store, Runner: d.cfgRunner(), Mirror: d.mirror, Repo: repo, Branch: r.Branch,
-				Lane: forge.Lane(r.Lane),
+				Lane: forge.Lane(r.Lane), Meter: d.meter,
 				Gates: func(ws forge.Workspace) []forge.Gate {
 					return []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
 						Commands: [][]string{{"sh", "-c", check}}}}
