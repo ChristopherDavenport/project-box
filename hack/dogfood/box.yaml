@@ -24,6 +24,14 @@ every: 15s
 drain: 60s
 build_timeout: 30m
 
+# The run log: what each agent did while it ran — every tool call and what
+# it was doing, what it said, what policy refused — kept beside the chain so
+# the room can show a unit's page after the run, not only while it runs.
+# Telemetry, pruned by age; thirty days is longer than any round is looked
+# at, and a frame is a line, not a record. Absent would keep every frame.
+runs:
+  keep_for: 720h
+
 budget:
   # Sized from four rounds on a model nobody chose (see `model:` below):
   # 1.0M, 5.3M, 7.5M, 20.1M, then round 4's 25.1M — 98.5% of it cache reads
@@ -42,7 +50,13 @@ budget:
   # tokens of volume, two side by side so the section leases are exercised.
   # Resize from what round 5 shows. Hot-reloadable: edit and `kill -HUP`.
   max_concurrent: 2
-  max_per_window: 4
+  # Five, not four, since round 6: the meter counts a start when the pump
+  # acquires it, before the loop tries the section leases, so a unit that
+  # only WAITED for a section kept its start and was charged a second one
+  # when it finally ran. Round 6's whole-repository unit was refused that
+  # way with three real runs behind it. Raised by one until the meter
+  # counts runs, not attempts.
+  max_per_window: 5
   max_tokens_per_window: 15000000
   window: 1h
   # The brake in the currency that actually bound. The account's five-hour

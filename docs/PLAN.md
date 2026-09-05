@@ -1574,3 +1574,32 @@ account window 91% against a 0.5 reserve). Round 6 runs #15 at effort
 `high` on both roles. Gas City's answer to the same arithmetic is metered
 billing and idle-is-free, not thrift; the credential decision is what
 remains.
+
+Round 6 (2026-09-04, #15, `docs/experiments/round6-2026-09-04.md`): three
+units and a plan landed on `factory` for $5.66 and 9.09M tokens against
+round 5's two for $9.22 — and the effort it was meant to measure never
+reached the agent: the daemon dropped the roles block, every session
+asserted xhigh, and nothing on the chain could say a tier had been asked for
+(#42 fixes it, with the test that fails on that shape). The round ran on as
+the xhigh control. Found beside it: the meter charges a unit that only waited
+on a section as a start, so a whole-repository unit was refused with three
+agents run (cap raised to 5 until the meter counts runs); a restart keeps the
+meter's count, correctly; the room showed a run only on one page, only while
+it ran, never for the planner, and untitled for Read and Bash (#44: the
+planner's hook, replay on the item's stream, an Agent card on the item
+page, and a run log in the store beside the chain, pruned by age — and the
+untitled rows turned out to be the runtime dropping every tool event whose
+content was a list, a decoder typed for the chunk's object, found in round
+7 and fixed in #48); and an unsectioned unit has no check to iterate on. Round 7 measures
+effort `high` on a daemon that applies it.
+
+Round 7 (2026-09-05, #47, `docs/experiments/round7-2026-09-05.md`): effort
+`high` on both roles, asserted at the wire and on every request; one unit
+for two sections landed on `factory` for $6.29 and 13.21M tokens. Against
+round 6's planner at `xhigh`, the same requests and tool calls, half the
+output and half the wall time per request, the same money: the bill is the
+context re-read (62% cache reads, 98% of tokens), which effort does not
+touch. A node naming two sections carried one context of 174K where round
+6's split halves stayed under 124K. Found beside it: the untitled Read and
+Bash rows were the runtime dropping every tool event whose content was a
+list, not the adapter's timing (#48). Round 8 runs #45 and #46 at `high`.
