@@ -49,7 +49,33 @@ type Config struct {
 	OTLP         string    `yaml:"otlp"`
 	Budget       Budget    `yaml:"budget"`
 	Retention    Retention `yaml:"retention"`
-	Boxes        []Box     `yaml:"boxes"`
+	// Runs is the run log's policy: how long what an agent did while it ran
+	// stays readable after the run. Telemetry, kept beside the chain.
+	Runs  Runs  `yaml:"runs"`
+	Boxes []Box `yaml:"boxes"`
+}
+
+// Runs is the retention of the run log — every tool call and its title, what
+// the agent said, what policy refused — which the room shows while a unit
+// runs and reads back afterwards. Absent, frames are kept for ever, on the
+// same reasoning as [Retention]: the destructive act is the one a silent
+// default must not take, and an operator who has said nothing has not asked
+// for a run's record dropped. Unlike the chain it is not evidence, so an age
+// is the whole policy: nothing is exported, nothing is summarised.
+type Runs struct {
+	// KeepFor is the age past which a run's frames are pruned; empty keeps
+	// them.
+	KeepFor string `yaml:"keep_for"`
+}
+
+// KeepForDuration is the parsed age; zero when unset or unparseable, which
+// keeps everything rather than guessing at an interval.
+func (r Runs) KeepForDuration() time.Duration {
+	if r.KeepFor == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(r.KeepFor)
+	return d
 }
 
 // Retention is how much evidence stays in the hot store, and where the rest
@@ -564,6 +590,15 @@ func (c *Config) validate() error {
 	if c.Retention.KeepFor != "" {
 		if _, err := time.ParseDuration(c.Retention.KeepFor); err != nil {
 			return fmt.Errorf("boxcfg: retention.keep_for: %w", err)
+		}
+	}
+	if c.Runs.KeepFor != "" {
+		d, err := time.ParseDuration(c.Runs.KeepFor)
+		if err != nil {
+			return fmt.Errorf("boxcfg: runs.keep_for: %w", err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("boxcfg: runs.keep_for %q — a positive age, or absent to keep every frame", c.Runs.KeepFor)
 		}
 	}
 	// Half a retention policy compacts nothing, silently. Refusing is the

@@ -79,7 +79,12 @@ type Planner struct {
 	// InheritSettings, Spend and Transcript are as on [Builder].
 	InheritSettings bool
 	Spend           func(ctx context.Context, run string, u Usage)
-	Transcript      io.Writer
+	// Progress, when set, receives the judgement's stream as it arrives,
+	// tagged with the run — "plan-<ingress>" — exactly as [Builder.Progress]
+	// tags a unit's. A planner that judged for eight minutes with nothing
+	// on any surface was the first thing round 6 taught about the room.
+	Progress   func(ctx context.Context, run string, u Update)
+	Transcript io.Writer
 }
 
 // Name satisfies [plan.Decomposer].
@@ -175,7 +180,11 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 
 	rt := &Runtime{Command: p.Command, Dir: tree, ContextDir: "", Env: p.Env,
 		MaxTokens: p.MaxTokens, Transcript: p.Transcript,
-		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: p.InheritSettings}
+		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: p.InheritSettings,
+		Progress: p.progress(ctx, run)}
+	if p.Progress != nil {
+		p.Progress(ctx, run, Update{Kind: UpdateStarted, Text: bundle.Ref})
+	}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, sent)
 	elapsed := time.Since(started)
@@ -477,4 +486,13 @@ func (r recorder) json(ctx context.Context, kind, subject string, v any) {
 		body = []byte(fmt.Sprintf(`{"error":%q}`, err.Error()))
 	}
 	r.raw(ctx, kind, subject, body)
+}
+
+// progress adapts the run-tagged hook to the runtime's untagged one; a
+// runtime with no hook does no work per update.
+func (p *Planner) progress(ctx context.Context, run string) func(Update) {
+	if p.Progress == nil {
+		return nil
+	}
+	return func(u Update) { p.Progress(ctx, run, u) }
 }

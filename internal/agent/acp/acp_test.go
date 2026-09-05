@@ -655,6 +655,29 @@ func fakeAgent(scenario string) {
 						"title": "cd /work && find . -name '*.go' | head -80",
 						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "latetitle":
+				// The real dialect's order for a Read or a Bash: the call is
+				// announced under its _meta name with no title, and the title
+				// — the path, the command line — arrives on the update that
+				// follows. A second title for the same call says nothing new.
+				// An Edit arrives titled from the first.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call",
+						"toolCallId": "t-1", "status": "pending",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Read"}}}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-1", "status": "in_progress", "title": "Read main.go",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Read"}}}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update",
+						"toolCallId": "t-1", "status": "completed", "title": "Read main.go",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Read"}}}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call",
+						"toolCallId": "t-2", "status": "pending", "title": "Edit main.go",
+						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Edit"}}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "metadenied":
 				// A DENIED tool that names itself only in the metadata. This
 				// used to walk straight through: no title meant nothing to

@@ -17,6 +17,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/runlog"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -74,6 +75,24 @@ DROP TRIGGER IF EXISTS chain_no_delete;
 CREATE TRIGGER IF NOT EXISTS chain_delete_outside_compaction BEFORE DELETE ON chain
 WHEN NOT EXISTS (SELECT 1 FROM compaction_gate)
 BEGIN SELECT RAISE(ABORT, 'evidence chain is append-only outside compaction'); END;
+
+-- The run log: what an agent did while it ran, one row a frame, in order.
+-- Telemetry beside the chain, so no trigger guards it — it is pruned by
+-- age, and the chain's append-only property does not extend to it.
+CREATE TABLE IF NOT EXISTS runlog (
+	tenant TEXT    NOT NULL,
+	run    TEXT    NOT NULL,
+	n      INTEGER NOT NULL,
+	at_ns  INTEGER NOT NULL,
+	kind   TEXT    NOT NULL,
+	call   TEXT    NOT NULL,
+	tool   TEXT    NOT NULL,
+	text   TEXT    NOT NULL,
+	reason TEXT    NOT NULL,
+	PRIMARY KEY (tenant, run, n)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS runlog_by_age ON runlog (tenant, at_ns);
 `
 
 // Store is a SQLite-backed store.Store.
@@ -130,6 +149,79 @@ func (s *Store) Leaser(runner string) forge.Leaser {
 
 // Log returns the evidence log.
 func (s *Store) Log() evidence.Log { return &log{s: s} }
+
+func (s *Store) Runs() runlog.Log { return &runs{s: s} }
+
+type runs struct{ s *Store }
+
+const frameCols = `run, n, at_ns, kind, call, tool, text, reason`
+
+func (r *runs) Append(ctx context.Context, t tenant.ID, f runlog.Frame) (runlog.Frame, error) {
+	if err := t.Validate(); err != nil {
+		return runlog.Frame{}, err
+	}
+	if f.Run == "" {
+		return runlog.Frame{}, errors.New("sqlite: a run log frame needs a run")
+	}
+	if f.At.IsZero() {
+		f.At = r.s.now()
+	}
+	f.At = f.At.UTC()
+	err := r.s.write(ctx, func(tx *sql.Tx) error {
+		var n int64
+		err := tx.QueryRowContext(ctx,
+			`SELECT COALESCE(MAX(n), 0) FROM runlog WHERE tenant=? AND run=?`,
+			string(t), f.Run).Scan(&n)
+		if err != nil {
+			return err
+		}
+		f.N = uint64(n) + 1
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO runlog (tenant, `+frameCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
+			string(t), f.Run, int64(f.N), f.At.UnixNano(), f.Kind, f.Call, f.Tool, f.Text, f.Reason)
+		return err
+	})
+	if err != nil {
+		return runlog.Frame{}, err
+	}
+	return f, nil
+}
+
+func (r *runs) Frames(ctx context.Context, t tenant.ID, run string) ([]runlog.Frame, error) {
+	rows, err := r.s.r.QueryContext(ctx,
+		`SELECT `+frameCols+` FROM runlog WHERE tenant=? AND run=? ORDER BY n`, string(t), run)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []runlog.Frame
+	for rows.Next() {
+		var f runlog.Frame
+		var n, at int64
+		if err := rows.Scan(&f.Run, &n, &at, &f.Kind, &f.Call, &f.Tool, &f.Text, &f.Reason); err != nil {
+			return nil, err
+		}
+		f.N, f.At = uint64(n), time.Unix(0, at).UTC()
+		out = append(out, f)
+	}
+	return out, rows.Err()
+}
+
+func (r *runs) Prune(ctx context.Context, t tenant.ID, before time.Time) (int64, error) {
+	if err := t.Validate(); err != nil {
+		return 0, err
+	}
+	var n int64
+	err := r.s.write(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM runlog WHERE tenant=? AND at_ns<?`, string(t), before.UnixNano())
+		if err != nil {
+			return err
+		}
+		n, err = res.RowsAffected()
+		return err
+	})
+	return n, err
+}
 
 type leaser struct {
 	s      *Store
