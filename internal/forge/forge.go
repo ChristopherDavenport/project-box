@@ -127,9 +127,14 @@ type ChangeSet struct {
 	Run string
 	// Intent is the human-readable reason this change exists, carried through
 	// to the commit messages and the evidence records.
-	Intent  string
-	Members []Member
-	Created time.Time
+	Intent string
+	// DrivingIssue is the GitHub issue number this change addresses (e.g.
+	// "42"), empty when the change did not originate from a GitHub issue. A
+	// caller wiring an issue-driven route populates it; a PR opened for the
+	// change (see git.PRLander) links it with "Fixes #<n>" in the PR body.
+	DrivingIssue string
+	Members      []Member
+	Created      time.Time
 }
 
 // Member is one repository's participation in a [ChangeSet].

@@ -48,6 +48,14 @@ type Approval struct {
 	// approval for something nobody looked at — which is why GitHub has
 	// dismiss-stale-reviews and why this field is checked rather than assumed.
 	Commit forge.Commit
+	// PlanRef is the exact plan approved: a sha256 digest computed by
+	// Plan.Seal (see internal/plan.Plan.Ref), never a name that can move.
+	//
+	// A plan approved and then re-decomposed is not the plan that runs, the
+	// same way a commit approved and then force-pushed is not the revision
+	// that runs — so this binds to the sealed digest, and an approval names
+	// either a Commit or a PlanRef, never derives one from the other.
+	PlanRef string
 	// Repo is the repository's canonical key: host/owner/name (see
 	// estate.Enrollment.Repo).
 	Repo   string
@@ -106,6 +114,22 @@ func Distinct(approvals []Approval, head forge.Commit, requester authz.Actor) in
 	seen := make(map[string]struct{}, len(approvals))
 	for _, a := range approvals {
 		if a.Commit != head || SelfApproved(a, requester) {
+			continue
+		}
+		seen[a.Subject] = struct{}{}
+	}
+	return len(seen)
+}
+
+// DistinctForPlan counts approvals that name ref and are not self-approvals.
+//
+// Approvals of a superseded plan are not counted at all rather than counted
+// and warned about: a stale approval is indistinguishable from no approval
+// for the plan actually being run.
+func DistinctForPlan(approvals []Approval, ref string, requester authz.Actor) int {
+	seen := make(map[string]struct{}, len(approvals))
+	for _, a := range approvals {
+		if a.PlanRef != ref || SelfApproved(a, requester) {
 			continue
 		}
 		seen[a.Subject] = struct{}{}

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
@@ -40,13 +41,19 @@ type Gates func(ws forge.Workspace) []forge.Gate
 
 // Loop runs work items end to end for one repo of one Box.
 type Loop struct {
-	Store   store.Store
-	Runner  string
-	Mirror  *git.Mirror
-	Repo    forge.Repo
-	Branch  string
-	Builder Builder
-	Gates   Gates
+	Store  store.Store
+	Runner string
+	Mirror *git.Mirror
+	Repo   forge.Repo
+	Branch string
+	// PRLander, when set, wraps the plain git.Lander a land constructs so
+	// the change lands through an opened GitHub pull request
+	// (git.NewPRLander) rather than a direct fenced push — the same inner
+	// git mechanics either way, never replaced. Nil preserves exactly
+	// today's behavior: git.NewLander(l.Mirror, l.Store.Log()).Land.
+	PRLander func(inner *git.Lander) forge.Lander
+	Builder  Builder
+	Gates    Gates
 	// Lane is the landing discipline; empty means gated. Env and infra
 	// repositories refuse the optimistic lane at Run.
 	Lane forge.Lane
@@ -161,6 +168,7 @@ func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 	return queue.WorkItem{ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID,
 		Kind:      string(ing.Kind),
 		Requester: ing.Requester, Repo: ing.Repo, Task: task, Depth: ing.Depth,
+		OriginKey: ing.Key,
 		// Repair work wakes with the attempt it follows rather than cold; the
 		// ingress is where that travels, the same way the depth does.
 		Prior: ing.Prior}
@@ -399,7 +407,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	// gates judge content rather than authority. The land window fills it in.
 	cs := forge.ChangeSet{
 		ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
-		Intent: item.Task,
+		Intent: item.Task, DrivingIssue: drivingIssue(item.OriginKey),
 		Members: []forge.Member{{
 			Repo: l.Repo.Name, Branch: l.Branch, Base: base, Head: head,
 		}},
@@ -493,7 +501,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	defer leaser.Release(ctx, landLease)
 	cs.Members[0].Lease = landLease
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
-		_, err := git.NewLander(l.Mirror, l.Store.Log()).Land(ctx, cs)
+		_, err := l.lander(git.NewLander(l.Mirror, l.Store.Log())).Land(ctx, cs)
 		if err == nil {
 			telemetry.Outcome(ctx, queue.StateDone, string(head))
 		}
@@ -574,6 +582,29 @@ func short(c forge.Commit) string {
 	return string(c)
 }
 
+// drivingIssue reads the GitHub issue number off an issue-route ingress's
+// delivery key, carried onto the item as OriginKey (e.g. "issue-42"). Any
+// other shape — a campaign or incident key, or none at all — is left empty
+// rather than guessed at; see [queue.WorkItem.OriginKey] and
+// [ingress.Ingress.Key].
+func drivingIssue(originKey string) string {
+	n, ok := strings.CutPrefix(originKey, "issue-")
+	if !ok {
+		return ""
+	}
+	return n
+}
+
+// lander is the one seam both land call sites share: the plain git.Lander a
+// land constructs, wrapped by PRLander when the Box configures one. The
+// underlying git mechanics are never replaced, only wrapped.
+func (l *Loop) lander(inner *git.Lander) forge.Lander {
+	if l.PRLander != nil {
+		return l.PRLander(inner)
+	}
+	return inner
+}
+
 // runOptimistic is land-then-check: the lease and the expected-old-value
 // check guard the landing exactly as in the gated lane — fencing is never
 // optimistic — and the gates run afterwards as checks on the branch. A red
@@ -595,8 +626,10 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 	}
 	defer l.Store.Leaser(l.Runner).Release(ctx, landLease)
 	cs.Members[0].Lease = landLease
+	var landing forge.Landing
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
-		_, err := git.NewLander(l.Mirror, l.Store.Log()).Land(ctx, cs)
+		var err error
+		landing, err = l.lander(git.NewLander(l.Mirror, l.Store.Log())).Land(ctx, cs)
 		return err
 	}); lerr != nil {
 		// The landing itself was refused — a superseded token or a moved
@@ -667,9 +700,16 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 			// against. The notes are deliberately absent: this run has not
 			// settled yet, so its handoff is not written, and the successor
 			// resolves it at wake time from the seat that wrote it.
+			// The reason names the PR it repairs when one was opened for
+			// this landing, so the repair references it rather than
+			// re-deriving it from the branch.
+			priorReason := reason
+			if len(landing.Landed) > 0 && landing.Landed[0].PRURL != "" {
+				priorReason = fmt.Sprintf("%s; pr: %s", reason, landing.Landed[0].PRURL)
+			}
 			prior := agent.Prior{
 				Run: item.ID, Repo: l.Repo.Name, Branch: l.Branch, Sha: string(head),
-				Checks: failing(verdicts), Reason: reason,
+				Checks: failing(verdicts), Reason: priorReason,
 			}
 			repair, rerr := l.Red(ctx, item, prior)
 			if rerr != nil {

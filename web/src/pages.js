@@ -3,10 +3,12 @@
 // agent saying, what needs a person, what happened to this unit, what is
 // recorded about this commit, and how do I hand it more work.
 import { LitElement, html, css, nothing } from 'lit';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { Task } from '@lit/task';
 import {
-  getStatus, getItems, getExceptions, getItem, getItemEvidence, getProvenance, getSessions, getSession,
-  getRunFrames, openIngress, reload, retryItem, resolveItem,
+  getStatus, getItems, getExceptions, getItem, getItemEvidence, getProvenance, getProvenanceChain, provenanceExportURL,
+  getSessions, getSession, openIngress,getRunFrames, reload, retryItem, resolveItem,
+  getPlan, getIngressPlans, getPlanDiff,
 } from './api.js';
 import { ActivityController } from './sse.js';
 import {
@@ -844,51 +846,210 @@ export class BoxItem extends LitElement {
 }
 customElements.define('box-item', BoxItem);
 
-/** Provenance: the audit query — everything recorded about one commit. */
+/** Provenance: the audit query — the chain one commit is a link of, every
+ *  span verified, every gap named. The ordered list is the representation of
+ *  record; the diagram arrives from the server already laid out (the browser
+ *  renders, it does not lay out) and sits on top, hidden from screen
+ *  readers. The export link is the same chain as one self-contained file. */
 export class BoxProvenance extends LitElement {
   static properties = { sha: { attribute: false } };
   static styles = [base, css`
     :host { display: block; }
     .sha { margin: 0 0 var(--jh-space-300); }
+    .diagram { overflow-x: auto; margin: var(--jh-space-300) 0; color: var(--jh-color-content-primary-enabled); }
+    .gap { margin-bottom: var(--jh-space-300); }
+    .span { margin: var(--jh-space-400) 0 0; }
+    .span h3 { margin: 0 0 var(--jh-space-100); font: var(--jh-font-body-md-semibold); }
+    .verify { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .verify.broken { color: var(--jh-color-content-danger-enabled); font-weight: 600; }
+    .worm { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
     ol { list-style: none; margin: 0; padding: 0; }
     li { display: grid; grid-template-columns: minmax(92px, max-content) 1fr max-content; gap: var(--jh-space-300);
          align-items: baseline; padding: var(--jh-space-200) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    li.context { opacity: 0.65; }
     .by { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
     .t { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); white-space: nowrap; }
+    .actions { margin-top: var(--jh-space-400); }
   `];
   _task = new Task(this, {
-    task: async ([sha], { signal }) => (sha ? getProvenance(sha, signal) : []),
+    task: async ([sha], { signal }) => (sha ? getProvenanceChain(sha, signal) : null),
     args: () => [this.sha],
   });
 
+  // The whole span, exactly as the export shows it: a chain proves nothing
+  // from the middle, so the surrounding records render too, muted — the
+  // links naming the commit carry the weight.
+  _span(span) {
+    const named = new Set(span.names ?? []);
+    return html`
+      <section class="span">
+        <h3>${span.scope}</h3>
+        ${span.verify
+          ? html`<p class="verify broken">Chain broken: ${span.verify}</p>`
+          : span.whole
+            ? html`<p class="verify">${span.total} record(s) — chain verifies end to end.</p>`
+            : html`<p class="verify">Standing scope — ${span.total} record(s) verify; showing the ${span.records?.length ?? 0} naming this commit.</p>`}
+        ${span.compacted ? html`<p class="worm">Crosses into WORM: records ${span.compacted.from}–${span.compacted.through} at ${span.compacted.export?.uri}${span.compacted.export?.retain_until && span.compacted.export.retain_until !== '0001-01-01T00:00:00Z' ? html`, retention locked until <box-when .at=${span.compacted.export.retain_until} abs></box-when>` : ', no retention lock (local sink)'}</p>` : nothing}
+        <ol aria-label=${`Records in ${span.scope}`}>
+          ${(span.records ?? []).map((r) => {
+            const item = itemOf(r);
+            return html`
+              <li class=${named.has(r.Seq) ? '' : 'context'}>
+                ${kindTag(r.Kind)}
+                <div>
+                  <div>${describe(r)}${item ? html` · <a href=${'/items/' + item}>open the item</a>` : nothing}</div>
+                  <div class="by">${r.Actor}${r.OnBehalfOf ? ` for ${r.OnBehalfOf}` : ''} · ${r.Scope} #${r.Seq}${named.has(r.Seq) ? ' · names this commit' : ''}</div>
+                </div>
+                <span class="t"><box-when .at=${r.At}></box-when></span>
+              </li>`;
+          })}
+        </ol>
+      </section>`;
+  }
+
   render() {
     return html`
-      <jh-card header-title="Provenance" header-subtitle="Everything recorded about one commit, across every chain that names it" padding="medium">
+      <jh-card header-title="Provenance" header-subtitle="The chain this commit is a link of — every span verified, every gap named" padding="medium">
         <p class="sha">Commit <box-hash label="commit" .value=${this.sha} chars="16"></box-hash></p>
         ${this._task.render({
           pending: () => loading('provenance'),
           error: failed,
-          complete: (recs) => (recs?.length ?? 0) === 0
-            ? html`<p class="empty">Nothing is recorded about this commit. Either it did not come through this factory, or it has not landed yet.</p>`
-            : html`<ol aria-label="Provenance records">
-                ${recs.map((r) => {
-                  const item = itemOf(r);
-                  return html`
-                    <li>
-                      ${kindTag(r.Kind)}
-                      <div>
-                        <div>${describe(r)}${item ? html` · <a href=${'/items/' + item}>open the item</a>` : nothing}</div>
-                        <div class="by">${r.Actor} · ${r.Scope} #${r.Seq}</div>
-                      </div>
-                      <span class="t"><box-when .at=${r.At}></box-when></span>
-                    </li>`;
-                })}
-              </ol>`,
+          complete: (view) => {
+            const chain = view?.chain ?? {};
+            if ((chain.spans?.length ?? 0) === 0) {
+              return html`<p class="empty">Nothing is recorded about this commit. Either it did not come through this factory, or it has not landed yet.</p>`;
+            }
+            return html`
+              ${(chain.gaps ?? []).map((g) => html`
+                <jh-notification class="gap" appearance="negative" type="alert" hide-dismiss-button>
+                  <strong>Missing ${g.link}</strong> — ${g.why}
+                </jh-notification>`)}
+              ${view.svg ? html`<div class="diagram" aria-hidden="true">${unsafeHTML(view.svg)}</div>` : nothing}
+              ${chain.spans.map((s) => this._span(s))}
+              <div class="actions">
+                <jh-button appearance="secondary" size="small" label="Evidence artifact"
+                  href=${provenanceExportURL(this.sha)} target="_blank"></jh-button>
+                <span class="helper">One self-contained file: the same chain with its full records, verifiable offline — save it to hand an auditor complete evidence.</span>
+              </div>`;
+          },
         })}
       </jh-card>`;
   }
 }
 customElements.define('box-provenance', BoxProvenance);
+
+/** Plan: the decomposition graph for one origination, rendered before
+ *  anything claims a node. The ordered node list is the representation of
+ *  record — it is also the form that pastes into an approval record, so it
+ *  has to be complete and readable with the diagram gone — and the diagram
+ *  arrives from the server already laid out, aria-hidden underneath it. */
+export class BoxPlan extends LitElement {
+  static properties = { ref: { attribute: false } };
+  static styles = [base, facts, css`
+    :host { display: grid; gap: var(--jh-space-400); }
+    .fanout { font: var(--jh-font-heading-medium-4); margin: 0 0 var(--jh-space-300); }
+    .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; margin-bottom: var(--jh-space-300); }
+    .diagram { overflow-x: auto; margin: var(--jh-space-300) 0; color: var(--jh-color-content-primary-enabled); }
+    table { border-collapse: collapse; width: 100%; margin-bottom: var(--jh-space-300); }
+    caption { text-align: left; padding-bottom: var(--jh-space-200); font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    th, td { text-align: left; vertical-align: top; padding: var(--jh-space-200) var(--jh-space-300) var(--jh-space-200) 0;
+             border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    thead th { white-space: nowrap; font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+    ol.nodes { list-style: none; margin: 0; padding: 0; }
+    ol.nodes li { padding: var(--jh-space-300) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    ol.nodes .nid { font: var(--jh-font-body-md-semibold); }
+    ol.nodes .ntask { margin: var(--jh-space-100) 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .diffs { display: grid; gap: var(--jh-space-400); grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+    .diffs h3 { margin: 0 0 var(--jh-space-100); font: var(--jh-font-body-md-semibold); }
+    .diffs ol { list-style: none; margin: 0; padding: 0; }
+    .diffs li { padding: var(--jh-space-100) 0; overflow-wrap: anywhere; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+  `];
+
+  _task = new Task(this, {
+    task: async ([ref], { signal }) => {
+      const plan = await getPlan(ref, signal);
+      const list = await getIngressPlans(plan.ingress, signal);
+      const idx = list.findIndex((p) => p.ref === plan.ref);
+      const previous = idx > 0 ? list[idx - 1] : null;
+      const diff = previous ? await getPlanDiff(previous.ref, plan.ref, signal) : null;
+      return { plan, previous, diff };
+    },
+    args: () => [this.ref],
+  });
+
+  _node(n, i) {
+    return html`
+      <li>
+        <div class="nid">${i + 1}. <code>${n.id}</code></div>
+        <div class="ntask">${n.task}</div>
+        <dl class="facts">
+          <dt>Repo</dt><dd>${n.repo || html`<span class="muted">inherits the origination's</span>`}</dd>
+          <dt>Depends on</dt><dd>${n.depends_on?.length ? n.depends_on.join(', ') : html`<span class="muted">nothing</span>`}</dd>
+          <dt>Sections</dt><dd>${n.sections?.length ? n.sections.join(', ') : html`<span class="muted">whole repository</span>`}</dd>
+          <dt>Model</dt><dd>${n.model || html`<span class="muted">default</span>`}</dd>
+        </dl>
+      </li>`;
+  }
+
+  _diffList(label, nodes, describeNode) {
+    return html`
+      <div>
+        <h3>${label} (${nodes?.length ?? 0})</h3>
+        ${nodes?.length
+          ? html`<ol aria-label=${`${label} nodes`}>${nodes.map((n) => html`<li>${describeNode(n)}</li>`)}</ol>`
+          : html`<p class="empty">None.</p>`}
+      </div>`;
+  }
+
+  _diffSection(previous, diff) {
+    if (!previous) {
+      return html`
+        <jh-card header-title="Change from the previous plan" padding="medium">
+          <p class="empty">First plan recorded for this origination — nothing to diff against.</p>
+        </jh-card>`;
+    }
+    return html`
+      <jh-card header-title="Change from the previous plan" header-subtitle=${`Against ${previous.ref}`} padding="medium">
+        <div class="diffs">
+          ${this._diffList('Added', diff.Added, (n) => html`<code>${n.id}</code> — ${n.task}`)}
+          ${this._diffList('Removed', diff.Removed, (n) => html`<code>${n.id}</code> — ${n.task}`)}
+          ${this._diffList('Changed', diff.Changed, (c) => html`<code>${c.ID}</code> — ${c.Before.task} → ${c.After.task}`)}
+        </div>
+      </jh-card>`;
+  }
+
+  render() {
+    return this._task.render({
+      pending: () => loading('plan'),
+      error: failed,
+      complete: ({ plan, previous, diff }) => html`
+        <jh-card header-title="Plan" header-subtitle=${plan.ref} padding="medium">
+          <p class="fanout">${plan.fan_out} unit(s)</p>
+          <div class="meta">
+            <jh-tag size="small" label=${plan.decomposer}></jh-tag>
+            <jh-tag size="small" class=${plan.replayable ? 'positive' : 'neutral'} label=${plan.replayable ? 'replayable' : 'judgement'}></jh-tag>
+          </div>
+          ${plan.replayable
+            ? html`
+              <table>
+                <caption>Facts read, and when</caption>
+                <thead><tr><th scope="col">Key</th><th scope="col">Value</th><th scope="col">As of</th></tr></thead>
+                <tbody>
+                  ${(plan.facts ?? []).map((f) => html`
+                    <tr><td>${f.key}</td><td>${f.value}</td><td><box-when .at=${f.as_of} abs></box-when></td></tr>`)}
+                </tbody>
+              </table>`
+            : html`<p>Produced by agent <box-hash label="agentref" .value=${plan.agentref}></box-hash></p>`}
+          <ol class="nodes" aria-label="Plan nodes, in order">
+            ${plan.nodes.map((n, i) => this._node(n, i))}
+          </ol>
+          ${plan.svg ? html`<div class="diagram" aria-hidden="true">${unsafeHTML(plan.svg)}</div>` : nothing}
+        </jh-card>
+        ${this._diffSection(previous, diff)}`,
+    });
+  }
+}
+customElements.define('box-plan', BoxPlan);
 
 /** Submit: the delegation verb as a form. */
 export class BoxSubmit extends LitElement {

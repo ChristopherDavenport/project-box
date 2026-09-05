@@ -12,6 +12,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
@@ -133,6 +134,36 @@ func (c *Client) Session(ctx context.Context, id string) (control.Session, error
 func (c *Client) Provenance(ctx context.Context, sha string) ([]evidence.Record, error) {
 	var out []evidence.Record
 	return out, c.do(ctx, "GET", "/v1/provenance/"+sha, nil, &out)
+}
+
+// ProvenanceChain is the audit query assembled: every span verified, every
+// gap named. What `box provenance` prints, so the CLI and the room read the
+// same facts — a fact one reader has and another does not is worse than one
+// nobody has.
+func (c *Client) ProvenanceChain(ctx context.Context, sha string) (ProvenanceView, error) {
+	var out ProvenanceView
+	return out, c.do(ctx, "GET", "/v1/provenance/"+sha+"/chain", nil, &out)
+}
+
+// Plan fetches one sealed plan by its content address: the graph, the
+// fan-out pulled out as its own field, and the diagram laid out.
+func (c *Client) Plan(ctx context.Context, ref string) (PlanView, error) {
+	var out PlanView
+	return out, c.do(ctx, "GET", "/v1/plans/"+ref, nil, &out)
+}
+
+// IngressPlans lists every plan recorded for an origination, oldest first —
+// what a diff view uses to find the previous run of the same decomposer
+// without pulling every full graph.
+func (c *Client) IngressPlans(ctx context.Context, id string) ([]PlanSummary, error) {
+	var out []PlanSummary
+	return out, c.do(ctx, "GET", "/v1/ingress/"+id+"/plans", nil, &out)
+}
+
+// PlanDiff is the graph delta between two sealed plans, compared by node ID.
+func (c *Client) PlanDiff(ctx context.Context, ref, other string) (plan.Delta, error) {
+	var out plan.Delta
+	return out, c.do(ctx, "GET", "/v1/plans/"+ref+"/diff/"+other, nil, &out)
 }
 
 // OpenIngress is the delegation verb.

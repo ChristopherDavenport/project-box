@@ -52,4 +52,9 @@ type Placement struct {
 	Was Commit
 	Now Commit
 	At  time.Time
+	// PRURL is the GitHub pull request opened for this placement, empty for
+	// a plain git.Lander landing and populated when a PR-opening wrapper
+	// (git.PRLander) handled the land — so a caller reads the PR URL
+	// straight off the returned Landing without a second query.
+	PRURL string
 }
