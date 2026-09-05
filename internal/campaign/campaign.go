@@ -17,6 +17,8 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/estate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
@@ -111,6 +113,8 @@ var ErrHalted = errors.New("campaign: halted — prior wave failed")
 type Engine struct {
 	Registry *estate.StoreRegistry
 	Queue    *queue.Queue
+	// Plans records each wave's decomposition on the origination's chain.
+	Plans *plan.Store
 	// MaxFactAge bounds how old a fact may be before the engine refuses it.
 	MaxFactAge time.Duration
 }
@@ -178,37 +182,43 @@ func inScope(c ingress.Campaign, e estate.Enrollment) bool {
 // Advance creates the next wave of work for a campaign, throttled by its
 // rollout. Batch zero means ONE, never unlimited; a prior wave's failures at
 // or past the halt threshold stop the campaign instead of spreading it.
-func (e *Engine) Advance(ctx context.Context, ing ingress.Ingress, c ingress.Campaign, task string) ([]queue.WorkItem, error) {
-	if ing.Kind != ingress.KindCampaign {
-		return nil, fmt.Errorf("campaign: ingress %s is %s, not a campaign", ing.ID, ing.Kind)
+//
+// The wave is now a recorded PLAN, which is what a campaign always lacked. Its
+// fan-out was computed, thrown away, and visible afterwards only as however
+// many items happened to appear — so "which repositories did this wave choose,
+// and which did it leave out" was a question with no artifact behind it. Each
+// wave opens its own plan on the origination's chain and every item names the
+// wave that called for it; see [kind.Decomposition.Standing] for why a new
+// plan rather than an amended one.
+//
+// Halting is a decision about whether to plan at all, so it comes first: a
+// halted campaign records no plan, because a plan is a statement that this is
+// the work, and a halted campaign's answer is that there is none.
+func (e *Engine) Advance(ctx context.Context, ing ingress.Ingress, decl kind.Declaration) ([]queue.WorkItem, error) {
+	if ing.Campaign == nil {
+		return nil, fmt.Errorf("campaign: ingress %s carries no campaign parameters — a predicate is what there is to reconcile toward", ing.ID)
 	}
-	prior, failures, err := e.wave(ctx, ing)
+	_, failures, err := e.wave(ctx, ing)
 	if err != nil {
 		return nil, err
 	}
-	if failures > c.Rollout.HaltAfter {
-		return nil, fmt.Errorf("%w: %d failure(s), halt threshold %d", ErrHalted, failures, c.Rollout.HaltAfter)
+	if failures > ing.Campaign.Rollout.HaltAfter {
+		return nil, fmt.Errorf("%w: %d failure(s), halt threshold %d", ErrHalted, failures, ing.Campaign.Rollout.HaltAfter)
 	}
-	todo, err := e.Unsatisfied(ctx, c)
+	reg, err := plan.NewRegistry(Decomposer{Engine: e})
 	if err != nil {
 		return nil, err
 	}
-	batch := c.Rollout.Batch
-	if batch <= 0 {
-		batch = 1
+	p, err := plan.Make(ctx, reg, ing, decl)
+	if err != nil {
+		return nil, err
+	}
+	if p, err = e.Plans.Record(ctx, ing, p); err != nil {
+		return nil, err
 	}
 	var items []queue.WorkItem
-	for _, repoKey := range todo {
-		if len(items) >= batch {
-			break
-		}
-		if _, inFlight := prior[repoKey]; inFlight {
-			continue // this repo already has an item from an earlier wave
-		}
-		id := fmt.Sprintf("%s-%s", ing.ID, sanitize(repoKey))
-		item, err := e.Queue.Submit(ctx, queue.WorkItem{
-			ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID, Task: task + " [" + repoKey + "]",
-		})
+	for _, w := range plan.Items(ing, p) {
+		item, err := e.Queue.Submit(ctx, w)
 		if err != nil {
 			return items, err
 		}
@@ -217,20 +227,85 @@ func (e *Engine) Advance(ctx context.Context, ing ingress.Ingress, c ingress.Cam
 	return items, nil
 }
 
+// Decomposer is the campaign engine as a [plan.Decomposer]: one wave of a
+// predicate's fan-out, throttled.
+//
+// A campaign stops being a kind that happens to fan out and becomes one
+// decomposer among several. What used to make it special was that it bypassed
+// intake and produced work through its own engine; what makes it different now
+// is one declared field — that its decomposition is standing rather than
+// once — and the estate read it needs, which is why it lives here rather than
+// in the plan package.
+type Decomposer struct{ Engine *Engine }
+
+// Name satisfies [plan.Decomposer].
+func (Decomposer) Name() string { return kind.DecomposeCampaign }
+
+// Replayable satisfies [plan.Decomposer].
+//
+// True, and it is the honest answer rather than the flattering one: the wave
+// is a pure function of the predicate, the enrolled estate's facts, and which
+// repositories already have work. Re-running it against FRESHER facts yielding
+// a different graph is not a violation of that — it is the mechanism by which
+// a plan built on stale facts announces itself.
+func (Decomposer) Replayable() bool { return true }
+
+// Decompose emits one wave: the unsatisfied repositories in scope, minus those
+// already carrying work from an earlier wave, capped by the rollout batch.
+func (d Decomposer) Decompose(ctx context.Context, ing ingress.Ingress, _ kind.Declaration) (plan.Result, error) {
+	if ing.Campaign == nil {
+		return plan.Result{}, fmt.Errorf("ingress %s carries no campaign parameters", ing.ID)
+	}
+	c := *ing.Campaign
+	prior, _, err := d.Engine.wave(ctx, ing)
+	if err != nil {
+		return plan.Result{}, err
+	}
+	todo, err := d.Engine.Unsatisfied(ctx, c)
+	if err != nil {
+		return plan.Result{}, err
+	}
+	batch := c.Rollout.Batch
+	if batch <= 0 {
+		batch = 1
+	}
+	now := time.Now()
+	// The predicate is the first fact the plan read, and the unsatisfied set
+	// is the rest. Recorded so a wave can be read back as a decision rather
+	// than as an outcome: "these were the repositories that did not satisfy
+	// `go.version >= 1.25` at this moment, and this batch is the ones I took."
+	facts := []plan.Fact{{Key: "predicate", Value: c.Predicate, AsOf: now}}
+	task := plan.TaskOf(ing)
+	var nodes []plan.Node
+	for _, repoKey := range todo {
+		facts = append(facts, plan.Fact{Key: "unsatisfied/" + repoKey, Value: c.Predicate, AsOf: now})
+		if len(nodes) >= batch {
+			continue // out of scope for THIS wave, still a fact this plan read
+		}
+		if _, inFlight := prior[repoKey]; inFlight {
+			continue // this repo already has an item from an earlier wave
+		}
+		nodes = append(nodes, plan.Node{ID: sanitize(repoKey), Task: task + " [" + repoKey + "]"})
+	}
+	if len(nodes) == 0 {
+		return plan.Result{}, fmt.Errorf("nothing to do this wave: %d unsatisfied, %d already in flight", len(todo), len(prior))
+	}
+	return plan.Result{Nodes: nodes, Facts: facts}, nil
+}
+
 // wave folds the states of the campaign's previously submitted items:
 // which repos already have work, and how many ended badly.
 func (e *Engine) wave(ctx context.Context, ing ingress.Ingress) (map[string]queue.State, int, error) {
 	prior := map[string]queue.State{}
 	failures := 0
-	// Items are named deterministically from the ingress and repo, so the
-	// fold walks the estate rather than needing a listing primitive.
+	// Items are named deterministically from the origination and the repo, so
+	// the fold walks the estate rather than needing a listing primitive.
 	for repo, rerr := range e.Registry.Repos(ctx, ing.Tenant) {
 		if rerr != nil {
 			return nil, 0, rerr
 		}
 		key := estate.Key(repo)
-		id := fmt.Sprintf("%s-%s", ing.ID, sanitize(key))
-		item, err := e.Queue.Load(ctx, ing.Tenant, id)
+		item, err := e.Queue.Load(ctx, ing.Tenant, itemID(ing.ID, key))
 		if err != nil {
 			continue // no item for this repo yet
 		}
@@ -240,6 +315,14 @@ func (e *Engine) wave(ctx context.Context, ing ingress.Ingress) (map[string]queu
 		}
 	}
 	return prior, failures, nil
+}
+
+// itemID is the queue id a campaign's node takes, and it must agree with
+// [plan.Plan.ItemID] exactly. Two spellings would make the wave fold blind to
+// the wave the plan submitted, and a campaign that cannot see its own prior
+// work re-submits it every tick.
+func itemID(ingressID, repoKey string) string {
+	return "wi-" + ingressID + "-" + sanitize(repoKey)
 }
 
 func sanitize(s string) string {

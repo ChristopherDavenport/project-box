@@ -14,6 +14,8 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/control"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -97,12 +99,28 @@ func TestTheFactoryRunsWithNoAgentInIt(t *testing.T) {
 	// 1. No agent runtime was assembled. This is the structural half, and the
 	// one that catches the erosion: a builder that is an *acp.Builder here
 	// means an agent got onto a path this config never asked for one on.
-	loops, _, err := d.assemble(ctx, d.cfg)
+	loops, _, kinds, err := d.assemble(ctx, d.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(loops) != 2 {
 		t.Fatalf("executors: got %d, want 2", len(loops))
+	}
+	// And the decomposition stage on the critical path of every intake is
+	// deterministic Go too. A judgement planner here would make ADMITTING work
+	// depend on an agent being available, which is the invariant one level
+	// further up the loop than the builder seat.
+	for _, name := range plan.Default().Names() {
+		d, err := plan.Default().Resolve(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !d.Replayable() {
+			t.Fatalf("default decomposer %s is not replayable — intake would depend on a judgement", name)
+		}
+	}
+	if _, err := kinds.Lookup("shop", kind.SeedIssue); err != nil {
+		t.Fatalf("the seeded issue declaration is missing: %v", err)
 	}
 	for name, lp := range loops {
 		if _, isAgent := lp.Builder.(*acp.Builder); isAgent {

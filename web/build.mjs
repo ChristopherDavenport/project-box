@@ -1,7 +1,8 @@
-// Build: bundle the app, carry the JH themes alongside. Run from web/:
-//   npm run build
-// The output in dist/ is committed and embedded into boxd (go:embed), so the
-// daemon serves its own control room and CI needs no node toolchain.
+// Build: bundle the app, carry the JH themes alongside. Run as
+//   go generate ./web
+// (which is npm ci, then this). The output in dist/ is gitignored and
+// embedded into boxd (go:embed) at build time, so the daemon serves its own
+// control room from one binary.
 import { build } from 'esbuild';
 import { cpSync } from 'node:fs';
 

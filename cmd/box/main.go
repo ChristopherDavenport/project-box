@@ -205,6 +205,12 @@ func printSession(s control.Session) {
 		origin = e.Ingress
 	}
 	fmt.Printf("  %s  box=%s repo=%s origin=%s\n", e.Task, dash(e.Box), dash(e.Repo), dash(origin))
+	if e.Plan != "" {
+		// The link between the origination and this unit. An operator looking
+		// at six rows from one origination otherwise has no way to ask whether
+		// they came from one decision or from six ticks of a decomposer.
+		fmt.Printf("  kind=%s plan=%s node=%s\n", dash(e.Kind), short(strings.TrimPrefix(e.Plan, "plan-")), dash(e.Node))
+	}
 	if e.Seat != "" {
 		fmt.Printf("  seat=%s agentref=%s\n", e.Seat, short(e.AgentRef))
 	}

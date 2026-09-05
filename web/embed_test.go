@@ -11,10 +11,10 @@ import (
 
 var defines = regexp.MustCompile(`customElements\.define\('(box-[a-z-]+)'`)
 
-// TestTheBundleIsNotStale binds the two halves of a decision this repository
-// has already paid for: dist/ is committed and go:embed-served so CI stays a
-// Go toolchain, which means nothing in CI ever runs esbuild and a source
-// change with no rebuild ships as a UI that silently lacks it.
+// TestTheBundleIsNotStale catches a dist/ generated before the last edit to
+// src/. The bundle is no longer committed, so this is not policing git any
+// more; it is policing the developer who edited a page and ran `go test`
+// without `go generate ./web` in between.
 //
 // The failure has a shape worth naming. A new page routes fine — @lit-labs
 // resolves the path and renders an undefined element, which is an empty box

@@ -16,7 +16,9 @@ import (
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
@@ -84,6 +86,8 @@ func setup(t *testing.T, budget capacity.Budget) *world {
 		router:  &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "pump-runner"},
 		pump: &Pump{
 			Store: s, Tenant: tn, Runner: "pump-runner", Queue: q,
+			Kinds: kind.Seeded("shop"), Decomposers: plan.Default(),
+			Plans: &plan.Store{Log: s.Log(), Actor: "pump-runner"},
 			Meter: &capacity.Meter{Store: s, Tenant: tn, Actor: "pump-runner", Budget: budget, Now: now},
 			Loops: map[string]*loop.Loop{"shop": {
 				Store: s, Runner: "pump-runner", Mirror: m, Repo: repo, Branch: "main",
@@ -100,7 +104,7 @@ func setup(t *testing.T, budget capacity.Budget) *world {
 func (w *world) open(t *testing.T, key, task string) {
 	t.Helper()
 	_, _, err := w.router.Open(context.Background(), ingress.Route{
-		Name: "issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue, Box: "shop", Requester: "chris",
+		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
 	}, ingress.Delivery{Key: key, Payload: []byte(task)})
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +131,7 @@ func TestStepUpIngressAndStepBack(t *testing.T) {
 		done := 0
 		for _, key := range []string{"issue-1", "issue-2", "issue-3"} {
 			ing, _, _ := w.router.Open(ctx, ingress.Route{
-				Name: "issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue, Box: "shop", Requester: "chris",
+				Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
 			}, ingress.Delivery{Key: key})
 			item, err := w.q.Load(ctx, tn, "wi-"+ing.ID)
 			if err == nil && item.State == queue.StateDone {
@@ -317,6 +321,8 @@ func TestTwoReposOneTenantSideBySide(t *testing.T) {
 	q := &queue.Queue{Store: s, Runner: "d", TTL: time.Hour}
 	p := &Pump{
 		Store: s, Tenant: tn, Runner: "d", Queue: q,
+		Kinds: kind.Seeded("shop"), Decomposers: plan.Default(),
+		Plans: &plan.Store{Log: s.Log(), Actor: "d"},
 		Meter: &capacity.Meter{Store: s, Tenant: tn, Actor: "d", Budget: capacity.Budget{MaxConcurrent: 2}},
 		Loops: map[string]*loop.Loop{
 			"shop/api": mkLoop("api", apiRem),
@@ -326,7 +332,7 @@ func TestTwoReposOneTenantSideBySide(t *testing.T) {
 	router := &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "d"}
 	open := func(route, repo, key, task string) {
 		if _, _, err := router.Open(context.Background(), ingress.Route{
-			Name: route, Kind: ingress.RouteIssue, Opens: ingress.KindIssue,
+			Name: route, Kind: ingress.RouteIssue, Opens: kind.SeedIssue,
 			Box: "shop", Repo: repo, Requester: "chris",
 		}, ingress.Delivery{Key: key, Payload: []byte(task)}); err != nil {
 			t.Fatal(err)

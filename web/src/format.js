@@ -151,7 +151,8 @@ export const KIND_APPEARANCE = {
   parked: 'negative', failed: 'negative', 'budget-refused': 'negative', stop: 'negative', denied: 'negative',
   escalated: 'negative', 'land-refused': 'negative', 'land-conflict': 'negative', 'rebase-refused': 'negative',
   'handoff-failed': 'negative', 'break-glass': 'negative', preempted: 'negative',
-  claimed: 'brand', 'agent-run': 'brand', retried: 'brand',
+  claimed: 'brand', 'agent-run': 'brand', 'agent-session': 'brand', retried: 'brand',
+  planned: 'positive', 'plan-failed': 'negative', 'plan-retried': 'brand', 'plan-resolved': 'positive',
 };
 
 export const SEVERITY_APPEARANCE = { low: 'neutral', medium: 'neutral', high: 'negative', critical: 'negative' };
@@ -280,6 +281,34 @@ export function describe(raw, titles = {}) {
       if (o.unknown_updates?.length) bits.push(`dialect drift: ${o.unknown_updates.join(', ')}`);
       return bits.join(' · ');
     }
+    case 'planned': {
+      // The decomposition: how many units, judged or derived, and where
+      // each is expressed. The plan is the artifact between ingress and
+      // work item, and it is the one that used to leave no record at all.
+      if (!o) return firstLine(text);
+      const n = (o.nodes ?? []).length;
+      const who = o.replayable ? o.decomposer : `${o.decomposer} (judgement)`;
+      const where = (o.nodes ?? []).map((u) => (u.sections?.length ? `${u.id} in ${u.sections.join('+')}` : u.id)).join(', ');
+      return `Planned ${n} unit${n === 1 ? '' : 's'} by ${who}${where ? ': ' + where : ''}`;
+    }
+    case 'plan-failed':
+      return `Planning failed — ${firstLine(text)}`;
+    case 'plan-retried':
+      return `Planning retried${text ? ' — ' + firstLine(text) : ''}`;
+    case 'plan-resolved':
+      return `Planning resolved${text ? ' — ' + firstLine(text) : ''}`;
+    case 'agent-session': {
+      // What the agent said it was once the session opened — the model that
+      // actually ran, the mode in force, every other option, and how many
+      // commands (skills among them) it offered. The agent-run record says
+      // what was asked, as a digest; this says what was answered.
+      if (!o) return firstLine(text);
+      const bits = [`model ${o.model || 'not exposed'}`];
+      if (o.modes?.current) bits.push(`mode ${o.modes.current}`);
+      for (const c of o.config ?? []) if (c.id !== 'model' && c.id !== 'mode') bits.push(`${c.id} ${c.current}`);
+      bits.push(`${(o.commands ?? []).length} commands offered`);
+      return bits.join(' · ');
+    }
     case 'charge': {
       // The charge body IS the spend, split and priced. An unreported charge
       // says so; a zero here would be the same lie the meter refuses to tell.
@@ -324,7 +353,9 @@ export function describe(raw, titles = {}) {
     case 'ingress-open':
       return `Ingress opened${o?.route ? ` on ${o.route}` : ''}${o?.key ? ` for ${o.key}` : ''}`;
     case 'indexed':
-      return indexLine(r, text, name);
+      // On the chain the note is the body; on the live feed the body may be
+      // the indexed thing itself, with the note as a field of it.
+      return indexLine(r, text || o?.note || '', name);
     case 'compacted':
       return 'Chain compacted behind a verifiable seal';
     case 'review-sample':
@@ -346,14 +377,26 @@ export function describe(raw, titles = {}) {
 // listing in the operator's words, and name the item rather than its hash.
 function indexLine(r, note, name) {
   const list = r.scope.replace(/^index\//, '');
-  const n = note ? ` — ${firstLine(note)}` : '';
+  const who = name(r.subject);
+  // The pending index's note is the task itself, which is also the name:
+  // saying it twice reads as a stutter, not as more information.
+  const n = note && firstLine(note) !== who ? ` — ${firstLine(note)}` : '';
   switch (list) {
-    case 'pending': return `Queued: ${name(r.subject)}${n}`;
-    case 'exceptions': return `Parked: ${name(r.subject)}${n}`;
-    case 'landings': return `Landed: ${name(r.subject)}${n}`;
+    case 'pending': return `Queued: ${who}${n}`;
+    case 'exceptions': return `Parked: ${who}${n}`;
+    case 'landings': return `Landed: ${who}${n}`;
     case 'ingress': return `Ingress opened: ${note ? firstLine(note) : r.subject}`;
-    default: return `Filed under ${list}: ${name(r.subject)}${n}`;
+    default: return `Filed under ${list}: ${who}${n}`;
   }
+}
+
+/** toolDetail is what a tool call is doing, without repeating its name: the
+ *  adapter titles a read "Read <path>" and a shell call by its command line. */
+export function toolDetail(f) {
+  const t = String(f.text ?? '').trim();
+  if (!t || t === f.tool) return '';
+  const re = new RegExp('^' + String(f.tool ?? '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s+', 'i');
+  return clip(t.replace(re, ''), 300);
 }
 
 /** itemOf is the work item a record is about, if it is about one. */

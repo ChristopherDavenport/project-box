@@ -6,17 +6,24 @@
 package boxcfg
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -128,6 +135,13 @@ type Budget struct {
 	// a position nobody chooses on purpose.
 	AllowUnmetered bool   `yaml:"allow_unmetered"`
 	Window         string `yaml:"window"`
+	// WindowReserve refuses new starts while the ACCOUNT's own window — the
+	// subscription's five-hour allowance, as the last run reported it — is
+	// at or above this utilization (0 to 1), until it resets. The share of
+	// the window the human on the same account keeps for themselves; `0.5`
+	// stops the factory at half. Zero means only a rejected status refuses.
+	// See capacity.Budget.WindowReserve for what it can and cannot see.
+	WindowReserve float64 `yaml:"window_reserve"`
 }
 
 // Argv is a command, written in YAML either as one string for the common
@@ -178,6 +192,36 @@ type Box struct {
 	// workspace, so the ability to put something in front of it is the
 	// difference between confinement being configurable and being a plan.
 	Agent Argv `yaml:"agent"`
+	// Model is what the box's builders run, by the value the agent lists for
+	// its model option — `sonnet`, `opus[1m]`, whatever the agent's own
+	// picker calls it. Applied through the protocol once the session is open
+	// and asserted back: a value the agent does not list, or answers with
+	// something else, fails the run before a prompt is sent, and the
+	// agent-session record says what it offered instead.
+	//
+	// Empty inherits the agent's default. For an agent that reads the
+	// machine's settings that is whatever the machine says — a choice nobody
+	// made and, before the session was recorded, nothing could show. The
+	// dogfood ran four rounds that way and turned out to be on the most
+	// expensive model with a million-token window.
+	Model string `yaml:"model"`
+	// Session is the rest of the session configuration, by the option id
+	// the agent lists: effort, a fast mode, a sub-agent. Same contract as
+	// Model — the agent's own values, applied and asserted, refused
+	// otherwise. `model` is not spelled here because it has the field above,
+	// and `mode` is not because the permission mode belongs to the tool
+	// policy and is set through session/set_mode.
+	Session map[string]string `yaml:"session"`
+	// Roles are per-role tiers: what the planner judges on, what the builder
+	// expresses on. A role's model or session wins over the box's for that
+	// role's runs and loses to a section's and to a plan node's. Keys are the
+	// roles this system has seats for; an unknown one is refused at load.
+	//
+	// This is Gas City's per-agent option_defaults without the agent: a
+	// planner is not a person with a home directory, it is a decomposer that
+	// happens to judge, and the only thing worth saying about it here is
+	// which tier the judgement is worth.
+	Roles map[string]Tier `yaml:"roles"`
 	// Confine, when set, renders that wrapper instead of making the operator
 	// write it. Load folds it into Agent, so the daemon runs one argv and
 	// knows nothing about confinement — the seam stays exactly one thing.
@@ -193,8 +237,155 @@ type Box struct {
 	// Harness is what the box's builders load: plugins, pinned skills, and
 	// the MCP servers they are actually granted.
 	Harness Harness `yaml:"harness"`
-	Seat    string  `yaml:"seat"`
-	Repos   []Repo  `yaml:"repos"`
+	// Capabilities is the box's CEILING — the most any kind declared under it
+	// may carry. Absent grants nothing, which is this system's rule everywhere
+	// and matters most here: the one dangerous authority in the factory is
+	// break-glass, and a config file that quietly conferred it by saying
+	// nothing would be the worst default available.
+	//
+	// Delegation intersects and never unions, so a kind declaring more than
+	// this is refused at load rather than narrowed. Silent narrowing leaves an
+	// operator believing something false about their factory, and the only way
+	// to discover which side won would be to have an emergency.
+	Capabilities kind.Capabilities `yaml:"capabilities"`
+	// Kinds are the governed declarations this box accepts work under, joined
+	// to and overriding the seeded ones. See [Kind].
+	Kinds []Kind `yaml:"kinds"`
+	Seat  string `yaml:"seat"`
+	Repos []Repo `yaml:"repos"`
+}
+
+// Kind is box.yaml's spelling of [kind.Declaration].
+//
+// An entry is EITHER a ref or an inline declaration, never both, and the
+// difference is governance rather than convenience. A ref names a repository,
+// a commit and a path exactly as a pinned skill does, and it is the only form
+// that may grant a capability: a declaration that says what an origination is
+// allowed to do has to pass through change control, for the same reason and by
+// the same test as an inline base layer meaning org-wide safety rules nobody
+// reviewed. An inline declaration may say how work decomposes, how it
+// escalates, and when it is finished — everything except authority.
+type Kind struct {
+	Name string `yaml:"name"`
+	// Ref pins the declaration to a governed source. Mutually exclusive with
+	// every field below it.
+	Ref *KindRef `yaml:"ref"`
+
+	Capabilities kind.Capabilities `yaml:"capabilities"`
+	Escalation   Escalation        `yaml:"escalation"`
+	Decompose    Decompose         `yaml:"decompose"`
+	Completion   kind.Completion   `yaml:"completion"`
+	Envelope     *Envelope         `yaml:"envelope"`
+}
+
+// KindRef pins a declaration to a tree.
+type KindRef struct {
+	Repo   string `yaml:"repo"`
+	Commit string `yaml:"commit"`
+	Path   string `yaml:"path"`
+}
+
+// Escalation is box.yaml's spelling of [kind.Escalation]; Objective is a
+// duration string because that is what an operator writes.
+type Escalation struct {
+	Severity         string `yaml:"severity"`
+	Objective        string `yaml:"objective"`
+	MaxReescalations int    `yaml:"max_reescalations"`
+	Route            string `yaml:"route"`
+}
+
+// Decompose is box.yaml's spelling of [kind.Decomposition].
+type Decompose struct {
+	Decomposer string      `yaml:"decomposer"`
+	Standing   bool        `yaml:"standing"`
+	Steps      []kind.Step `yaml:"steps"`
+}
+
+// Envelope is box.yaml's spelling of [agent.Envelope]. The class names are the
+// operator's own: nothing here ships a taxonomy or an order over one, because
+// the same finding is material non-public information in one estate and an
+// ordinary ticket in another.
+type Envelope struct {
+	Class     string   `yaml:"class"`
+	Endpoints []string `yaml:"endpoints"`
+	Context   []string `yaml:"context"`
+	Redaction string   `yaml:"redaction"`
+	Payload   string   `yaml:"payload"`
+}
+
+// Declaration converts one configured kind into the governed form, given the
+// source it was obtained from.
+func (k Kind) Declaration(src agent.Source) (kind.Declaration, error) {
+	d := kind.Declaration{
+		Name:         k.Name,
+		Capabilities: k.Capabilities,
+		Escalation: kind.Escalation{
+			Severity:         queue.Severity(k.Escalation.Severity),
+			MaxReescalations: k.Escalation.MaxReescalations,
+			Route:            k.Escalation.Route,
+		},
+		Decompose: kind.Decomposition{
+			Decomposer: k.Decompose.Decomposer,
+			Standing:   k.Decompose.Standing,
+			Steps:      k.Decompose.Steps,
+		},
+		Completion: k.Completion,
+		Source:     src,
+	}
+	if k.Escalation.Objective != "" {
+		obj, err := time.ParseDuration(k.Escalation.Objective)
+		if err != nil {
+			return kind.Declaration{}, fmt.Errorf("boxcfg: kind %s: escalation.objective: %w", k.Name, err)
+		}
+		d.Escalation.Objective = obj
+	}
+	if k.Escalation.Severity != "" && queue.Severity(k.Escalation.Severity).OrDefault() != queue.Severity(k.Escalation.Severity) {
+		return kind.Declaration{}, fmt.Errorf("boxcfg: kind %s: escalation.severity %q is not one of low, medium, high, critical — an unrecognised severity resolves to medium, and a floor that silently became medium is a floor nobody set",
+			k.Name, k.Escalation.Severity)
+	}
+	if k.Envelope != nil {
+		ctxClasses := make([]agent.Class, 0, len(k.Envelope.Context))
+		for _, c := range k.Envelope.Context {
+			ctxClasses = append(ctxClasses, agent.Class(c))
+		}
+		d.Envelope = &agent.Envelope{
+			Class:     agent.Class(k.Envelope.Class),
+			Endpoints: k.Envelope.Endpoints,
+			Context:   ctxClasses,
+			Redaction: agent.Redaction(k.Envelope.Redaction),
+			Payload:   agent.Payload(k.Envelope.Payload),
+		}
+	}
+	return d, nil
+}
+
+// InlineSource is the source a declaration written into box.yaml carries. Not
+// governed, by [agent.Source.Governed]'s own test, which is what refuses it a
+// capability: the file is on the operator's disk and its history is whatever
+// their deployment happens to keep, where a ref names a commit.
+func (k Kind) InlineSource(configPath string) agent.Source {
+	body, _ := yaml.Marshal(k)
+	sum := sha256.Sum256(body)
+	return agent.Source{Kind: agent.SourceFile, Path: configPath, Digest: hex.EncodeToString(sum[:])}
+}
+
+// Tier is a model and session configuration, the unit a role, a section, or
+// a plan node chooses when it chooses what to run on.
+type Tier struct {
+	Model   string            `yaml:"model"`
+	Session map[string]string `yaml:"session"`
+}
+
+// Section is box.yaml's spelling of [forge.Section]: a named region of a
+// repository, with the check a builder runs while inside it and the tier its
+// work runs on by default.
+type Section struct {
+	Name    string            `yaml:"name"`
+	Purpose string            `yaml:"purpose"`
+	Paths   []string          `yaml:"paths"`
+	Check   string            `yaml:"check"`
+	Model   string            `yaml:"model"`
+	Session map[string]string `yaml:"session"`
 }
 
 // Confine is box.yaml's spelling of [confine.Profile].
@@ -289,6 +480,28 @@ type Repo struct {
 	Route string `yaml:"route"`
 	Build string `yaml:"build"`
 	Check string `yaml:"check"`
+	// Sections are this repository's named regions — see [forge.Section].
+	// A repository that declares none has one region: itself, and every
+	// unit of work in it takes turns.
+	Sections []Section `yaml:"sections"`
+}
+
+// Sections converts the declared regions to the forge's form.
+func (r Repo) forgeSections() []forge.Section {
+	out := make([]forge.Section, 0, len(r.Sections))
+	for _, s := range r.Sections {
+		out = append(out, forge.Section{
+			Name: s.Name, Purpose: s.Purpose, Paths: s.Paths, Check: s.Check,
+			Model: s.Model, Session: s.Session,
+		})
+	}
+	return out
+}
+
+// ForgeRepo is the repository as the forge sees it, sections included.
+func (r Repo) ForgeRepo() forge.Repo {
+	return forge.Repo{Name: r.Name, Remote: r.Remote, Role: forge.Role(r.Role),
+		DefaultBranch: r.Branch, Sections: r.forgeSections()}
 }
 
 // Load reads and validates a config.
@@ -345,6 +558,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("boxcfg: budget.window: %w", err)
 		}
 	}
+	if r := c.Budget.WindowReserve; r < 0 || r > 1 {
+		return fmt.Errorf("boxcfg: budget.window_reserve %v — a share of the account's window, 0 to 1", r)
+	}
 	if c.Retention.KeepFor != "" {
 		if _, err := time.ParseDuration(c.Retention.KeepFor); err != nil {
 			return fmt.Errorf("boxcfg: retention.keep_for: %w", err)
@@ -374,6 +590,26 @@ func (c *Config) validate() error {
 			bx.Seat = "mason"
 		}
 		if err := bx.Harness.validate(bx.Name); err != nil {
+			return err
+		}
+		if err := validateSession("box "+bx.Name, bx.Session); err != nil {
+			return err
+		}
+		if (bx.Model != "" || len(bx.Session) > 0) && len(bx.Agent) == 0 {
+			return fmt.Errorf("boxcfg: box %s: model/session with no agent — a build command opens no session to configure", bx.Name)
+		}
+		for _, role := range slices.Sorted(maps.Keys(bx.Roles)) {
+			if !agent.Role(role).Known() {
+				return fmt.Errorf("boxcfg: box %s: roles.%s — no such role; the seats are builder, planner, gate, deployer and curator", bx.Name, role)
+			}
+			if err := validateSession("box "+bx.Name+" roles."+role, bx.Roles[role].Session); err != nil {
+				return err
+			}
+			if len(bx.Agent) == 0 {
+				return fmt.Errorf("boxcfg: box %s: roles.%s with no agent — a build command has no roles to tier", bx.Name, role)
+			}
+		}
+		if err := validateKinds(bx); err != nil {
 			return err
 		}
 		if bx.Confine != nil {
@@ -419,6 +655,112 @@ func (c *Config) validate() error {
 			if r.Check == "" {
 				r.Check = "true"
 			}
+			if err := validateSections(bx, r); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateSession is the one rule every session block obeys, wherever it
+// sits: ids are non-empty, values are non-empty, and the two things that have
+// fields of their own are not spelled here.
+func validateSession(where string, session map[string]string) error {
+	for _, k := range slices.Sorted(maps.Keys(session)) {
+		switch v := session[k]; {
+		case k == "":
+			return fmt.Errorf("boxcfg: %s: a session option with an empty id", where)
+		case k == "model":
+			return fmt.Errorf("boxcfg: %s: session.model — the model has its own field: model: %s", where, v)
+		case k == "mode":
+			return fmt.Errorf("boxcfg: %s: session.mode — the permission mode is the tool policy's, set through session/set_mode, not a session option", where)
+		case v == "":
+			return fmt.Errorf("boxcfg: %s: session.%s has no value", where, k)
+		}
+	}
+	return nil
+}
+
+// validateSections refuses regions the loop could not lease or a builder could
+// not be told about: a name that is not a token, a region with no paths, a
+// path that reaches outside the repository, a tier with no agent to run it.
+func validateSections(bx *Box, r *Repo) error {
+	seen := map[string]bool{}
+	for i, s := range r.Sections {
+		where := fmt.Sprintf("box %s repo %s section %d", bx.Name, r.Name, i)
+		if s.Name == "" {
+			return fmt.Errorf("boxcfg: %s has no name", where)
+		}
+		where = fmt.Sprintf("box %s repo %s section %s", bx.Name, r.Name, s.Name)
+		if strings.ContainsAny(s.Name, " \t/") {
+			return fmt.Errorf("boxcfg: %s — a section name is a plain token; it becomes a lease ref and a layer name", where)
+		}
+		if seen[s.Name] {
+			return fmt.Errorf("boxcfg: %s is declared twice — two regions under one name would lease as one and be described as two", where)
+		}
+		seen[s.Name] = true
+		if len(s.Paths) == 0 {
+			return fmt.Errorf("boxcfg: %s covers no paths — a region of nothing cannot be worked in", where)
+		}
+		for _, p := range s.Paths {
+			clean := filepath.ToSlash(filepath.Clean(p))
+			if p == "" || filepath.IsAbs(p) || clean == ".." || strings.HasPrefix(clean, "../") {
+				return fmt.Errorf("boxcfg: %s: path %q — paths are repository-relative and stay inside it", where, p)
+			}
+		}
+		if err := validateSession(where, s.Session); err != nil {
+			return err
+		}
+		if (s.Model != "" || len(s.Session) > 0) && len(bx.Agent) == 0 {
+			return fmt.Errorf("boxcfg: %s: a tier with no agent — a build command opens no session to configure", where)
+		}
+	}
+	return nil
+}
+
+// validateKinds checks the shape of a box's declarations at load, and the
+// governance rule for the inline ones.
+//
+// A ref'd declaration cannot be checked here — its content is in a repository
+// this package has no mirror for — so it is checked at assembly, where the
+// resolver is. What CAN be caught at load is caught at load: an operator who
+// wrote a capability into their config file should be told when they start the
+// daemon, not the first time an incident tries to break glass.
+func validateKinds(bx *Box) error {
+	seen := map[string]bool{}
+	for i := range bx.Kinds {
+		k := &bx.Kinds[i]
+		switch {
+		case k.Name == "":
+			return fmt.Errorf("boxcfg: box %s: kind %d has no name", bx.Name, i)
+		case seen[k.Name]:
+			return fmt.Errorf("boxcfg: box %s: kind %q is declared twice — the later would silently replace the earlier, and a capability grant is not a thing to resolve by ordering", bx.Name, k.Name)
+		}
+		seen[k.Name] = true
+		if k.Ref == nil {
+			decl, err := k.Declaration(k.InlineSource("box.yaml"))
+			if err != nil {
+				return err
+			}
+			if err := decl.Validate(bx.Capabilities); err != nil {
+				return fmt.Errorf("boxcfg: box %s: %w", bx.Name, err)
+			}
+			continue
+		}
+		if k.Capabilities.Any() || k.Escalation != (Escalation{}) || k.Decompose.Decomposer != "" ||
+			k.Decompose.Standing || len(k.Decompose.Steps) > 0 ||
+			k.Completion.Graph || len(k.Completion.Facts) > 0 || k.Envelope != nil {
+			return fmt.Errorf("boxcfg: box %s: kind %q has both a ref and inline fields — one of the two would be ignored, and which one is not a thing to leave to a reader of this file", bx.Name, k.Name)
+		}
+		switch {
+		case k.Ref.Repo == "":
+			return fmt.Errorf("boxcfg: box %s: kind %q has no ref.repo", bx.Name, k.Name)
+		case k.Ref.Path == "":
+			return fmt.Errorf("boxcfg: box %s: kind %q has no ref.path", bx.Name, k.Name)
+		case len(k.Ref.Commit) != commitLen:
+			return fmt.Errorf("boxcfg: box %s: kind %q is pinned to %q — a governed declaration needs a full %d-character commit, so what an origination was permitted to do is answerable later",
+				bx.Name, k.Name, k.Ref.Commit, commitLen)
 		}
 	}
 	return nil

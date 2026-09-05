@@ -10,6 +10,8 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/estate"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/render"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
@@ -27,7 +29,8 @@ func setup(t *testing.T) (*Engine, *estate.StoreRegistry, *queue.Queue) {
 	t.Cleanup(func() { s.Close() })
 	reg := &estate.StoreRegistry{Store: s, Tenant: tn, Actor: "census"}
 	q := &queue.Queue{Store: s, Runner: "runner-1", TTL: time.Hour}
-	return &Engine{Registry: reg, Queue: q, MaxFactAge: time.Hour}, reg, q
+	plans := &plan.Store{Log: s.Log(), Actor: "runner-1"}
+	return &Engine{Registry: reg, Queue: q, Plans: plans, MaxFactAge: time.Hour}, reg, q
 }
 
 func repo(name string) estate.Repo {
@@ -59,8 +62,24 @@ func camp(pred string, batch, halt int) ingress.Campaign {
 	return ingress.Campaign{Predicate: pred, Rollout: ingress.Rollout{Batch: batch, HaltAfter: halt}}
 }
 
-func ing() ingress.Ingress {
-	return ingress.Ingress{ID: "ing-c1", Kind: ingress.KindCampaign, Tenant: tn, Box: "shop", Requester: "chris"}
+// ing is a campaign origination carrying its own parameters. The parameters
+// live on the ingress now rather than being handed to Advance beside it:
+// "which predicate is this campaign reconciling toward" is a property of the
+// origination, and a decomposer is given an origination.
+func ing(c ingress.Campaign) ingress.Ingress {
+	return ingress.Ingress{ID: "ing-c1", Kind: kind.SeedCampaign, Tenant: tn, Box: "shop",
+		Requester: "chris", Title: "bump go", Campaign: &c}
+}
+
+// campaignKind is the seeded declaration: standing decomposition, completion
+// on its graph, no capabilities.
+func campaignKind() kind.Declaration {
+	for _, d := range kind.Seeds() {
+		if d.Name == kind.SeedCampaign {
+			return d
+		}
+	}
+	panic("no campaign seed")
 }
 
 func TestPredicates(t *testing.T) {
@@ -133,7 +152,7 @@ func TestRolloutThrottleAndHalt(t *testing.T) {
 		seed(t, reg, n, "1.24", true)
 	}
 	// Batch zero means one, never unlimited.
-	items, err := e.Advance(ctx, ing(), camp("go.version >= 1.25", 0, 0), "bump go")
+	items, err := e.Advance(ctx, ing(camp("go.version >= 1.25", 0, 0)), campaignKind())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +160,7 @@ func TestRolloutThrottleAndHalt(t *testing.T) {
 		t.Fatalf("batch 0 submitted %d items, want 1", len(items))
 	}
 	// The in-flight repo is not resubmitted; the next wave picks another.
-	items2, err := e.Advance(ctx, ing(), camp("go.version >= 1.25", 1, 0), "bump go")
+	items2, err := e.Advance(ctx, ing(camp("go.version >= 1.25", 1, 0)), campaignKind())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,11 +176,11 @@ func TestRolloutThrottleAndHalt(t *testing.T) {
 	if _, err := q.Park(ctx, w, lease, queue.SeverityMedium, "gate failed"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.Advance(ctx, ing(), camp("go.version >= 1.25", 1, 0), "bump go"); !errors.Is(err, ErrHalted) {
+	if _, err := e.Advance(ctx, ing(camp("go.version >= 1.25", 1, 0)), campaignKind()); !errors.Is(err, ErrHalted) {
 		t.Fatalf("want ErrHalted, got %v", err)
 	}
 	// A tolerant campaign (HaltAfter 1) continues past one failure.
-	if _, err := e.Advance(ctx, ing(), camp("go.version >= 1.25", 1, 1), "bump go"); err != nil {
+	if _, err := e.Advance(ctx, ing(camp("go.version >= 1.25", 1, 1)), campaignKind()); err != nil {
 		t.Fatalf("HaltAfter 1 should tolerate one failure: %v", err)
 	}
 }
@@ -242,7 +261,7 @@ func TestTemplateChangeBecomesCampaignWork(t *testing.T) {
 	if stale != 2 {
 		t.Fatalf("template change should strand every service: %d", stale)
 	}
-	items, err := e.Advance(ctx, ing(), camp("render.stale != true", 10, 0), "re-render to convention v2")
+	items, err := e.Advance(ctx, ing(camp("render.stale != true", 10, 0)), campaignKind())
 	if err != nil {
 		t.Fatal(err)
 	}
