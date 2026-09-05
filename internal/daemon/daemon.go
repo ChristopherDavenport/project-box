@@ -260,6 +260,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					Resolver:  d.mirror,
 					Model:     bx.Model,
 					Session:   bx.Session,
+					Roles:     roleTiers(bx.Roles),
 				}},
 				Seat:            &seat.Seat{Name: bx.Seat, Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
 				Mirror:          d.mirror,
@@ -425,6 +426,22 @@ func skillRefs(skills []boxcfg.Skill) []agent.SkillRef {
 		out = append(out, agent.SkillRef{Name: s.Name, Source: agent.Source{
 			Kind: agent.SourceGit, Repo: s.Repo, Commit: s.Commit, Path: s.Path,
 		}})
+	}
+	return out
+}
+
+// roleTiers is box.yaml's roles block in the harness's form. Load validates
+// the block; this is what makes it count. Without it every role ran on the
+// box's own tier, and the record could not say so: a session option nobody
+// asked for is never asserted, so the effort the roles named was read back
+// from the agent as whatever the machine's settings said.
+func roleTiers(roles map[string]boxcfg.Tier) map[agent.Role]harness.Tier {
+	if len(roles) == 0 {
+		return nil
+	}
+	out := make(map[agent.Role]harness.Tier, len(roles))
+	for name, t := range roles {
+		out[agent.Role(name)] = harness.Tier{Model: t.Model, Session: t.Session}
 	}
 	return out
 }
