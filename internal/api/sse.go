@@ -119,6 +119,22 @@ func (s *Server) events(w http.ResponseWriter, r *http.Request) {
 	}
 
 	fmt.Fprintf(w, "event: hello\ndata: {\"tenant\":%q}\n\n", s.Tenant)
+	if only != "" {
+		// A watcher who arrives mid-run gets the run so far, not the run
+		// from now on: the bus still holds what this item has done, and a
+		// timeline that began at the moment the page opened would read as
+		// an agent that had done nothing until then. Head was taken above,
+		// before the ring was read, so a frame that lands in between is in
+		// the replay and past the head both — and the head moves to it, so
+		// it is not sent again.
+		for _, f := range s.Live.Item(only) {
+			b, _ := json.Marshal(f)
+			fmt.Fprintf(w, "event: session\ndata: %s\n\n", b)
+			if f.Seq > liveSeq {
+				liveSeq = f.Seq
+			}
+		}
+	}
 	fl.Flush()
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()

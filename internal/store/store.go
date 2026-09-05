@@ -18,6 +18,7 @@ package store
 import (
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/runlog"
 )
 
 // Store is tenant-scoped access to the control plane's state.
@@ -39,6 +40,9 @@ type Store interface {
 	// value round-trips exactly, because the timestamp participates in the
 	// record's ID.
 	Log() evidence.Log
+	// Runs is the run log: what each agent did while it ran, kept beside the
+	// chain as telemetry and pruned by age, never by a chain's rules.
+	Runs() runlog.Log
 	// Close releases the backend's resources.
 	Close() error
 }

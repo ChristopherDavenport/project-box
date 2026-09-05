@@ -134,6 +134,11 @@ type Update struct {
 	// when the dialect gave nothing to match on — which is a fact about
 	// enforcement and must not be papered over with a placeholder here.
 	Tool string
+	// Call is the call's id on the wire, for [UpdateTool] only. The adapter
+	// announces a call before it knows what the call is doing, and titles it
+	// on a later update; both carry the id, so a watcher can tell one call
+	// said twice from two calls.
+	Call string
 	// Text is the agent's message for UpdateMessage, the handoff's notes
 	// for UpdateHandoff, and the call's human title for UpdateTool — what
 	// the tool is doing, as against Tool, which is its name.
@@ -483,6 +488,10 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		// tool_call_update. Keying on the call id rather than the shape is
 		// what keeps the count right when a dialect prefers one spelling.
 		seenCalls = map[string]bool{}
+		// callNames is the name each call was first seen by, and titled says
+		// whether a frame has yet said what that call is doing.
+		callNames = map[string]string{}
+		titled    = map[string]bool{}
 		// flushed is how much of res.Text has already gone out as progress. A
 		// cursor rather than a second buffer, so the live account cannot drift
 		// from the settled one.
@@ -614,14 +623,20 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				mu.Lock()
 				first := !seenCalls[key]
 				seenCalls[key] = true
+				title := u.Update.Title
+				// A title that only repeats the name says nothing a watcher
+				// did not already have from the name.
+				said := title != "" && title != name
 				if first {
 					res.ToolCalls = append(res.ToolCalls, name)
+					callNames[key] = name
+					titled[key] = said
 					// The stable name is what policy matches; the title is
 					// what the call is doing — "Read internal/api/api.go",
 					// the Bash command line — and is the half a watcher
 					// wants. A timeline that only said "Read" eleven times
 					// in a row said nothing.
-					emit(Update{Kind: UpdateTool, Tool: name, Text: u.Update.Title})
+					emit(Update{Kind: UpdateTool, Call: u.Update.ToolCallID, Tool: name, Text: title})
 					if name == "" {
 						// Nothing to match on, so enforcement did not happen
 						// here and must not be reported as if it had. Counted,
@@ -630,6 +645,15 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 						res.Unenforced++
 						res.noteUnknown("tool_call:unnamed")
 					}
+				} else if said && !titled[key] {
+					// The adapter names a Read or a Bash before it has the
+					// path or the command line, and sends the title on the
+					// update that follows. Dropped, the timeline said "Read"
+					// and "Bash" and nothing else about the two tools that
+					// say the most. Said once: the first update that carries
+					// a title, under the name the call was first seen by.
+					titled[key] = true
+					emit(Update{Kind: UpdateTool, Call: u.Update.ToolCallID, Tool: callNames[key], Text: title})
 				}
 				mu.Unlock()
 				if !first || name == "" {

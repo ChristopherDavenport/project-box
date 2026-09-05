@@ -1357,6 +1357,44 @@ factory running for years accumulates unboundedly many bounded per-entity
 chains, which is an archive problem wanting its own enumerator and policy, not
 a wildcard in this list.
 
+Issue #16 made the audit query hand-able (2026-09-03). `/v1/provenance/{sha}`
+answered with records; what an auditor works with is the chain they are links
+of, and a way to check each link. `evidence.Provenance` assembles it: every
+scope naming the sha, walked end to end and proven in the same pass with the
+judgement `Verify` uses, the WORM crossing read off a leading summary with
+its receipt and retention lock, and the origination followed from the work
+item's own body so the chain begins at the ingress the no-orphan-work
+invariant says it must. What a span CARRIES splits by the scope's shape,
+never what it checked: a per-entity chain — workitem, changeset, ingress —
+is bounded by the thing it is about and embeds whole, because a hash chain
+proves nothing from the middle; a standing scope (checks/<repo>, the ladder)
+would put a repository's entire history in one commit's artifact, so it
+embeds the links alone and the span says which of the two claims it makes.
+Gaps are NAMED, never elided: a done with no landing, a landing with no
+verdict, an item with no origination, a sha no work item names. A chain with
+a missing link renders as a missing link, not as a shorter chain, in the
+JSON, the diagram, the room, and the artifact alike.
+
+The deliverable is the EXPORT, not the browser: `/v1/provenance/{sha}/export`
+is one self-contained HTML file — no scripts, no external reference, both
+asserted by test — whose exact records ride along as a base64 `data:`
+download that the test decodes and re-verifies per-entity span by span,
+offline, which is the Phase 8 dry run's "unaided" made a property of the
+file. The #14
+layout decision paid off here as designed: `chainSVG` computes coordinates in
+Go and ships markup, the room injects what the server drew, the artifact
+embeds the same drawing, and the diagram is aria-hidden because the ordered
+list is the representation of record. `/chain` is the same assembly live;
+`box provenance` prints it in both modes — a fact one reader has and another
+does not, a fourth time.
+
+Recorded rather than implied: the chain today ends where the writers do —
+land, checks, promotion. Image digest → env commit → revision have no per-sha
+records yet (an env commit is itself a landed change and answers as one), and
+#13's plan fan-out lands as another span in the same shape. The gap rules
+read the hot side only, which is sound while the retention sweep never
+compacts per-entity chains (decided with #3); if that changes, the summary's
+kind residue is where "absent" and "pruned" must be told apart.
 Issue #13 collapsed the ingress kind into a governed declaration (2026-09-03),
 and it is the keystone the graph engine has been waiting for since Phase 10.
 `DependsOn` had exactly two non-test references — the struct field and the

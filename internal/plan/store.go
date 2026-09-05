@@ -105,6 +105,35 @@ func (s *Store) All(ctx context.Context, t tenant.ID, ingressID string) ([]Plan,
 	return out, nil
 }
 
+// ByRef reads one plan by its content address, wherever it landed. A ref is
+// a sha256-derived content address, so a collision is not a concern the way
+// it would be for a mutable key — the first match [evidence.Log.BySubject]
+// yields is returned, false with no error when nothing names it.
+//
+// BySubject walks every scope naming the subject regardless of which
+// ingress chain it is on — the same primitive [evidence.Provenance] uses —
+// so a diff view can compare two plans without either caller having to know
+// which origination produced them.
+func (s *Store) ByRef(ctx context.Context, t tenant.ID, ref string) (Plan, bool, error) {
+	for rec, err := range s.Log.BySubject(ctx, t, ref) {
+		if err != nil {
+			return Plan{}, false, err
+		}
+		if rec.Kind != RecordKind {
+			continue
+		}
+		var p Plan
+		if err := json.Unmarshal(rec.Body, &p); err != nil {
+			return Plan{}, false, fmt.Errorf("%w: reading %s: %w", ErrPlan, ref, err)
+		}
+		if p.At.IsZero() {
+			p.At = rec.At
+		}
+		return p, true, nil
+	}
+	return Plan{}, false, nil
+}
+
 // The kinds a planning failure and its resolution are written under, on the
 // same chain as RecordKind.
 const (

@@ -65,10 +65,17 @@ export const getItems = (states, signal) =>
 export const getExceptions = (signal) => fetchJSON('/v1/exceptions', signal);
 export const getItem = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}`, signal);
 export const getItemEvidence = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/evidence`, signal);
-export const getProvenance = (sha, signal) => fetchJSON(`/v1/provenance/${encodeURIComponent(sha)}`, signal);
+export const getProvenanceChain = (sha, signal) => fetchJSON(`/v1/provenance/${encodeURIComponent(sha)}/chain`, signal);
+export const provenanceExportURL = (sha) => `/v1/provenance/${encodeURIComponent(sha)}/export`;
+export const getPlan = (ref, signal) => fetchJSON(`/v1/plans/${encodeURIComponent(ref)}`, signal);
+export const getIngressPlans = (id, signal) => fetchJSON(`/v1/ingress/${encodeURIComponent(id)}/plans`, signal);
+export const getPlanDiff = (ref, other, signal) =>
+  fetchJSON(`/v1/plans/${encodeURIComponent(ref)}/diff/${encodeURIComponent(other)}`, signal);
 export const getActivity = (signal) => fetchJSON('/v1/activity', signal);
 export const getSessions = (signal) => fetchJSON('/v1/sessions', signal);
 export const getSession = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/session`, signal);
+// The run log: what a run did, kept after it — a work item's id, or plan-<ingress> for a judgement.
+export const getRunFrames = (run, signal) => fetchJSON(`/v1/runs/${encodeURIComponent(run)}/frames`, signal);
 
 // The verbs. Every one that changes the factory carries a reason, because
 // every one becomes a record and a record needs one.

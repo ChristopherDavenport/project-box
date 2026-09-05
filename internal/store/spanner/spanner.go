@@ -28,6 +28,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/runlog"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -60,6 +61,18 @@ var DDL = []string{
 		trace        STRING(MAX) NOT NULL,
 	) PRIMARY KEY (tenant, scope, seq)`,
 	`CREATE INDEX chain_by_subject ON chain (tenant, subject, at_ns)`,
+	`CREATE TABLE runlog (
+		tenant STRING(63)  NOT NULL,
+		run    STRING(MAX) NOT NULL,
+		n      INT64       NOT NULL,
+		at_ns  INT64       NOT NULL,
+		kind   STRING(MAX) NOT NULL,
+		call   STRING(MAX) NOT NULL,
+		tool   STRING(MAX) NOT NULL,
+		text   STRING(MAX) NOT NULL,
+		reason STRING(MAX) NOT NULL,
+	) PRIMARY KEY (tenant, run, n)`,
+	`CREATE INDEX runlog_by_age ON runlog (tenant, at_ns)`,
 }
 
 // Store is a Spanner-backed store.Store.
@@ -91,6 +104,90 @@ func (s *Store) Leaser(runner string) forge.Leaser {
 
 // Log returns the evidence log.
 func (s *Store) Log() evidence.Log { return &log{s: s} }
+
+func (s *Store) Runs() runlog.Log { return &runs{s: s} }
+
+type runs struct{ s *Store }
+
+const frameCols = `run, n, at_ns, kind, call, tool, text, reason`
+
+func (r *runs) Append(ctx context.Context, t tenant.ID, f runlog.Frame) (runlog.Frame, error) {
+	if err := t.Validate(); err != nil {
+		return runlog.Frame{}, err
+	}
+	if f.Run == "" {
+		return runlog.Frame{}, errors.New("spanner: a run log frame needs a run")
+	}
+	if f.At.IsZero() {
+		f.At = time.Now()
+	}
+	f.At = f.At.UTC()
+	_, err := r.s.c.ReadWriteTransaction(ctx, func(ctx context.Context, txn *gspanner.ReadWriteTransaction) error {
+		it := txn.Query(ctx, gspanner.Statement{
+			SQL:    `SELECT COALESCE(MAX(n), 0) FROM runlog WHERE tenant=@t AND run=@r`,
+			Params: map[string]any{"t": string(t), "r": f.Run},
+		})
+		defer it.Stop()
+		row, err := it.Next()
+		if err != nil {
+			return err
+		}
+		var n int64
+		if err := row.Columns(&n); err != nil {
+			return err
+		}
+		f.N = uint64(n) + 1
+		return txn.BufferWrite([]*gspanner.Mutation{gspanner.Insert("runlog",
+			[]string{"tenant", "run", "n", "at_ns", "kind", "call", "tool", "text", "reason"},
+			[]any{string(t), f.Run, int64(f.N), f.At.UnixNano(), f.Kind, f.Call, f.Tool, f.Text, f.Reason},
+		)})
+	})
+	if err != nil {
+		return runlog.Frame{}, err
+	}
+	return f, nil
+}
+
+func (r *runs) Frames(ctx context.Context, t tenant.ID, run string) ([]runlog.Frame, error) {
+	it := r.s.c.Single().Query(ctx, gspanner.Statement{
+		SQL:    `SELECT ` + frameCols + ` FROM runlog WHERE tenant=@t AND run=@r ORDER BY n`,
+		Params: map[string]any{"t": string(t), "r": run},
+	})
+	defer it.Stop()
+	var out []runlog.Frame
+	for {
+		row, err := it.Next()
+		if errors.Is(err, iterator.Done) {
+			return out, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		var f runlog.Frame
+		var n, at int64
+		if err := row.Columns(&f.Run, &n, &at, &f.Kind, &f.Call, &f.Tool, &f.Text, &f.Reason); err != nil {
+			return nil, err
+		}
+		f.N, f.At = uint64(n), time.Unix(0, at).UTC()
+		out = append(out, f)
+	}
+}
+
+func (r *runs) Prune(ctx context.Context, t tenant.ID, before time.Time) (int64, error) {
+	if err := t.Validate(); err != nil {
+		return 0, err
+	}
+	var n int64
+	_, err := r.s.c.ReadWriteTransaction(ctx, func(ctx context.Context, txn *gspanner.ReadWriteTransaction) error {
+		var err error
+		n, err = txn.Update(ctx, gspanner.Statement{
+			SQL:    `DELETE FROM runlog WHERE tenant=@t AND at_ns < @b`,
+			Params: map[string]any{"t": string(t), "b": before.UnixNano()},
+		})
+		return err
+	})
+	return n, err
+}
 
 type leaser struct {
 	s      *Store

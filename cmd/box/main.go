@@ -161,17 +161,11 @@ func run(args []string) error {
 		if len(rest) == 0 {
 			return fmt.Errorf("provenance needs a commit sha")
 		}
-		n := 0
-		for r, err := range s.Log().BySubject(ctx, t, rest[0]) {
-			if err != nil {
-				return err
-			}
-			fmt.Printf("%-16s %-40s seq %-4d actor=%s trace=%s\n", r.Kind, r.Scope, r.Seq, r.Actor, r.Trace)
-			n++
+		ch, err := evidence.Provenance(ctx, s.Log(), t, rest[0])
+		if err != nil {
+			return err
 		}
-		if n == 0 {
-			fmt.Println("nothing recorded about", rest[0])
-		}
+		printChain(ch)
 	default:
 		return fmt.Errorf("unknown command %q", fs.Arg(0))
 	}
@@ -385,6 +379,50 @@ func short(ref string) string {
 	return ref
 }
 
+// printChain renders the audit query the way the room and the export do:
+// gaps first and loudly, then each span with its verify status, its WORM
+// crossing, and the records — the ones naming the sha marked. The CLI and
+// the room must not diverge on these facts; a fact one reader has and
+// another does not is worse than one nobody has.
+func printChain(ch evidence.Chain) {
+	if len(ch.Spans) == 0 {
+		fmt.Println("nothing recorded about", ch.Subject)
+		return
+	}
+	for _, g := range ch.Gaps {
+		fmt.Printf("MISSING %s — %s\n", g.Link, g.Why)
+	}
+	for _, s := range ch.Spans {
+		state := "chain verifies"
+		if !s.Whole {
+			state = fmt.Sprintf("chain verifies, %d of %d record(s) shown", len(s.Records), s.Total)
+		}
+		if s.Verify != "" {
+			state = "CHAIN BROKEN: " + s.Verify
+		}
+		fmt.Printf("%s — %d record(s), %s\n", s.Scope, s.Total, state)
+		if s.Compacted != nil {
+			fmt.Printf("    records %d-%d in WORM at %s\n", s.Compacted.From, s.Compacted.Through, s.Compacted.Export.URI)
+		}
+		named := map[uint64]bool{}
+		for _, seq := range s.Names {
+			named[seq] = true
+		}
+		for _, r := range s.Records {
+			mark := " "
+			if named[r.Seq] {
+				mark = "*"
+			}
+			who := r.Actor
+			if r.OnBehalfOf != "" {
+				who += " for " + r.OnBehalfOf
+			}
+			fmt.Printf("  %s #%-4d %-18s %s\n", mark, r.Seq, r.Kind, who)
+		}
+	}
+	fmt.Println("(*) names this sha; the full artifact is /v1/provenance/<sha>/export")
+}
+
 // age renders a duration at the precision an operator cares about: seconds
 // while a run is live, days once something has been forgotten.
 // printExceptions renders the exception queue in the order a person should
@@ -548,13 +586,11 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		if len(rest) == 0 {
 			return fmt.Errorf("provenance needs a sha")
 		}
-		recs, err := c.Provenance(ctx, rest[0])
+		view, err := c.ProvenanceChain(ctx, rest[0])
 		if err != nil {
 			return err
 		}
-		for _, r := range recs {
-			fmt.Printf("%-16s %-40s seq %-4d actor=%s\n", r.Kind, r.Scope, r.Seq, r.Actor)
-		}
+		printChain(view.Chain)
 	case "stop", "resume":
 		if len(rest) == 0 {
 			return fmt.Errorf("%s needs a reason — it becomes the record", cmd)

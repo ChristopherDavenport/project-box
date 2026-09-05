@@ -161,3 +161,31 @@ func TestNoProgressHookIsNoWork(t *testing.T) {
 		t.Errorf("tool calls = %v, want %v", res.ToolCalls, want)
 	}
 }
+
+// TestATitleThatArrivesLateIsStillSaid: the adapter announces a Read or a
+// Bash before it knows the path or the command line and titles the call on
+// the update that follows. Round 6's timeline read "Read" and "Bash" with
+// nothing after them because only a call's first appearance became a frame.
+// The late title is said once, under the call's id and the name it was first
+// seen by; a title said again is not; a call titled from the first is one
+// frame; and the tally still counts each call once.
+func TestATitleThatArrivesLateIsStillSaid(t *testing.T) {
+	got, res := collect(t, "latetitle")
+	var tools []Update
+	for _, u := range got {
+		if u.Kind == UpdateTool {
+			tools = append(tools, u)
+		}
+	}
+	want := []Update{
+		{Kind: UpdateTool, Call: "t-1", Tool: "Read"},
+		{Kind: UpdateTool, Call: "t-1", Tool: "Read", Text: "Read main.go"},
+		{Kind: UpdateTool, Call: "t-2", Tool: "Edit", Text: "Edit main.go"},
+	}
+	if !slices.Equal(tools, want) {
+		t.Fatalf("tool frames = %+v\nwant %+v", tools, want)
+	}
+	if !slices.Equal(res.ToolCalls, []string{"Read", "Edit"}) {
+		t.Fatalf("tool calls tallied = %v, want each call once", res.ToolCalls)
+	}
+}
