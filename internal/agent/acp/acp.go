@@ -734,7 +734,13 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	// protocol and asserted back. The Result travels with the refusal so the
 	// record can say what the agent offered instead of what was asked.
 	if err := rt.configure(ctx, conn, newRes.SessionID, b, &mu, &res.Session); err != nil {
-		return res, err
+		// Copied under the lock: the agent is still announcing its commands
+		// on the stream while this refusal goes back, and a Result read
+		// unlocked here is the race the detector caught on the first CI run.
+		mu.Lock()
+		refused := res
+		mu.Unlock()
+		return refused, err
 	}
 	var promptRes struct {
 		StopReason string     `json:"stopReason"`
