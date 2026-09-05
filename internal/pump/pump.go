@@ -171,12 +171,31 @@ func (p *Pump) intakeOne(ctx context.Context, ingressID string) (int, error) {
 		// campaign is defined by not doing.
 		return 0, nil
 	}
+	standing, err := p.Plans.Standing(ctx, p.Tenant, ing.ID)
+	if err != nil {
+		return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
+	}
+	if standing.Blocked() {
+		// A judgement that failed and nobody has retried, or an origination
+		// somebody gave up on. It is in the exception queue with its reason;
+		// see [plan.Store.Fail] for why it is not tried again here.
+		return 0, nil
+	}
 	pl, planned, err := p.Plans.Latest(ctx, p.Tenant, ing.ID)
 	if err != nil {
 		return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
 	}
 	if !planned {
 		if pl, err = plan.Make(ctx, p.Decomposers, ing, decl); err != nil {
+			if p.judgement(decl) {
+				// The seat whose failure parks the one origination that asked
+				// for a judgement. A deterministic decomposer's error stays a
+				// tick error: it costs nothing to retry and points at config.
+				if ferr := p.Plans.Fail(ctx, ing, err.Error()); ferr != nil {
+					return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, ferr)
+				}
+				return 0, nil
+			}
 			return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
 		}
 		// Recorded BEFORE the work exists. A graph whose items predate the
@@ -365,4 +384,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// judgement reports whether a declaration's decomposer is one that judges —
+// not replayable — as opposed to one that derives.
+func (p *Pump) judgement(decl kind.Declaration) bool {
+	d, err := p.Decomposers.Resolve(decl.Decomposer())
+	return err == nil && !d.Replayable()
 }

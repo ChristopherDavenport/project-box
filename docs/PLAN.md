@@ -531,6 +531,9 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Unclassified is refused, never defaulted — on every field | absence means minimum, the same rule as an empty grant set and an unset rollout, and unclassified is the state every mis-scoped request arrives in |
 | A run's live stream is a bounded window, not evidence; what it shows, the chain records at settle | the per-call sequence is already on span events and the tally on the chain, so a hash-chained WORM-exported record per tool call buys an auditor nothing and costs the evidence plane its proportion — and the two accounts come off ONE dedup, so "the room showed forty and the record says thirty" is a test failure rather than a discrepancy somebody has to spot |
 | The composed layers ride the agent-run record | the agentref is a digest and alone answers nothing about what the agent was; recovering the composition meant re-resolving the bundle from the same material at the same commits, which is the thing a record exists so nobody has to have |
+| Roles, sections and tiers are configuration; the planner is a decomposer with an agentref, not a coordinator | Gas City's automation model is sound and its traceability is absent, and a coordinator-shaped design keeps its judgement in a context window nobody can read back — so the judgement is one run on the origination's chain, its continuity is a seat, and every borrowed mechanism lands as a declared unit of software rather than a persona |
+| A section is a lease, and an unsectioned unit is the whole repository | the land window already serializes the branch, so two units were never going to corrupt each other — they were going to conflict, and a conflicting replay is rebuilt by an agent; a lease spends a tick to save a session, and "names none" must mean "waits for all" or a plan that forgot a section would run that unit beside everything |
+| A failed judgement parks the origination, not the tick | there is no item yet to park, and a tick error is retried next tick, so a planner out of budget re-run every fifteen seconds would be the spend loop the meter exists to prevent; the origination is the exception, in the item's shape, with the item's verbs |
 
 ## 7. Deferred decisions
 
@@ -1480,3 +1483,28 @@ lands this repository's changes, and at what cost, is round 5's
 measurement. Deferred with the measurement: a brake denominated in the
 account's window (the rate-limit report is on the record now; the meter
 does not yet act on it), and whose credential the factory runs on.
+
+Units of expression (2026-09-04, branch units-of-expression, stacked on #38
+and #32). Gas City's automation model taken, its people left behind, its
+traceability supplied: a repository declares SECTIONS (paths, purpose,
+check, tier) and a unit names the ones it is expressed in — leased before
+the build in one order for every taker, so disjoint units run at once, same-
+section units take turns, and an unsectioned unit is the whole repository;
+the section reaches the builder as a layer on the agentref. TIERS resolve
+most-specific-wins: box, role (`roles:`), section, plan node, with no new
+merge rule — the section is a layer and the node's tier rides the task
+layer. The PLANNER is a judgement decomposer under `RolePlanner` (mode
+plan): a read-only tree at the head, the sections as a catalogue, a JSON
+answer of units checked against the repository and sealed as a non-replayable
+plan with its agentref and the head it read; its records land on the
+origination's chain and its handoff notes wake the next plan from its own
+seat. Opt-in per kind; a failed judgement parks the ORIGINATION in the
+exception queue (plan-failed on its chain, retry/resolve through the plan
+store and the same API verbs, listed by the room in an item's shape); a box
+naming the planner without an agent is refused at load. Proven by tests at
+every seam: section leases wait and release, an undeclared section parks,
+the section layer and tier reach the prompt and the record, the planner's
+answer becomes items with edges, a failed judgement is not re-run and is
+retried by a person, the API reaches it, the daemon refuses the agentless
+case, and the no-agent invariant still holds. The dogfood declares eight
+sections, a planner tier, and plans every issue. Round 5 measures.

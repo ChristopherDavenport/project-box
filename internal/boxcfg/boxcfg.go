@@ -205,6 +205,16 @@ type Box struct {
 	// and `mode` is not because the permission mode belongs to the tool
 	// policy and is set through session/set_mode.
 	Session map[string]string `yaml:"session"`
+	// Roles are per-role tiers: what the planner judges on, what the builder
+	// expresses on. A role's model or session wins over the box's for that
+	// role's runs and loses to a section's and to a plan node's. Keys are the
+	// roles this system has seats for; an unknown one is refused at load.
+	//
+	// This is Gas City's per-agent option_defaults without the agent: a
+	// planner is not a person with a home directory, it is a decomposer that
+	// happens to judge, and the only thing worth saying about it here is
+	// which tier the judgement is worth.
+	Roles map[string]Tier `yaml:"roles"`
 	// Confine, when set, renders that wrapper instead of making the operator
 	// write it. Load folds it into Agent, so the daemon runs one argv and
 	// knows nothing about confinement — the seam stays exactly one thing.
@@ -352,6 +362,25 @@ func (k Kind) InlineSource(configPath string) agent.Source {
 	return agent.Source{Kind: agent.SourceFile, Path: configPath, Digest: hex.EncodeToString(sum[:])}
 }
 
+// Tier is a model and session configuration, the unit a role, a section, or
+// a plan node chooses when it chooses what to run on.
+type Tier struct {
+	Model   string            `yaml:"model"`
+	Session map[string]string `yaml:"session"`
+}
+
+// Section is box.yaml's spelling of [forge.Section]: a named region of a
+// repository, with the check a builder runs while inside it and the tier its
+// work runs on by default.
+type Section struct {
+	Name    string            `yaml:"name"`
+	Purpose string            `yaml:"purpose"`
+	Paths   []string          `yaml:"paths"`
+	Check   string            `yaml:"check"`
+	Model   string            `yaml:"model"`
+	Session map[string]string `yaml:"session"`
+}
+
 // Confine is box.yaml's spelling of [confine.Profile].
 type Confine struct {
 	// Image carries the agent. Required when the block is present.
@@ -444,6 +473,28 @@ type Repo struct {
 	Route string `yaml:"route"`
 	Build string `yaml:"build"`
 	Check string `yaml:"check"`
+	// Sections are this repository's named regions — see [forge.Section].
+	// A repository that declares none has one region: itself, and every
+	// unit of work in it takes turns.
+	Sections []Section `yaml:"sections"`
+}
+
+// Sections converts the declared regions to the forge's form.
+func (r Repo) forgeSections() []forge.Section {
+	out := make([]forge.Section, 0, len(r.Sections))
+	for _, s := range r.Sections {
+		out = append(out, forge.Section{
+			Name: s.Name, Purpose: s.Purpose, Paths: s.Paths, Check: s.Check,
+			Model: s.Model, Session: s.Session,
+		})
+	}
+	return out
+}
+
+// ForgeRepo is the repository as the forge sees it, sections included.
+func (r Repo) ForgeRepo() forge.Repo {
+	return forge.Repo{Name: r.Name, Remote: r.Remote, Role: forge.Role(r.Role),
+		DefaultBranch: r.Branch, Sections: r.forgeSections()}
 }
 
 // Load reads and validates a config.
@@ -531,20 +582,22 @@ func (c *Config) validate() error {
 		if err := bx.Harness.validate(bx.Name); err != nil {
 			return err
 		}
-		for _, k := range slices.Sorted(maps.Keys(bx.Session)) {
-			switch v := bx.Session[k]; {
-			case k == "":
-				return fmt.Errorf("boxcfg: box %s: a session option with an empty id", bx.Name)
-			case k == "model":
-				return fmt.Errorf("boxcfg: box %s: session.model — the model has its own field: model: %s", bx.Name, v)
-			case k == "mode":
-				return fmt.Errorf("boxcfg: box %s: session.mode — the permission mode is the tool policy's, set through session/set_mode, not a session option", bx.Name)
-			case v == "":
-				return fmt.Errorf("boxcfg: box %s: session.%s has no value", bx.Name, k)
-			}
+		if err := validateSession("box "+bx.Name, bx.Session); err != nil {
+			return err
 		}
 		if (bx.Model != "" || len(bx.Session) > 0) && len(bx.Agent) == 0 {
 			return fmt.Errorf("boxcfg: box %s: model/session with no agent — a build command opens no session to configure", bx.Name)
+		}
+		for _, role := range slices.Sorted(maps.Keys(bx.Roles)) {
+			if !agent.Role(role).Known() {
+				return fmt.Errorf("boxcfg: box %s: roles.%s — no such role; the seats are builder, planner, gate, deployer and curator", bx.Name, role)
+			}
+			if err := validateSession("box "+bx.Name+" roles."+role, bx.Roles[role].Session); err != nil {
+				return err
+			}
+			if len(bx.Agent) == 0 {
+				return fmt.Errorf("boxcfg: box %s: roles.%s with no agent — a build command has no roles to tier", bx.Name, role)
+			}
 		}
 		if err := validateKinds(bx); err != nil {
 			return err
@@ -592,6 +645,65 @@ func (c *Config) validate() error {
 			if r.Check == "" {
 				r.Check = "true"
 			}
+			if err := validateSections(bx, r); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateSession is the one rule every session block obeys, wherever it
+// sits: ids are non-empty, values are non-empty, and the two things that have
+// fields of their own are not spelled here.
+func validateSession(where string, session map[string]string) error {
+	for _, k := range slices.Sorted(maps.Keys(session)) {
+		switch v := session[k]; {
+		case k == "":
+			return fmt.Errorf("boxcfg: %s: a session option with an empty id", where)
+		case k == "model":
+			return fmt.Errorf("boxcfg: %s: session.model — the model has its own field: model: %s", where, v)
+		case k == "mode":
+			return fmt.Errorf("boxcfg: %s: session.mode — the permission mode is the tool policy's, set through session/set_mode, not a session option", where)
+		case v == "":
+			return fmt.Errorf("boxcfg: %s: session.%s has no value", where, k)
+		}
+	}
+	return nil
+}
+
+// validateSections refuses regions the loop could not lease or a builder could
+// not be told about: a name that is not a token, a region with no paths, a
+// path that reaches outside the repository, a tier with no agent to run it.
+func validateSections(bx *Box, r *Repo) error {
+	seen := map[string]bool{}
+	for i, s := range r.Sections {
+		where := fmt.Sprintf("box %s repo %s section %d", bx.Name, r.Name, i)
+		if s.Name == "" {
+			return fmt.Errorf("boxcfg: %s has no name", where)
+		}
+		where = fmt.Sprintf("box %s repo %s section %s", bx.Name, r.Name, s.Name)
+		if strings.ContainsAny(s.Name, " \t/") {
+			return fmt.Errorf("boxcfg: %s — a section name is a plain token; it becomes a lease ref and a layer name", where)
+		}
+		if seen[s.Name] {
+			return fmt.Errorf("boxcfg: %s is declared twice — two regions under one name would lease as one and be described as two", where)
+		}
+		seen[s.Name] = true
+		if len(s.Paths) == 0 {
+			return fmt.Errorf("boxcfg: %s covers no paths — a region of nothing cannot be worked in", where)
+		}
+		for _, p := range s.Paths {
+			clean := filepath.ToSlash(filepath.Clean(p))
+			if p == "" || filepath.IsAbs(p) || clean == ".." || strings.HasPrefix(clean, "../") {
+				return fmt.Errorf("boxcfg: %s: path %q — paths are repository-relative and stay inside it", where, p)
+			}
+		}
+		if err := validateSession(where, s.Session); err != nil {
+			return err
+		}
+		if (s.Model != "" || len(s.Session) > 0) && len(bx.Agent) == 0 {
+			return fmt.Errorf("boxcfg: %s: a tier with no agent — a build command opens no session to configure", where)
 		}
 	}
 	return nil

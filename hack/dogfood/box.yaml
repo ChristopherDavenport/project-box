@@ -80,6 +80,24 @@ boxes:
     # Sonnet round says what effort buys.
     # session:
     #   effort: high
+    # Tiers by role. The planner judges once per origination over a
+    # read-only tree; the builder expresses each unit. Both inherit the
+    # box's `model:` unless stated here, and a section's or a plan node's
+    # tier wins over both. Raise the planner's tier first if plans come back
+    # wrong: a bad plan costs every unit under it.
+    roles:
+      planner: {model: sonnet}
+    # Every issue is planned by judgement before it is work: a graph of
+    # units, each with its sections, its dependencies and its tier, recorded
+    # on the origination's chain with the model that judged. Opt-in here and
+    # nowhere else — the seeded declaration keeps the identity plan, and a
+    # box with no agent is refused this at load. A planner that fails parks
+    # the origination in the exception queue; retry and resolve reach it
+    # from the room like any item.
+    kinds:
+      - name: issue
+        decompose: {decomposer: planner}
+        completion: {graph: true}
     # What the builders load. Before this block existed the answer was
     # "whatever ~/.claude has enabled", decided by nobody and recorded
     # nowhere: a probe of this very box found 44 plugins, 79 skills, three
@@ -125,3 +143,43 @@ boxes:
         lane: gated
         route: issues
         check: go build ./... && go test ./...
+        # Where work is expressed. A unit names the sections its paths fall
+        # in; two units in disjoint sections run at once, two in one take
+        # turns, and a unit that names none is the whole repository and waits
+        # for all of them. The builder is told its section's paths and runs
+        # the section's check while iterating; the repository's full check
+        # above still runs at the gate. Paths not covered by any section are
+        # reached only by a whole-repository unit.
+        sections:
+          - name: forge
+            purpose: git mirrors, leases, workspaces, landing
+            paths: [internal/forge]
+            check: go test ./internal/forge/...
+          - name: loop
+            purpose: the unit's transaction — queue, claim, plan, build, gate, land, capacity
+            paths: [internal/loop, internal/queue, internal/pump, internal/plan, internal/kind, internal/ingress, internal/capacity]
+            check: go test ./internal/loop/... ./internal/queue/... ./internal/pump/... ./internal/plan/... ./internal/kind/... ./internal/ingress/... ./internal/capacity/...
+          - name: agent
+            purpose: the agent plane — layers, the ACP runtime, harness, seats, knowledge
+            paths: [internal/agent, internal/harness, internal/seat, internal/knowledge]
+            check: go test ./internal/agent/... ./internal/harness/... ./internal/seat/... ./internal/knowledge/...
+          - name: evidence
+            purpose: the chain and the store beneath it
+            paths: [internal/evidence, internal/store]
+            check: go test ./internal/evidence/... ./internal/store/...
+          - name: daemon
+            purpose: boxd, its API and gateway, box.yaml, the control room's server side
+            paths: [internal/daemon, internal/api, internal/gateway, internal/boxcfg, internal/control, internal/boxctx, internal/version, cmd]
+            check: go test ./internal/daemon/... ./internal/api/... ./internal/gateway/... ./internal/boxcfg/... ./internal/control/... ./cmd/...
+          - name: deploy
+            purpose: the estate, rendering, the ladder, campaigns, checks
+            paths: [internal/deploy, internal/render, internal/ladder, internal/estate, internal/campaign, internal/checks, deploy]
+            check: go test ./internal/deploy/... ./internal/render/... ./internal/ladder/... ./internal/estate/... ./internal/campaign/... ./internal/checks/...
+          - name: room
+            purpose: the web control room
+            paths: [web]
+            check: cd web && npm run build
+          - name: docs
+            purpose: the design record and the briefs
+            paths: [docs, README.md, CLAUDE.md]
+            check: "true"

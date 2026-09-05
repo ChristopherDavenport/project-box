@@ -56,6 +56,16 @@ type Node struct {
 	// the work graph, and until there was a decomposition stage nothing
 	// outside a test had ever written one.
 	DependsOn []string `json:"depends_on,omitempty"`
+	// Sections names the regions of the repository this unit is expressed
+	// in. It is the second half of what a decomposition decides: not only
+	// WHAT the units are and in what order, but WHERE each one works — which
+	// is what lets two of them run at once and keeps two of them from
+	// colliding. Empty is the whole repository.
+	Sections []string `json:"sections,omitempty"`
+	// Model is the tier this unit should run on, when the decomposer judged
+	// one — the cheapest model the unit's difficulty allows. Empty leaves
+	// the section's, the role's or the box's default in force.
+	Model string `json:"model,omitempty"`
 }
 
 // Fact is one input a decomposer read, and when it read it.
@@ -152,6 +162,14 @@ func (p *Plan) Seal() error {
 		deps := slices.Clone(n.DependsOn)
 		slices.Sort(deps)
 		put("node:" + n.ID + ":" + n.Repo + ":" + n.Task + ":" + strings.Join(deps, "\x00"))
+		// Where and on what: the same graph expressed in different sections
+		// or on a different tier is a different plan, because it runs
+		// differently and costs differently.
+		sections := slices.Clone(n.Sections)
+		slices.Sort(sections)
+		if len(sections) > 0 || n.Model != "" {
+			put("where:" + n.ID + ":" + strings.Join(sections, "\x00") + ":" + n.Model)
+		}
 	}
 	p.Ref = "plan-" + hex.EncodeToString(h.Sum(nil))[:32]
 	return nil
@@ -180,6 +198,14 @@ func (p *Plan) validate() error {
 		}
 		if _, dup := byID[n.ID]; dup {
 			return fmt.Errorf("%w: %s declares node %q twice — two nodes would share one work item and the later would silently win", ErrPlan, p.Ingress, n.ID)
+		}
+		for _, s := range n.Sections {
+			if s == "" || strings.ContainsAny(s, " \t/") {
+				return fmt.Errorf("%w: %s node %q names section %q — a section name is a plain token; it becomes a lease ref", ErrPlan, p.Ingress, n.ID, s)
+			}
+		}
+		if strings.ContainsAny(n.Model, " \t\n") {
+			return fmt.Errorf("%w: %s node %q names model %q — a tier is the value the agent lists, not a sentence", ErrPlan, p.Ingress, n.ID, n.Model)
 		}
 		byID[n.ID] = n
 	}

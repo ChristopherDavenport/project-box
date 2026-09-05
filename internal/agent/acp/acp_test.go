@@ -560,6 +560,30 @@ func fakeAgent(scenario string) {
 							"text": fmt.Sprintf("model:%s effort:%s fast:%v mode:%s", model, effort, fast, mode)}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn",
 					"usage": map[string]any{"inputTokens": 10, "outputTokens": 5}}})
+			case "planner", "planner-bad", "planner-noplan":
+				// A plan in the planner's own answer shape, with prose around
+				// it and a brace inside a task, the way an agent actually
+				// replies. "planner-bad" names a section the repository does
+				// not declare; "planner-noplan" never gets to the JSON.
+				section := "api"
+				if scenario == "planner-bad" {
+					section = "db"
+				}
+				answer := "Read the tree. Two units, the view after the endpoint.\n\n```json\n" +
+					`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets in internal/api (returns {\"widgets\":[]})","sections":["` + section + `"],"depends_on":[],"model":"haiku"},` +
+					`{"id":"room-view","task":"Render widgets in web/src","sections":["web"],"depends_on":["api-endpoint"]}],"why":"the view needs the endpoint"}` +
+					"\n```\nHANDOFF: widgets live under internal/api\n"
+				if scenario == "planner-noplan" {
+					answer = "I looked around and it all seems fine to me."
+				}
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": answer}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn",
+					"usage": map[string]any{"inputTokens": 900, "outputTokens": 120}}})
+			case "planner-escalate":
+				f.request("_box/escalate", map[string]any{"reason": "this origination is a question, not a change"})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "metered":
 				// The real dialect, copied from claude-agent-acp's
 				// sessionUsage() and turnOutcome(): usage on the prompt

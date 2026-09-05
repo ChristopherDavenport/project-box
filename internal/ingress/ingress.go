@@ -15,6 +15,7 @@ package ingress
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
@@ -35,6 +36,12 @@ type Kind string
 // authority it exercised — and a second spelling of the scope name would
 // silently split a provenance chain in half.
 func Scope(id string) string { return "ingress/" + id }
+
+// IsID reports whether s names an origination rather than a work item. The
+// two share the exception queue — a judgement that failed to plan an
+// origination is an exception before any item exists — and a reader folding
+// a chain by subject has to know which chain.
+func IsID(s string) bool { return strings.HasPrefix(s, "ing-") }
 
 // Record kinds on an origination's chain.
 //

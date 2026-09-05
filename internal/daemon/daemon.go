@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -102,6 +103,12 @@ type Daemon struct {
 	live      *control.Live
 	compactor *evidence.Compactor
 	API       *api.Server
+	// planners is the judgement decomposer, registered once and filled per
+	// box at every assemble — a box with an agent has a planner, a box
+	// without one has none, and a declaration asking for one there is
+	// refused at load.
+	planners *acp.Planners
+	plans    *plan.Store
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -126,10 +133,21 @@ func New(path string) (*Daemon, error) {
 	}
 	d := &Daemon{
 		ConfigPath: path, store: s, tenant: t, mirror: m,
-		queue: &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
-		meter: &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
-		live:  &control.Live{},
-		cfg:   cfg, every: cfg.EveryDuration(),
+		queue:    &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
+		meter:    &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
+		live:     &control.Live{},
+		planners: &acp.Planners{},
+		plans:    &plan.Store{Log: s.Log(), Actor: cfg.Runner},
+		cfg:      cfg, every: cfg.EveryDuration(),
+	}
+	// The deterministic, agent-free set, plus the one judgement this daemon
+	// can offer. Registering it here does not put an agent on the intake
+	// path: nothing runs it until a kind declaration names it, and a box
+	// that names it without an agent is refused at assemble.
+	decomposers := plan.Default()
+	if err := decomposers.Register(d.planners); err != nil {
+		s.Close()
+		return nil, err
 	}
 	loops, routes, kinds, err := d.assemble(context.Background(), cfg)
 	if err != nil {
@@ -149,13 +167,9 @@ func New(path string) (*Daemon, error) {
 		return nil, fmt.Errorf("daemon: restoring the capacity window: %w", err)
 	}
 	d.pump = &pump.Pump{Store: s, Tenant: t, Runner: cfg.Runner, Queue: d.queue, Meter: d.meter, Loops: loops,
-		Kinds: kinds,
-		// The deterministic, agent-free set. Nothing here registers a
-		// judgement planner, and the daemon is where one would be wired: an
-		// agent on the intake path is a decision somebody makes explicitly,
-		// not a capability that arrives with a dependency.
-		Decomposers: plan.Default(),
-		Plans:       &plan.Store{Log: s.Log(), Actor: cfg.Runner},
+		Kinds:       kinds,
+		Decomposers: decomposers,
+		Plans:       d.plans,
 	}
 	// The exception queue ages whether or not anybody is looking, so the
 	// sweep is what makes "nobody is looking" audible. The log is the weakest
@@ -183,6 +197,7 @@ func New(path string) (*Daemon, error) {
 		Store: s, Tenant: t, Routes: routes,
 		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner},
 		Queue:  d.queue, Meter: d.meter, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
+		Plans:   d.plans,
 		Live:    d.live,
 		Started: time.Now(),
 		Reload:  d.reloadForAPI,
@@ -208,6 +223,16 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			return nil, nil, nil, err
 		}
 		kinds[bx.Name] = set
+		if len(bx.Agent) == 0 {
+			// A declaration asking for judgement in a box with nobody to
+			// judge would fail every origination it admitted, one exception
+			// at a time. Refused here, where the operator can see it coming.
+			for _, name := range set.Names() {
+				if decl, err := set.Lookup(name); err == nil && decl.Decomposer() == acp.PlannerName {
+					return nil, nil, nil, fmt.Errorf("daemon: box %s kind %s names the planner decomposer and the box has no agent — a build command cannot judge", bx.Name, name)
+				}
+			}
+		}
 		var agentBuilder *acp.Builder
 		if len(bx.Agent) > 0 {
 			agentBuilder = &acp.Builder{
@@ -253,8 +278,10 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				EnvelopeFor: d.envelopeFor(set),
 			}
 		}
+		var repos []forge.Repo
 		for _, r := range bx.Repos {
-			repo := forge.Repo{Name: r.Name, Remote: r.Remote, Role: forge.Role(r.Role), DefaultBranch: r.Branch}
+			repo := r.ForgeRepo()
+			repos = append(repos, repo)
 			if err := d.mirror.Fetch(ctx, repo); err != nil {
 				return nil, nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
 			}
@@ -280,6 +307,27 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				Box: bx.Name, Repo: r.Name, Requester: cfg.Runner,
 			}
 		}
+		if agentBuilder == nil {
+			d.planners.Delete(bx.Name)
+			continue
+		}
+		// The builder describes the sections the loop leases; both read the
+		// same repository definition. And the planner: the same agent, the
+		// same harness source under the planner role, its own seat for
+		// continuity, its own read-only trees, the same meter.
+		agentBuilder.Repos = repos
+		d.planners.Set(bx.Name, &acp.Planner{
+			Store: d.store, Tenant: d.tenant, Box: bx.Name,
+			Command: bx.Agent, MaxTokens: cfg.Budget.MaxTokensPerRun,
+			Composer: agentBuilder.Composer,
+			Seat:     &seat.Seat{Name: bx.Seat + "-planner", Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
+			Mirror:   d.mirror, Repos: repos,
+			Root:            filepath.Join(cfg.Root, "plans"),
+			InheritSettings: bx.Harness.Plugins == boxcfg.PluginsInherit,
+			Spend: func(ctx context.Context, run string, u acp.Usage) {
+				d.meter.Charge(ctx, run, SpendOf(u))
+			},
+		})
 	}
 	return loops, routes, kinds, nil
 }

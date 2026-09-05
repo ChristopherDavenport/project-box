@@ -491,3 +491,85 @@ func TestTheSessionIsOnTheRecord(t *testing.T) {
 		t.Fatalf("agent-result does not say which model ran:\n%s", result)
 	}
 }
+
+// TestTheSectionReachesThePromptAndTheRef. A section is a layer: the agent is
+// told where it works and what to run while there, the layer is on the run
+// record, and a plan's tier for the unit reaches the session and the result.
+func TestTheSectionReachesThePromptAndTheRef(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	// The loop leases the section and the builder describes it: both read
+	// the same repository definition, as the daemon hands them the same one.
+	lp.Repo.Sections = []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"api", "cmd/api"}, Check: "go test ./api/..."},
+	}
+	b := lp.Builder.(*Builder)
+	b.Repos = []forge.Repo{lp.Repo}
+	ctx := context.Background()
+	ing, _, err := router.Open(ctx, ingress.Route{
+		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
+	}, ingress.Delivery{Key: "issue-section"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := loop.ItemFor(ing, "wi-issue-section", "add the widget package")
+	item.Sections, item.Model = []string{"api"}, "haiku"
+	q := &queue.Queue{Store: s, Runner: "runner-1", TTL: time.Hour}
+	if item, err = q.Submit(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	if item, err = lp.Run(ctx, item); err != nil || item.State != queue.StateDone {
+		t.Fatalf("run: %v %+v", err, item)
+	}
+	var prompt, run, result string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-issue-section", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch r.Kind {
+		case "agent-prompt":
+			var p struct{ Prompt string }
+			json.Unmarshal(r.Body, &p)
+			prompt = p.Prompt
+		case "agent-run":
+			run = string(r.Body)
+		case "agent-result":
+			result = string(r.Body)
+		}
+	}
+	for _, want := range []string{"## Section: api", "the HTTP surface", "api, cmd/api", "go test ./api/..."} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt does not carry %q:\n%s", want, prompt)
+		}
+	}
+	if !strings.Contains(run, `"name":"section-api"`) || !strings.Contains(run, `"scope":"section"`) {
+		t.Errorf("the section layer is not on the run record:\n%s", run)
+	}
+	if !strings.Contains(result, `"model":"haiku"`) {
+		t.Errorf("the plan's tier did not reach the session:\n%s", result)
+	}
+}
+
+// TestAnItemNamingAnUndeclaredSectionIsRefused: running it unscoped would be
+// the silent widening a section exists to prevent.
+func TestAnItemNamingAnUndeclaredSectionIsRefused(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	ctx := context.Background()
+	ing, _, err := router.Open(ctx, ingress.Route{
+		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
+	}, ingress.Delivery{Key: "issue-nowhere"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := loop.ItemFor(ing, "wi-issue-nowhere", "add the widget package")
+	item.Sections = []string{"db"}
+	q := &queue.Queue{Store: s, Runner: "runner-1", TTL: time.Hour}
+	if item, err = q.Submit(ctx, item); err != nil {
+		t.Fatal(err)
+	}
+	// The loop's repo declares no sections either, so the loop parks it
+	// before the builder is reached; the builder's own refusal is asserted
+	// directly.
+	if _, err := lp.Builder.Build(ctx, forge.Workspace{Run: item.ID, Repo: "app", Dir: t.TempDir()}, item.Task); err == nil || !strings.Contains(err.Error(), `"db"`) {
+		t.Fatalf("an undeclared section was not refused: %v", err)
+	}
+}

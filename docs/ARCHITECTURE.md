@@ -872,6 +872,118 @@ rather than racing the incident's.
 The fencing design was written for stalled runners. Preemption turns out to be
 the same mechanism, which is a reasonable sign it was cut in the right place.
 
+### Units of expression, not people: what is taken from Gas City, and what is not
+
+Assessed 2026-09-04 against Gas City (the SDK Gas Town was torn apart into)
+and the Gas Town pack that runs on it. The automation model there is sound
+and worth conceptualising off: work as durable units in a graph, a method
+that fans the ready ones out to as many workers as the work allows and holds
+each back until its dependencies close, pools sized to demand, standing
+duties as orders, one role per kind of judgement. What it does not do, and
+does not set out to do, is make any of that traceable: a plan lives in a
+coordinator's context window, a merge is an agent's decision, and the record
+is a git-versioned database of what happened rather than a chain of what was
+decided, by whom, under what authority. The adoption rule here is therefore
+one sentence: **take the automation, and express it as units of software
+rather than as people.** Every borrowed mechanism lands as a declared unit
+with a record, and nothing lands as a persona with a home directory.
+
+| Gas City / Gas Town | What it is there | Here |
+|---|---|---|
+| Bead | one durable unit of work in a graph | `WorkItem`, produced by a recorded plan, with `DependsOn` |
+| Formula, drain | a written method; fan-out over a convoy | a kind's decomposer; the plan's graph, claimed against `MaxConcurrent` |
+| Rig | a registered repository with its own namespace and agents | a `Repo` in a Box — and now its **sections** |
+| Mayor | a standing coordinator that plans, dispatches and remembers | the **planner**: a decomposer with an agentref, opt-in per kind, continuity by seat |
+| Polecat, pool, `scale_check` | disposable workers in worktrees, sized to demand | a builder run per unit in a leased workspace, sized by the pump within the budget |
+| Refinery | an agent that rebases, tests and merges, or rejects | the land window: imperative, fenced, replaying a moved base, gates re-run |
+| Witness, Deacon, dogs | agents that watch health, recover orphans, patrol | the pump, the escalator, the prune sweep, the compactor — Go, by the no-agent invariant |
+| Orders | scheduled or event-fired formulas and shell steps | standing chores and campaigns; a formula order is a kind with a decomposer |
+| `option_defaults` per agent | model and mode per configured agent | tiers: `model:` on the box, `roles:`, a section's, a plan node's — most specific wins, on the agentref |
+| Events | an append-only stream to watch | the evidence chain, which is also what is audited |
+
+#### A section is where a unit is expressed, and it is a lease
+
+A repository declares **sections**: named regions with paths, a purpose the
+planner reads, the check a builder runs while iterating there, and optionally
+a tier. A unit names the sections its paths fall in. The loop takes a lease
+on each — `section/<name>` on the repository, in one order for every taker —
+before it materializes a workspace: two units in disjoint sections run at
+once, two in one section take turns, and a unit that names none is the
+whole repository and takes every section. The wait is a `Wait`, not a park:
+nobody needs to look at a unit whose turn has not come, and it names the
+section and the run that holds it.
+
+The lease is what makes fan-out safe rather than merely possible. The land
+window already serializes the branch and replays a moved base, so two units
+were never going to corrupt each other — they were going to conflict, and a
+conflicting replay is rebuilt by an agent, which is the most expensive thing
+the factory does. The lease spends a tick to save a session. "Names none
+means waits for all" is the other half of the rule: a plan that forgot a
+section for one unit must not have that unit run beside everything.
+
+The section reaches the agent as a layer — its paths, its check, the
+instruction to stay within them and to escalate for a section it needs — so
+a run scoped to one region and a run given the whole repository are
+different agents on the record. A repository that declares no sections has
+one region, itself, and every existing box is that shape unchanged.
+
+#### Tiers, most specific wins
+
+The model a unit runs on is decided as close to the unit as anyone was
+willing to say: the box's `model:`, then the role's under `roles:`, then the
+section's, then the plan node's. The composer's rule for `Model` was already
+"the most specific non-empty value wins"; the section is a layer and the
+node's tier rides the task layer, so nothing new was needed for the
+precedence to hold or for the agentref to carry the result. Gas City's
+`option_defaults` per configured agent is the same lever with the agent as
+its unit; here the unit is the work.
+
+#### The planner is a decomposer, not a coordinator
+
+A kind declared with `decompose: {decomposer: planner}` is judged into units
+before it is work. The planner is an agent under `RolePlanner` — default mode
+`plan`, so it reads and never writes — over a read-only tree at the branch
+head, shown the repository's sections and a contract for its answer: a JSON
+object of units, each with its task, sections, dependencies and tier, or a
+single `ESCALATE:` line when the origination is a question, a decision, or
+already satisfied. The answer is checked against the repository — a section
+it does not declare is refused with both sides named — and sealed into a plan
+that is not replayable and carries the planner's agentref and the head it
+read. Its run leaves the same records a build does, on the origination's
+chain rather than an item's: `agent-run`, `agent-session`, `agent-result`,
+`agent-text`. Its handoff notes wake its next plan from a seat of its own.
+
+Everything a coordinator has by living long, the planner has on the record.
+The Mayor's context window held the fleet's plans; nothing could read it
+back, and a restart lost it. Here the plan is the artifact between the first
+two links of the chain, and continuity is notes on the knowledge plane,
+attributed and swept when stale.
+
+The planner is opt-in per kind for #5's reason: intake runs on every
+origination, and a judgement on the default path would put an agent on the
+critical path of admitting work. Declared, it sits in a seat whose failure
+parks the one origination that asked for it — literally: there is no item
+yet, so the origination itself enters the exception queue with the reason,
+the room lists it in an item's shape, the escalator ages it, and `retry` and
+`resolve` reach it through the plan store. It is recorded rather than
+returned as a tick error because a tick error is retried next tick, and a
+planner that has hit its session limit re-run every fifteen seconds is
+exactly the spend loop the meter exists to prevent. A box that names the
+planner and has no agent is refused at load.
+
+#### Why this reduces cost
+
+The 25-million-token run of round 4 was one unit, one session, the whole
+repository, on the most expensive tier, with the whole design record in
+context. Every mechanism above is a way of making that shape impossible by
+declaration rather than by discipline: a plan makes units narrow and
+self-contained; a section bounds what a unit reads and what it re-reads on
+every turn; a tier puts a unit on the cheapest model its difficulty allows;
+leases let the narrow units run at once. The one thing that costs more than
+before is the plan itself, which is why the planner's tier is the dial to
+raise first — a bad plan costs every unit under it.
+
+
 ## Planes
 
 | Plane | Job | Local | Deployed |
