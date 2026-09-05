@@ -258,13 +258,18 @@ which is gitignored; the harness is not.
 
 ## Web control room
 
-`web/` (Lit + @lit-labs/router + Jack Henry Design System). `dist/` is
-committed and embedded into boxd — CI stays a Go toolchain. Rebuild after
-changing `web/src/`:
+`web/` (Lit + @lit-labs/router + Jack Henry Design System). The bundle is
+generated, not committed, and go:embed reads it at build time — so building
+the daemon needs node once, up front, and a tree that has not generated does
+not compile:
 
 ```sh
-cd web && npm install && npm run build
+go generate ./web          # npm ci + esbuild → web/dist (gitignored)
+go build ./cmd/boxd
 ```
+
+`hack/check.sh` is the check CI and the factory's own gate both run: generate,
+build, test.
 
 The room is themed with jh-core's tokens: the light set lives on `:root`, the
 dark set on a `.jh-theme-dark` class that `index.html` puts on `<html>` before

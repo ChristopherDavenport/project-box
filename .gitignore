@@ -3,10 +3,19 @@ bin/
 # would ignore the sources along with the binaries built beside them.
 /continuity
 /deployloop
+# `go build ./cmd/boxd` from the root drops the binary here; history was
+# rewritten once already to purge committed binaries (#10).
+/boxd
+/box
+/boxgate
 *.db
 *.db-wal
 *.db-shm
 web/node_modules/
+# The bundle is generated (`go generate ./web`), never committed: a minified
+# blob in every diff was unreviewable and conflicted between any two branches
+# that touched web/src. go:embed reads it at build time.
+web/dist/
 hack/room-smoke/node_modules/
 hack/room-smoke/package*.json
 

@@ -21,6 +21,7 @@ set -eu
 cd "$(dirname "$0")/../.."
 
 mkdir -p .factory
+go generate ./web
 go build -o bin/boxd ./cmd/boxd
 go build -o bin/box ./cmd/box
 

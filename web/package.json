@@ -6,7 +6,7 @@
     "build": "node build.mjs"
   },
   "dependencies": {
-    "@jack-henry/jh-core": "latest",
+    "@jack-henry/jh-core": "1.6.1",
     "@jack-henry/jh-ui": "1.15.5",
     "@lit-labs/router": "0.1.4",
     "@lit/task": "^1.0.0",

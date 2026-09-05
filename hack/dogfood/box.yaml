@@ -151,7 +151,7 @@ boxes:
         role: service
         lane: gated
         route: issues
-        check: go build ./... && go test ./...
+        check: ./hack/check.sh
         # Where work is expressed. A unit names the sections its paths fall
         # in; two units in disjoint sections run at once, two in one take
         # turns, and a unit that names none is the whole repository and waits
