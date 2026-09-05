@@ -506,11 +506,27 @@ type Repo struct {
 	Route string `yaml:"route"`
 	Build string `yaml:"build"`
 	Check string `yaml:"check"`
+	// Land selects how a build reaches the base branch. "" (the default)
+	// pushes the built commit directly with the fenced force-with-lease
+	// push, today's behavior. "pull_request" opens or reuses a GitHub pull
+	// request first (see [git.PRLander]) and lets that same fenced push
+	// land once GitHub notices the PR's head is reachable from base.
+	Land string `yaml:"land"`
+	// LandToken names where a pull_request landing gets its bearer token.
+	// Only "gh" (gh auth token) is known today — a stopgap ahead of the
+	// GitHub App (docs/PLAN.md Phase 7). A repo asking for pull_request
+	// landing without one is refused at Load: the daemon would have no way
+	// to open the pull request when the loop first tries to land.
+	LandToken string `yaml:"land_token"`
 	// Sections are this repository's named regions — see [forge.Section].
 	// A repository that declares none has one region: itself, and every
 	// unit of work in it takes turns.
 	Sections []Section `yaml:"sections"`
 }
+
+// LandPullRequest is the [Repo.Land] value that opens a pull request before
+// landing. Any other value, including "", lands with a direct fenced push.
+const LandPullRequest = "pull_request"
 
 // Sections converts the declared regions to the forge's form.
 func (r Repo) forgeSections() []forge.Section {
@@ -527,7 +543,7 @@ func (r Repo) forgeSections() []forge.Section {
 // ForgeRepo is the repository as the forge sees it, sections included.
 func (r Repo) ForgeRepo() forge.Repo {
 	return forge.Repo{Name: r.Name, Remote: r.Remote, Role: forge.Role(r.Role),
-		DefaultBranch: r.Branch, Sections: r.forgeSections()}
+		DefaultBranch: r.Branch, Sections: r.forgeSections(), Check: r.Check}
 }
 
 // Load reads and validates a config.
@@ -689,6 +705,12 @@ func (c *Config) validate() error {
 			}
 			if r.Check == "" {
 				r.Check = "true"
+			}
+			if r.Land != "" && r.Land != LandPullRequest {
+				return fmt.Errorf("boxcfg: box %s repo %s: land %q — only %q is known, or leave it unset for a direct push", bx.Name, r.Name, r.Land, LandPullRequest)
+			}
+			if r.Land == LandPullRequest && r.LandToken != "gh" {
+				return fmt.Errorf("boxcfg: box %s repo %s: land: %s needs land_token — only \"gh\" (gh auth token) is known today, and without one the daemon has no way to open the pull request", bx.Name, r.Name, LandPullRequest)
 			}
 			if err := validateSections(bx, r); err != nil {
 				return err

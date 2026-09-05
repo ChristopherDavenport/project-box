@@ -142,6 +142,11 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 			}
 			req.Extra = append(req.Extra, sectionLayer(sec))
 		}
+		if len(item.Sections) == 0 {
+			if repo, ok := b.repo(ws.Repo); ok {
+				req.Extra = append(req.Extra, repoLayer(repo))
+			}
+		}
 		req.Model = item.Model
 	}
 	if b.Seat != nil {
@@ -704,6 +709,18 @@ func (b *Builder) section(repo, name string) (forge.Section, bool) {
 	return forge.Section{}, false
 }
 
+// repo finds a declared repository. An empty name means the box's only
+// repository, the same convention section uses.
+func (b *Builder) repo(name string) (forge.Repo, bool) {
+	for _, r := range b.Repos {
+		if name != "" && r.Name != name {
+			continue
+		}
+		return r, true
+	}
+	return forge.Repo{}, false
+}
+
 // sectionLayer is a region of a repository as a layer: what the agent is
 // told about where it works, and the tier the region runs on by default.
 // Content-addressed like every inline layer, over the text AND the tier, so
@@ -733,6 +750,29 @@ func sectionLayer(sec forge.Section) agent.Layer {
 		Instructions: text,
 		Model:        sec.Model,
 		Session:      sec.Session,
+	}
+}
+
+// repoLayer is the whole repository as a layer: what a unit that names no
+// section is told about its scope, and the check to run while iterating —
+// the same check the gate runs whole at landing. Content-addressed like
+// every inline layer, over the instruction text.
+func repoLayer(repo forge.Repo) agent.Layer {
+	var w strings.Builder
+	fmt.Fprintf(&w, "## Repository: %s\n", repo.Name)
+	w.WriteString("This unit of work names no section: it is expressed within the whole repository, and takes turns with every other unit here.\n")
+	if repo.Check != "" {
+		fmt.Fprintf(&w, "While iterating, run the repository's check: `%s`. The same check runs whole at the gate.\n", repo.Check)
+	} else {
+		w.WriteString("No check is configured for this repository: there is nothing to run while iterating.\n")
+	}
+	text := w.String()
+	sum := sha256.Sum256([]byte(text))
+	return agent.Layer{
+		Name:         "repo-" + repo.Name,
+		Scope:        agent.ScopeRepo,
+		Source:       agent.Source{Kind: agent.SourceInline, Digest: hex.EncodeToString(sum[:])},
+		Instructions: text,
 	}
 }
 

@@ -148,3 +148,93 @@ func TestWindowRolloverForgives(t *testing.T) {
 		t.Fatalf("rollover kept the old window's account: %d tokens, %d unmetered", r.Tokens, r.Unmetered)
 	}
 }
+
+// TestAcquireAloneIsNotAStart: a claim is not a run. Acquire took the slot —
+// Report().Running says so — but nothing has begun building, and nothing
+// should say otherwise: not the started count, not the evidence chain.
+func TestAcquireAloneIsNotAStart(t *testing.T) {
+	ctx := context.Background()
+	m, _ := meter(t, Budget{MaxConcurrent: 2})
+
+	release, err := m.Acquire(ctx, "wi-1")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer release()
+
+	if r := m.Report(); r.Running != 1 || r.Started != 0 {
+		t.Fatalf("acquire alone should hold the slot without starting it: %+v", r)
+	}
+	for rec, err := range m.Store.Log().Since(ctx, tn, "control/capacity", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Kind == "spend" {
+			t.Fatalf("acquire wrote a spend record before the run ever began: %+v", rec)
+		}
+	}
+}
+
+// TestStartRecordsTheBeginning: the moment a run actually begins is the
+// moment charged, and it is evidence — the same "spend" record Acquire used
+// to write, now written where the fact is true.
+func TestStartRecordsTheBeginning(t *testing.T) {
+	ctx := context.Background()
+	m, _ := meter(t, Budget{MaxConcurrent: 2})
+
+	release, err := m.Acquire(ctx, "wi-1")
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	defer release()
+	m.Start(ctx, "wi-1")
+
+	if r := m.Report(); r.Started != 1 {
+		t.Fatalf("start should record one begun run, got %d", r.Started)
+	}
+	found := false
+	for rec, err := range m.Store.Log().Since(ctx, tn, "control/capacity", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Kind == "spend" && rec.Subject == "wi-1" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("start wrote no spend record")
+	}
+}
+
+// TestMaxPerWindowCountsCompletedStartsNotAcquireAttempts: the brake this
+// issue is about. A window that never saw a real start must not close, no
+// matter how many times the same run is claimed; a window that saw one must
+// close on the very next claim.
+func TestMaxPerWindowCountsCompletedStartsNotAcquireAttempts(t *testing.T) {
+	ctx := context.Background()
+	m, _ := meter(t, Budget{MaxConcurrent: 2, MaxPerWindow: 1, Window: time.Hour})
+
+	// Claimed and released twice without ever starting: the window is
+	// untouched, because no run actually began.
+	for i := 0; i < 2; i++ {
+		release, err := m.Acquire(ctx, "wi-1")
+		if err != nil {
+			t.Fatalf("acquire %d with no starts yet: %v", i, err)
+		}
+		release()
+	}
+	if r := m.Report(); r.Started != 0 {
+		t.Fatalf("no start happened yet, got %d", r.Started)
+	}
+
+	release, err := m.Acquire(ctx, "wi-1")
+	if err != nil {
+		t.Fatalf("acquire before the one real start: %v", err)
+	}
+	m.Start(ctx, "wi-1")
+	release()
+
+	if _, err := m.Acquire(ctx, "wi-2"); !errors.Is(err, ErrBudget) {
+		t.Fatalf("one completed start should close a MaxPerWindow=1 window, got %v", err)
+	}
+}

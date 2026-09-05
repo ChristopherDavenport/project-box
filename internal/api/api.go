@@ -127,6 +127,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/provenance/{sha}/export", s.provenanceExport)
 	mux.HandleFunc("GET /v1/plans/{ref}", s.planByRef)
 	mux.HandleFunc("GET /v1/plans/{ref}/diff/{other}", s.planDiff)
+	mux.HandleFunc("GET /v1/ingress/{id}", s.ingress)
 	mux.HandleFunc("GET /v1/ingress/{id}/plans", s.ingressPlans)
 	mux.HandleFunc("GET /v1/activity", s.activity)
 	mux.HandleFunc("GET /v1/events", s.events)
@@ -356,6 +357,7 @@ type OpenIngressRequest struct {
 	Route   string `json:"route"`
 	Key     string `json:"key"`
 	Payload string `json:"payload,omitempty"`
+	Summary string `json:"summary,omitempty"`
 }
 
 // OpenIngressResponse reports what the delivery named.
@@ -378,7 +380,7 @@ func (s *Server) openIngress(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ing, opened, err := s.Router.Open(r.Context(), route, ingress.Delivery{
-		Key: req.Key, Payload: []byte(req.Payload), Received: time.Now().UTC(),
+		Key: req.Key, Payload: []byte(req.Payload), Title: req.Summary, Received: time.Now().UTC(),
 	})
 	if err != nil {
 		httpErr(w, 500, err.Error())

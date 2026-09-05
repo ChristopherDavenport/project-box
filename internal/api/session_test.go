@@ -132,7 +132,7 @@ func TestEventsScopeToOneItem(t *testing.T) {
 	// And the whole factory's activity is NOT on this connection: an ingress
 	// opened now belongs to no item and must not arrive here.
 	c, _ := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
-	if _, err := c.OpenIngress(ctx, "issues", "issue-elsewhere", "unrelated"); err != nil {
+	if _, err := c.OpenIngress(ctx, "issues", "issue-elsewhere", "unrelated", ""); err != nil {
 		t.Fatal(err)
 	}
 	w.srv.Live.Append("wi-watched", control.Frame{Kind: "message", Text: "still here"})

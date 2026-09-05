@@ -6,7 +6,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { Task } from '@lit/task';
 import {
-  getStatus, getItems, getExceptions, getItem, getItemEvidence, getProvenance, getProvenanceChain, provenanceExportURL,
+  getStatus, getItems, getExceptions, getItem, getItemEvidence, getIngress, getProvenance, getProvenanceChain, provenanceExportURL,
   getSessions, getSession, openIngress,getRunFrames, reload, retryItem, resolveItem,
   getPlan, getIngressPlans, getPlanDiff,
 } from './api.js';
@@ -52,7 +52,7 @@ const WHERE = {
 // row one dead runner is holding, is sorting.
 const COLUMNS = [
   { key: 'state', label: 'State', get: (e) => e.state },
-  { key: 'work', label: 'Work', get: (e) => title(e.task) || e.id },
+  { key: 'work', label: 'Work', get: (e) => title(e) || e.id },
   { key: 'why', label: 'Blocked by', get: (e) => why(e) },
   { key: 'stage', label: 'Stage', get: (e) => e.stage ?? '' },
   { key: 'holder', label: 'Held by', get: (e) => e.runner ?? '' },
@@ -61,6 +61,9 @@ const COLUMNS = [
 ];
 
 const stateTag = (state) => html`<jh-tag size="small" class=${STATE_APPEARANCE[state] ?? 'neutral'} label=${state}></jh-tag>`;
+// A judgement's standing, once it has one: plan.Store.Standing's own words,
+// not the queue's — planned and resolved settled well, failed did not.
+const STANDING_APPEARANCE = { planned: 'positive', resolved: 'positive', failed: 'negative', retried: 'brand' };
 const kindTag = (kind) => html`<jh-tag size="small" class=${appearanceOf(kind)} label=${kind}></jh-tag>`;
 
 const loading = (what) => html`<jh-progress accessible-label=${`Loading ${what}`}></jh-progress>`;
@@ -205,14 +208,14 @@ export class BoxDashboard extends LitElement {
       <jh-list-group accessible-label="In-flight work">
         ${live.map((e) => html`
           <jh-list-item
-            primary-text=${title(e.task) || e.id}
+            primary-text=${title(e) || e.id}
             secondary-text=${e.note ? firstLine(e.note) : origin(e) || place(e)}
             primary-metadata=${e.stage ?? ''}
             secondary-metadata=${e.stage ? `${age(e.in_state_sec)} in stage` : `${age(e.age_sec)} old`}
             show-divider>
             <span slot="jh-list-item-left">${stateTag(e.state)}</span>
             <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
-              label="Open" accessible-label=${`Open ${title(e.task) || e.id}`} href=${'/items/' + e.id}></jh-button>
+              label="Open" accessible-label=${`Open ${title(e) || e.id}`} href=${'/items/' + e.id}></jh-button>
           </jh-list-item>`)}
       </jh-list-group>`;
   }
@@ -374,7 +377,7 @@ export class BoxWork extends LitElement {
               <tr>
                 <td><div class="stack">${stateTag(e.state)}${e.ready ? html`<span class="ready">ready</span>` : nothing}</div></td>
                 <th scope="row">
-                  <a href=${'/items/' + e.id}>${title(e.task) || e.id}</a>
+                  <a href=${'/items/' + e.id}>${title(e) || e.id}</a>
                   ${e.note ? html`<div class="note" title=${e.note}>${firstLine(e.note)}</div>` : nothing}
                 </th>
                 <td>${e.blocked_by?.length
@@ -522,15 +525,17 @@ export class BoxSessions extends LitElement {
   _card(s) {
     const frames = this._timeline(s);
     return html`
-      <jh-card header-title=${title(s.task) || s.id} header-subtitle=${origin(s) || place(s)} padding="medium">
+      <jh-card header-title=${title(s) || s.id} header-subtitle=${origin(s) || place(s)} padding="medium">
         <div class="meta">
-          ${stateTag(s.state)}
+          ${s.judgement ? html`<jh-tag size="small" label="judgement"></jh-tag>` : stateTag(s.state)}
           ${s.stage ? html`<jh-tag size="small" label=${s.stage}></jh-tag><span>${age(s.in_state_sec)} in stage</span>` : nothing}
           ${s.seat ? html`<span>seat <b>${s.seat}</b></span>` : nothing}
           ${s.runner ? html`<span>${hold(s)}</span>` : nothing}
         </div>
         <div class="meta">
-          <span>item <box-hash label="item id" .value=${s.id} href=${'/items/' + s.id} chars="18"></box-hash></span>
+          ${s.judgement
+            ? html`<span>ingress <box-hash label="ingress id" .value=${s.id} href=${'/ingress/' + s.id} chars="18"></box-hash></span>`
+            : html`<span>item <box-hash label="item id" .value=${s.id} href=${'/items/' + s.id} chars="18"></box-hash></span>`}
           ${s.agentref ? html`<span>agent <box-hash label="agentref" .value=${s.agentref}></box-hash></span>` : nothing}
           ${s.head ? html`<span>head <box-hash label="commit" .value=${s.head} href=${'/provenance/' + s.head}></box-hash></span>` : nothing}
         </div>
@@ -600,7 +605,7 @@ export class BoxExceptions extends LitElement {
   }
 
   _done(verb, it) {
-    toast(`${verb}: ${title(it.task) || it.id}`, 'positive');
+    toast(`${verb}: ${title(it) || it.id}`, 'positive');
     this._refresh();
   }
 
@@ -624,7 +629,7 @@ export class BoxExceptions extends LitElement {
 
   _card(it) {
     return html`
-      <jh-card header-title=${title(it.task) || it.id} header-subtitle=${origin(it) || place(it)} padding="medium">
+      <jh-card header-title=${title(it) || it.id} header-subtitle=${origin(it) || place(it)} padding="medium">
         <div class="meta">
           <jh-tag size="small" class=${SEVERITY_APPEARANCE[it.severity ?? 'medium'] ?? 'neutral'} label=${`severity ${it.severity ?? 'medium'}`}></jh-tag>
           ${it.stage ? html`<jh-tag size="small" label=${`at ${it.stage}`}></jh-tag>` : nothing}
@@ -635,11 +640,11 @@ export class BoxExceptions extends LitElement {
         </div>
         ${it.note ? html`<p class="note">${it.note}</p>` : nothing}
         <div class="actions">
-          <box-reason label="Retry" confirm="Retry" appearance="primary" glyph="rotate" prompt=${`Retry ${title(it.task)}`}
+          <box-reason label="Retry" confirm="Retry" appearance="primary" glyph="rotate" prompt=${`Retry ${title(it)}`}
             .action=${(r) => retryItem(it.id, r)} @box-done=${() => this._done('Retried', it)}></box-reason>
-          <box-reason label="Resolve" confirm="Resolve" appearance="secondary" glyph="check" prompt=${`Resolve ${title(it.task)}`}
+          <box-reason label="Resolve" confirm="Resolve" appearance="secondary" glyph="check" prompt=${`Resolve ${title(it)}`}
             .action=${(r) => resolveItem(it.id, r)} @box-done=${() => this._done('Resolved', it)}></box-reason>
-          <jh-button appearance="tertiary" size="small" label="Open" accessible-label=${`Open ${title(it.task) || it.id}`} href=${'/items/' + it.id}></jh-button>
+          <jh-button appearance="tertiary" size="small" label="Open" accessible-label=${`Open ${title(it) || it.id}`} href=${'/items/' + it.id}></jh-button>
         </div>
       </jh-card>`;
   }
@@ -759,7 +764,7 @@ export class BoxItem extends LitElement {
   }
 
   _done(verb, item) {
-    toast(`${verb}: ${title(item.task) || item.id}`, 'positive');
+    toast(`${verb}: ${title(item) || item.id}`, 'positive');
     this._refresh();
   }
 
@@ -768,7 +773,7 @@ export class BoxItem extends LitElement {
     const parkedOrFailed = item.state === 'parked' || item.state === 'failed';
     const tone = parkedOrFailed ? 'negative' : item.state === 'done' ? 'positive' : 'neutral';
     return html`
-      <jh-card header-title=${title(item.task) || item.id} header-subtitle=${origin(item) || place(item)} padding="medium">
+      <jh-card header-title=${title(item) || item.id} header-subtitle=${origin(item) || place(item)} padding="medium">
         <div class="meta">
           ${stateTag(item.state)}
           ${item.stage && item.stage !== item.state ? html`<jh-tag size="small" label=${`at ${item.stage}`}></jh-tag>` : nothing}
@@ -845,6 +850,123 @@ export class BoxItem extends LitElement {
   }
 }
 customElements.define('box-item', BoxItem);
+
+/**
+ * One judgement's own page: the origination's facts and the same timeline a
+ * unit's item page shows. Not as rich as box-item on purpose — a judgement is
+ * the planner's own act, with no queue row, no gates, no chain of verbs of
+ * its own — only the origination record and the run log #44 already
+ * produces under "plan-<ingress-id>".
+ */
+export class BoxIngress extends LitElement {
+  static properties = { ingressId: { attribute: false }, _live: { state: true } };
+  static styles = [base, facts, css`
+    :host { display: grid; gap: var(--jh-space-400); }
+    .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; margin-bottom: var(--jh-space-300); }
+    details { margin-top: var(--jh-space-300); }
+    summary { cursor: pointer; font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; font: var(--jh-font-code-regular-2); margin: var(--jh-space-200) 0 0;
+          padding: var(--jh-space-300); border-radius: var(--jh-border-radius-200); background: var(--jh-color-container-secondary-enabled); }
+    ol.frames { list-style: none; margin: 0; padding: 0; }
+    ol.frames li { display: grid; grid-template-columns: 5.5em 6em 1fr; gap: var(--jh-space-300); align-items: baseline;
+                   padding: var(--jh-space-100) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    ol.frames .t { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); white-space: nowrap; }
+    ol.frames .k { font: var(--jh-font-helper-medium); }
+    ol.frames .x { white-space: pre-wrap; overflow-wrap: anywhere; }
+    ol.frames li.negative .k { color: var(--jh-color-content-negative-enabled); }
+    ol.frames li.positive .k { color: var(--jh-color-content-positive-enabled); }
+  `];
+
+  constructor() {
+    super();
+    this._live = [];
+  }
+
+  // The judgement's own stream, scoped server-side to "plan-<id>" exactly as
+  // #44 keys it — reopened when the page moves to another origination,
+  // following box-item's willUpdate wiring precisely.
+  willUpdate(changed) {
+    if (changed.has('ingressId')) {
+      if (this._stream) { this.removeController(this._stream); this._stream.hostDisconnected(); }
+      this._live = [];
+      this._stream = new ActivityController(this, {
+        item: 'plan-' + this.ingressId, limit: 1,
+        onSession: (f) => { this._live = [...this._live, f]; },
+      });
+    }
+  }
+
+  _task = new Task(this, {
+    task: async ([id], { signal }) => {
+      const [ing, kept] = await Promise.all([
+        getIngress(id, signal),
+        getRunFrames('plan-' + id, signal).catch(() => []),
+      ]);
+      return { ing, kept };
+    },
+    args: () => [this.ingressId],
+  });
+
+  // The kept frames first, then whatever has streamed since that is not
+  // already among them — the same merge-dedup box-item uses, on the same
+  // frameKey the daemon stamps on both.
+  _frames(kept) {
+    const seen = new Set((kept ?? []).map(frameKey));
+    return collapse([...(kept ?? []), ...this._live.filter((f) => !seen.has(frameKey(f)))]);
+  }
+
+  _agent(ing, kept) {
+    const frames = this._frames(kept);
+    const running = !ing.standing;
+    const subtitle = running
+      ? 'What the agent is doing, as it does it — newest first'
+      : 'What the agent did, from the run log — newest first';
+    return html`
+      <jh-card header-title="Agent" header-subtitle=${subtitle} padding="medium">
+        ${frames.length === 0
+          ? html`<p class="empty">${running
+              ? 'Nothing streamed yet. The first frame is the agent starting.'
+              : 'Nothing was kept for this run — it ran before the run log existed, or its frames were pruned.'}</p>`
+          : html`<ol class="frames" aria-label="Agent timeline, newest first">${frames.slice().reverse().map((f) => html`
+              <li class=${FRAME_APPEARANCE[f.kind] ?? ''}>
+                <span class="t"><box-when .at=${f.at}></box-when></span>
+                <span class="k">${f.kind}</span>
+                <span class="x">${frameLine(f)}</span>
+              </li>`)}</ol>`}
+      </jh-card>`;
+  }
+
+  _head(ing) {
+    const running = !ing.standing;
+    return html`
+      <jh-card header-title=${title(ing) || ing.id} header-subtitle=${place(ing)} padding="medium">
+        <div class="meta">
+          <jh-tag size="small" class=${running ? 'brand' : (STANDING_APPEARANCE[ing.standing] ?? 'neutral')} label=${running ? 'judgement' : ing.standing}></jh-tag>
+        </div>
+        <dl class="facts" style="margin-top: var(--jh-space-400)">
+          <dt>Ingress</dt><dd><box-hash label="ingress id" .value=${ing.id} chars="24"></box-hash></dd>
+          <dt>Where</dt><dd>${place(ing) || html`<span class="muted">—</span>`}${ing.requester ? html` · requested by ${ing.requester}` : nothing}</dd>
+          ${ing.opened ? html`<dt>Opened</dt><dd><box-when .at=${ing.opened} abs></box-when> <span class="helper">(<box-when .at=${ing.opened}></box-when>)</span></dd>` : nothing}
+          ${ing.reason ? html`<dt>Reason</dt><dd>${ing.reason}</dd>` : nothing}
+        </dl>
+        <details>
+          <summary>Full task text</summary>
+          <pre>${ing.task}</pre>
+        </details>
+      </jh-card>`;
+  }
+
+  render() {
+    return this._task.render({
+      pending: () => loading('judgement'),
+      error: failed,
+      complete: ({ ing, kept }) => html`
+        ${this._head(ing)}
+        ${this._agent(ing, kept)}`,
+    });
+  }
+}
+customElements.define('box-ingress', BoxIngress);
 
 /** Provenance: the audit query — the chain one commit is a link of, every
  *  span verified, every gap named. The ordered list is the representation of

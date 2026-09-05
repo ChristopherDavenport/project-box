@@ -195,7 +195,12 @@ type WorkItem struct {
 	// empty inherits the section's, then the role's, then the box's.
 	Model string `json:"model,omitempty"`
 	Task  string `json:"task"`
-	State State  `json:"state"`
+	// Summary is the one line the room shows for this item, distinct from
+	// Task: the task is the full paragraph an agent needs, and showing that
+	// paragraph as the item's name was the gap this field closes. Empty on
+	// items from before this field existed.
+	Summary string `json:"summary,omitempty"`
+	State   State  `json:"state"`
 	// Depth is how many times the factory has reopened this line of work on
 	// its own initiative, inherited from the ingress. Externally delivered
 	// work is 0; see loop.OpenRepair for what bounds it.
