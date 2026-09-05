@@ -1603,3 +1603,16 @@ touch. A node naming two sections carried one context of 174K where round
 6's split halves stayed under 124K. Found beside it: the untitled Read and
 Bash rows were the runtime dropping every tool event whose content was a
 list, not the adapter's timing (#48). Round 8 runs #45 and #46 at `high`.
+
+Round 8 (2026-09-05, #45 #46 #22 #51, `docs/experiments/round8-2026-09-05.md`):
+four issues at once, ten units and two retries landed on `factory` for
+$17.83 and 32.7M tokens in 59 minutes, 50 of them agent time. The plans were
+right. The brakes were the finding: judgement runs inside the tick, so three
+planners ran in series and ready units waited behind them (#50); round 7 and
+three planners hit the hour's volume cap; the wait-as-a-start double count
+charged seven starts for one whole-repository unit while the round was
+fixing it; a waiting unit holds a seat a runnable one could use; and two
+gate failures went unnamed because the record keeps the check's tail (#52).
+The fence worked: a landing refused under a moved head was rebased
+mechanically and re-gated. The dogfood now lands through pull requests
+(#22) and shows a unit by its summary (#51) once restarted on the merge.
