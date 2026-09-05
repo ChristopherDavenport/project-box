@@ -67,7 +67,18 @@ def load_issues() -> list:
 
 def main() -> int:
     issues = load_issues()
-    only = {int(a) for a in sys.argv[1:] if a.isdigit()}
+    args = sys.argv[1:]
+    # An issue the factory has already been through keeps its key, so a
+    # second submit of it reports opened=false: intake is idempotent on the
+    # key, by design. When the issue is still open because only half of it
+    # landed, --key-suffix names the second pass — `issue-22-lander` — and
+    # the record shows two originations for one issue, which is the truth.
+    suffix = ""
+    if "--key-suffix" in args:
+        i = args.index("--key-suffix")
+        suffix = "-" + args[i + 1]
+        del args[i:i + 2]
+    only = {int(a) for a in args if a.isdigit()}
     if only:
         issues = [i for i in issues if i["number"] in only]
 
@@ -76,7 +87,7 @@ def main() -> int:
         task = f"GitHub issue #{n}: {title}\n\n{issue['body'].strip()}\n\n---\n\n{CONTRACT}"
         res = subprocess.run(
             [str(BOX), "-tenant", TENANT, "-daemon", SOCKET, "submit",
-             "-route", ROUTE, "-key", f"issue-{n}", "-task", task],
+             "-route", ROUTE, "-key", f"issue-{n}{suffix}", "-task", task],
             capture_output=True, text=True,
         )
         status = res.stdout.strip() or res.stderr.strip()

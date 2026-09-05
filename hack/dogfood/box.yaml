@@ -56,7 +56,10 @@ budget:
   # when it finally ran. Round 6's whole-repository unit was refused that
   # way with three real runs behind it. Raised by one until the meter
   # counts runs, not attempts.
-  max_per_window: 5
+  # Eight for round 8: three issues at once, each a plan and at least one
+  # unit, on top of the double count above. Starts are the brake on a
+  # runaway, and three deliberate submissions are not one.
+  max_per_window: 8
   max_tokens_per_window: 15000000
   window: 1h
   # The brake in the currency that actually bound. The account's five-hour
