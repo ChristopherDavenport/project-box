@@ -147,10 +147,19 @@ func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) 
 	}
 }
 
-// ItemFor turns an admitted ingress into a work item. The ingress link is
-// what keeps "why does this change exist" answerable from the other end.
+// ItemFor turns an admitted ingress into ONE work item that the caller names
+// itself. The ingress link is what keeps "why does this change exist"
+// answerable from the other end.
+//
+// This is not the intake path. Intake decomposes an origination into a graph
+// and takes the item ids from the plan — see [plan.Items]. What is left here
+// is the case where the factory opens a single unit whose name is meaningful
+// on its own: a ladder promotion to a named environment at a named candidate,
+// a deploy of a named image. Those carry no plan, and the field says so rather
+// than pointing at one that was never made.
 func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 	return queue.WorkItem{ID: id, Tenant: ing.Tenant, Box: ing.Box, Ingress: ing.ID,
+		Kind:      string(ing.Kind),
 		Requester: ing.Requester, Repo: ing.Repo, Task: task, Depth: ing.Depth,
 		// Repair work wakes with the attempt it follows rather than cold; the
 		// ingress is where that travels, the same way the depth does.

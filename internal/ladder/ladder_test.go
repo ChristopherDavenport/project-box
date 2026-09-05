@@ -17,6 +17,7 @@ import (
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/render"
@@ -114,7 +115,7 @@ func setup(t *testing.T, soak time.Duration, prodApprovals int) *world {
 			return []forge.Gate{gate.Command{Label: "post-land", Dir: ws.Dir, Commands: [][]string{{"test", "-f", "ok.txt"}}}}
 		},
 		Red: loop.OpenRepair(w.router, ingress.Route{
-			Name: "red-main", Kind: ingress.RouteRedMain, Opens: ingress.KindIssue,
+			Name: "red-main", Kind: ingress.RouteRedMain, Opens: kind.SeedIssue,
 			Box: "shop", Requester: "gargoyle",
 		}, 0),
 		TTL: time.Hour,
@@ -165,7 +166,7 @@ func (w *world) land(t *testing.T, id, task string) queue.WorkItem {
 	t.Helper()
 	ctx := context.Background()
 	ing, _, err := w.router.Open(ctx, ingress.Route{
-		Name: "issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue, Box: "shop", Requester: "chris",
+		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
 	}, ingress.Delivery{Key: id})
 	if err != nil {
 		t.Fatal(err)
@@ -211,7 +212,7 @@ func TestTheLadder(t *testing.T) {
 	}
 	// The repair is idempotent: the same red sha names one ingress.
 	_, opened, err := w.router.Open(ctx, ingress.Route{
-		Name: "red-main", Kind: ingress.RouteRedMain, Opens: ingress.KindIssue, Box: "shop", Requester: "gargoyle",
+		Name: "red-main", Kind: ingress.RouteRedMain, Opens: kind.SeedIssue, Box: "shop", Requester: "gargoyle",
 	}, ingress.Delivery{Key: "red-" + red.Head})
 	if err != nil || opened {
 		t.Fatalf("repair not idempotent: opened=%v err=%v", opened, err)
@@ -306,7 +307,7 @@ func TestFencingIsIdenticalInTheOptimisticLane(t *testing.T) {
 		TTL: time.Hour,
 	}
 	ing, _, err := w.router.Open(ctx, ingress.Route{
-		Name: "issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue, Box: "shop", Requester: "chris",
+		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
 	}, ingress.Delivery{Key: "wi-fence"})
 	if err != nil {
 		t.Fatal(err)
@@ -411,7 +412,7 @@ func TestOptimisticLaneRefusesHumanGates(t *testing.T) {
 	}
 	ctx := context.Background()
 	ing, _, _ := w.router.Open(ctx, ingress.Route{
-		Name: "issues", Kind: ingress.RouteIssue, Opens: ingress.KindIssue, Box: "shop", Requester: "chris",
+		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
 	}, ingress.Delivery{Key: "wi-human"})
 	q := &queue.Queue{Store: w.store, Runner: "runner-1", TTL: time.Hour}
 	item, _ := q.Submit(ctx, loop.ItemFor(ing, "wi-human", "fix something"))
