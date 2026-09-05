@@ -49,6 +49,11 @@ type Node struct {
 	ID string `json:"id"`
 	// Task is what the work asks for.
 	Task string `json:"task"`
+	// Summary is the one line a human reads for this unit, distinct from
+	// Task: the task is the full paragraph an agent needs, and a control
+	// room that showed that paragraph as the unit's name was the gap this
+	// field closes. Empty falls back to the task's first line.
+	Summary string `json:"summary,omitempty"`
 	// Repo is the target repository when the plan fans across several; empty
 	// inherits the origination's.
 	Repo string `json:"repo,omitempty"`

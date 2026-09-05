@@ -172,6 +172,13 @@ boxes:
         lane: gated
         route: issues
         check: ./hack/check.sh
+        # Issue #22's lander, turned on for the box that builds this
+        # repository: the factory opens a real GitHub pull request against
+        # the driving issue and lands through it, rather than a bare fenced
+        # push to refs/heads/factory. The token comes from the `gh` session
+        # on this machine — a stopgap ahead of the Phase 7 GitHub App.
+        land: pull_request
+        land_token: gh
         # Where work is expressed. A unit names the sections its paths fall
         # in; two units in disjoint sections run at once, two in one take
         # turns, and a unit that names none is the whole repository and waits

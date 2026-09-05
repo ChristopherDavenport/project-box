@@ -152,6 +152,14 @@ func (c *Client) Plan(ctx context.Context, ref string) (PlanView, error) {
 	return out, c.do(ctx, "GET", "/v1/plans/"+ref, nil, &out)
 }
 
+// Ingress fetches one origination's facts and where its judgement stands —
+// where a judgement's session card links, since an origination is not a
+// queue item and Item's route 404s on one.
+func (c *Client) Ingress(ctx context.Context, id string) (IngressView, error) {
+	var out IngressView
+	return out, c.do(ctx, "GET", "/v1/ingress/"+id, nil, &out)
+}
+
 // IngressPlans lists every plan recorded for an origination, oldest first —
 // what a diff view uses to find the previous run of the same decomposer
 // without pulling every full graph.
@@ -167,9 +175,9 @@ func (c *Client) PlanDiff(ctx context.Context, ref, other string) (plan.Delta, e
 }
 
 // OpenIngress is the delegation verb.
-func (c *Client) OpenIngress(ctx context.Context, route, key, payload string) (OpenIngressResponse, error) {
+func (c *Client) OpenIngress(ctx context.Context, route, key, payload, summary string) (OpenIngressResponse, error) {
 	var out OpenIngressResponse
-	return out, c.do(ctx, "POST", "/v1/ingress", OpenIngressRequest{Route: route, Key: key, Payload: payload}, &out)
+	return out, c.do(ctx, "POST", "/v1/ingress", OpenIngressRequest{Route: route, Key: key, Payload: payload, Summary: summary}, &out)
 }
 
 // Stop presses the stop button; Resume lifts it.

@@ -547,6 +547,11 @@ func TestTheSectionReachesThePromptAndTheRef(t *testing.T) {
 	if !strings.Contains(result, `"model":"haiku"`) {
 		t.Errorf("the plan's tier did not reach the session:\n%s", result)
 	}
+	// A unit that names a section is scoped to it, not to the whole
+	// repository — the two layers describe different agents.
+	if strings.Contains(run, `"name":"repo-app"`) {
+		t.Errorf("a sectioned unit also got the whole-repo layer:\n%s", run)
+	}
 }
 
 // TestAnItemNamingAnUndeclaredSectionIsRefused: running it unscoped would be
@@ -571,5 +576,69 @@ func TestAnItemNamingAnUndeclaredSectionIsRefused(t *testing.T) {
 	// directly.
 	if _, err := lp.Builder.Build(ctx, forge.Workspace{Run: item.ID, Repo: "app", Dir: t.TempDir()}, item.Task); err == nil || !strings.Contains(err.Error(), `"db"`) {
 		t.Fatalf("an undeclared section was not refused: %v", err)
+	}
+}
+
+// TestAnUnsectionedUnitGetsTheRepositoryCheck: a unit that names no section
+// is still the whole repository, and the whole repository still has a check
+// to run while iterating — the gap issue #46 named (docs/PLAN.md's "Units of
+// expression": "an unsectioned unit is the whole repository; the section
+// reaches the builder as a layer on the agentref").
+func TestAnUnsectionedUnitGetsTheRepositoryCheck(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	b := lp.Builder.(*Builder)
+	b.Repos = []forge.Repo{{Name: "app", Check: "go test ./..."}}
+	ctx := context.Background()
+	item := runItemCtx(t, ctx, s, lp, router, "issue-repo-check", "add the widget package")
+	if item.State != queue.StateDone {
+		t.Fatalf("run: %+v", item)
+	}
+	var prompt, run string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-issue-repo-check", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch r.Kind {
+		case "agent-prompt":
+			var p struct{ Prompt string }
+			json.Unmarshal(r.Body, &p)
+			prompt = p.Prompt
+		case "agent-run":
+			run = string(r.Body)
+		}
+	}
+	if !strings.Contains(prompt, "go test ./...") {
+		t.Errorf("the prompt does not carry the repository's check:\n%s", prompt)
+	}
+	if !strings.Contains(run, `"name":"repo-app"`) || !strings.Contains(run, `"scope":"repo"`) {
+		t.Errorf("the whole-repo layer is not on the run record:\n%s", run)
+	}
+}
+
+// TestAnUnsectionedUnitWithNoCheckIsToldPlainly: silence here would read as
+// "nothing to run" and "nobody configured one" identically — the layer must
+// say which.
+func TestAnUnsectionedUnitWithNoCheckIsToldPlainly(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	b := lp.Builder.(*Builder)
+	b.Repos = []forge.Repo{{Name: "app"}}
+	ctx := context.Background()
+	item := runItemCtx(t, ctx, s, lp, router, "issue-repo-nocheck", "add the widget package")
+	if item.State != queue.StateDone {
+		t.Fatalf("run: %+v", item)
+	}
+	var prompt string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-issue-repo-nocheck", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "agent-prompt" {
+			var p struct{ Prompt string }
+			json.Unmarshal(r.Body, &p)
+			prompt = p.Prompt
+		}
+	}
+	if !strings.Contains(prompt, "No check is configured") {
+		t.Errorf("the prompt does not say plainly that no check is configured:\n%s", prompt)
 	}
 }

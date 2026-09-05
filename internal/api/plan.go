@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/plan"
 )
 
@@ -53,6 +54,52 @@ func (s *Server) planByRef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, PlanView{Plan: p, FanOut: p.FanOut(), SVG: planSVG(p)})
+}
+
+// IngressView is one origination's facts and where its judgement stands — the
+// answer a judgement's session card links to. GET /v1/items/{id} 404s on an
+// ing- id (it only ever calls Queue.Load, and an origination is not a queue
+// item — the bug issue #47 names); this is the honest route instead of
+// teaching that one endpoint two incompatible response shapes.
+type IngressView struct {
+	ID        string    `json:"id"`
+	Box       string    `json:"box,omitempty"`
+	Repo      string    `json:"repo,omitempty"`
+	Task      string    `json:"task"`
+	Requester string    `json:"requester,omitempty"`
+	Opened    time.Time `json:"opened"`
+	// Standing is "", planned, failed, retried or resolved — the newest
+	// planning event on the origination's chain, empty meaning the judgement
+	// is still running. Nil Plans (a daemon carrying no decomposer) leaves it
+	// empty rather than guessing.
+	Standing string `json:"standing,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+func (s *Server) ingress(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ing, ok, err := ingress.Load(r.Context(), s.Store.Log(), s.Tenant, id)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if !ok {
+		httpErr(w, http.StatusNotFound, "no origination "+id)
+		return
+	}
+	out := IngressView{
+		ID: ing.ID, Box: ing.Box, Repo: ing.Repo,
+		Task: plan.TaskOf(ing), Requester: ing.Requester, Opened: ing.Opened,
+	}
+	if s.Plans != nil {
+		st, err := s.Plans.Standing(r.Context(), s.Tenant, id)
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		out.Standing, out.Reason = st.State, st.Reason
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) ingressPlans(w http.ResponseWriter, r *http.Request) {

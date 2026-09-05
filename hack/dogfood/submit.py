@@ -76,7 +76,8 @@ def main() -> int:
         task = f"GitHub issue #{n}: {title}\n\n{issue['body'].strip()}\n\n---\n\n{CONTRACT}"
         res = subprocess.run(
             [str(BOX), "-tenant", TENANT, "-daemon", SOCKET, "submit",
-             "-route", ROUTE, "-key", f"issue-{n}", "-task", task],
+             "-route", ROUTE, "-key", f"issue-{n}", "-task", task,
+             "-summary", title],
             capture_output=True, text=True,
         )
         status = res.stdout.strip() or res.stderr.strip()

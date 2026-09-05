@@ -138,7 +138,7 @@ func TestTheFactoryRunsWithNoAgentInIt(t *testing.T) {
 
 	// 2. It ticks, and the pump drains. The whole loop — intake, claim,
 	// build, gate, land — with nothing agent-shaped in it.
-	res, err := c.OpenIngress(ctx, "shop-good", "good-1", "a change that lands")
+	res, err := c.OpenIngress(ctx, "shop-good", "good-1", "a change that lands", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestTheFactoryRunsWithNoAgentInIt(t *testing.T) {
 
 	// 3. Exceptions still surface, age, and leave the room. A failing gate
 	// parks; the room folds it; the escalator tells somebody out of band.
-	sour, err := c.OpenIngress(ctx, "shop-sour", "sour-1", "a change that parks")
+	sour, err := c.OpenIngress(ctx, "shop-sour", "sour-1", "a change that parks", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +203,7 @@ func TestTheFactoryRunsWithNoAgentInIt(t *testing.T) {
 	if !d.meter.Report().Refusing {
 		t.Fatalf("the meter is over its ceiling and not refusing: %+v", d.meter.Report())
 	}
-	after, err := c.OpenIngress(ctx, "shop-good", "good-2", "a change the budget must refuse")
+	after, err := c.OpenIngress(ctx, "shop-good", "good-2", "a change the budget must refuse", "")
 	if err != nil {
 		t.Fatal(err)
 	}

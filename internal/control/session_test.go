@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
@@ -206,6 +208,92 @@ func TestSessionsWithoutALiveBusStillCarryIdentity(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].ID != "wi-shell" || sessions[0].Watching {
 		t.Fatalf("sessions = %+v", sessions)
+	}
+}
+
+// TestAJudgementIsASessionUntilItSettles is issue #47: a running judgement —
+// the planner decomposing an origination — had frames on the live bus and the
+// run log under "plan-<ingress-id>" since #44, and nowhere to see them. It
+// must show up while the judgement runs and disappear the moment it settles,
+// same as a claimed unit disappears once it is done.
+func TestAJudgementIsASessionUntilItSettles(t *testing.T) {
+	r, _ := setup(t)
+	ctx := context.Background()
+	r.Live = &Live{}
+
+	ing := ingress.Ingress{
+		ID: "ing-judge", Tenant: tn, Box: "shop", Repo: "app",
+		Requester: "chris", Note: "decompose this",
+	}
+	body, err := json.Marshal(ing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Store.Log().Append(ctx, evidence.Record{
+		Tenant: tn, Scope: ingress.Scope(ing.ID), Kind: ingress.RecordOpen,
+		Subject: "delivery/" + ing.ID, Actor: ing.Requester, Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runBody, err := json.Marshal(map[string]any{
+		"agentref": "sha256:cafef00d", "role": "planner", "mode": "acceptEdits",
+		"seat": "planner", "envelope": "(none declared)",
+		"layers": []Layer{{Scope: "role", Name: "planner", Source: "inline", Digest: "d1"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Store.Log().Append(ctx, evidence.Record{
+		Tenant: tn, Scope: ingress.Scope(ing.ID), Kind: "agent-run",
+		Subject: "sha256:cafef00d", Actor: "planner", Body: runBody,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r.Live.Append("plan-"+ing.ID, Frame{Kind: "started"})
+	r.Live.Append("plan-"+ing.ID, Frame{Kind: "message", Text: "decomposing"})
+
+	sessions, err := r.Sessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want the one judgement in flight", len(sessions))
+	}
+	s := sessions[0]
+	if !s.Judgement {
+		t.Error("judgement = false for a row that is one")
+	}
+	if s.ID != ing.ID || s.Ingress != ing.ID || s.Box != "shop" || s.Repo != "app" {
+		t.Errorf("identity = %+v", s.QueueEntry)
+	}
+	if s.Task != "decompose this" {
+		t.Errorf("task = %q", s.Task)
+	}
+	if s.Seat != "planner" || s.AgentRef != "sha256:cafef00d" {
+		t.Errorf("seat=%q agentref=%q — the planner's own agent-run record carried both", s.Seat, s.AgentRef)
+	}
+	if len(s.Layers) != 1 || s.Layers[0].Scope != "role" {
+		t.Errorf("layers = %+v", s.Layers)
+	}
+	if !s.Watching || len(s.Timeline) != 2 {
+		t.Fatalf("timeline = %+v watching=%v", s.Timeline, s.Watching)
+	}
+
+	// The disappearing-once-planned case: once the planner settles, the
+	// origination has a real decomposition and the judgement card must not
+	// still be showing "in progress" beside it.
+	if _, err := r.Store.Log().Append(ctx, evidence.Record{
+		Tenant: tn, Scope: ingress.Scope(ing.ID), Kind: plan.RecordKind,
+		Subject: "plan-ref", Actor: "planner", Body: []byte("{}"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	sessions, err = r.Sessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("sessions after planning settled = %+v, want none", sessions)
 	}
 }
 

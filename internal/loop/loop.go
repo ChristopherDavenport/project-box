@@ -18,6 +18,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/authz"
+	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/checks"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
@@ -92,6 +93,14 @@ type Loop struct {
 	// time. A clock is the difference between a runaway costing a bounded
 	// amount and costing whatever it likes.
 	BuildTimeout time.Duration
+	// Meter, when set, charges the run's start the moment the builder is
+	// actually invoked — not when the pump claims the unit, and not when a
+	// claim only reaches leaseSections before going back to Wait. The pump's
+	// own Acquire already took the concurrency slot and checked the budget
+	// before Run was ever called; Meter.Start here just marks that one
+	// acquired slot turned into a real build. Nil skips charging, which is
+	// safe: most test constructions of Loop do not set it.
+	Meter *capacity.Meter
 }
 
 // DefaultBuildTimeout bounds a build when the Box states none. Long enough
@@ -367,6 +376,9 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
 			bctx, cancelBuild := l.buildDeadline(ctx)
 			defer cancelBuild()
+			if l.Meter != nil {
+				l.Meter.Start(ctx, item.ID)
+			}
 			var berr error
 			head, berr = l.Builder.Build(bctx, ws, item.Task)
 			if berr == nil {

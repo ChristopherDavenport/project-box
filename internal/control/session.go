@@ -2,7 +2,12 @@ package control
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
 
+	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
@@ -55,6 +60,11 @@ type Session struct {
 	// now answering — in both cases an empty timeline is silence about the
 	// run, not evidence the agent has done nothing.
 	Watching bool `json:"watching"`
+	// Judgement marks a row as an origination still being decomposed rather
+	// than a claimed work item. queue.State has no value for "in judgement" —
+	// this is not a queue item at all, it is the planner's own act — so a
+	// reader must not be left to infer the distinction from an empty State.
+	Judgement bool `json:"judgement,omitempty"`
 }
 
 // Sessions is the control room's per-unit live view: one entry per running
@@ -81,7 +91,83 @@ func (r *Room) Sessions(ctx context.Context) ([]Session, error) {
 			Watching:   r.Live.Watching(e.ID),
 		})
 	}
+	// A judgement — an origination the planner is still decomposing — has no
+	// queue entry to fold; before #44 it had no surface at all, only frames
+	// reaching the bus and the run log under "plan-<ingress-id>" with nothing
+	// to read them back. Live.Prefixed is the only index into that: the queue
+	// does not know about work that does not exist yet.
+	for _, item := range r.Live.Prefixed("plan-") {
+		id := strings.TrimPrefix(item, "plan-")
+		s, ok, err := r.judgement(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, s)
+		}
+	}
 	return out, nil
+}
+
+// judgement folds one origination's chain into a session row for a judgement
+// still in flight, or reports that it settled and must not appear: planned or
+// failed both mean the planner is done, one way or another, and only the
+// two states short of that — never judged, or sent back for another attempt
+// — belong on this list.
+//
+// One walk of ingress/<id> rather than three. plan.Store.Standing and
+// plan.Store.Origination would each open their own walk of this same chain,
+// and the agent-run record — the planner's seat, agentref and layers, in the
+// same shape [runRecord] already reads off a unit's chain — would be a third;
+// [Room.entry] and [Room.parked] fold their chains once for exactly this
+// reason, so this does too.
+func (r *Room) judgement(ctx context.Context, id string) (Session, bool, error) {
+	var ing ingress.Ingress
+	var ran runRecord
+	state := ""
+	found := false
+	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, ingress.Scope(id), 1) {
+		if err != nil {
+			return Session{}, false, err
+		}
+		switch rec.Kind {
+		case ingress.RecordOpen:
+			if err := json.Unmarshal(rec.Body, &ing); err != nil {
+				return Session{}, false, fmt.Errorf("control: judgement %s: %w", id, err)
+			}
+			if ing.Opened.IsZero() {
+				ing.Opened = rec.At
+			}
+			found = true
+		case "agent-run":
+			// Best effort, same as entry: a record this reader cannot parse is
+			// a thinner row, never a listing that fails.
+			var got runRecord
+			if json.Unmarshal(rec.Body, &got) == nil {
+				ran = got
+			}
+		case plan.RecordKind:
+			state = "planned"
+		case plan.FailedKind:
+			state = "failed"
+		case plan.RetriedKind:
+			state = "retried"
+		case plan.ResolvedKind:
+			state = "resolved"
+		}
+	}
+	if !found || (state != "" && state != "retried") {
+		return Session{}, false, nil
+	}
+	e := QueueEntry{
+		ID: id, Box: ing.Box, Repo: ing.Repo, Ingress: id,
+		Task: firstLine(plan.TaskOf(ing)), Seat: ran.Seat, AgentRef: ran.AgentRef,
+		Opened: ing.Opened,
+	}
+	return Session{
+		QueueEntry: e, Layers: ran.Layers, Judgement: true,
+		Timeline: r.Live.Item("plan-" + id), Watching: r.Live.Watching("plan-" + id),
+	}, true, nil
 }
 
 // Session is one running unit by id, for a room following a single card.

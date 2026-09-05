@@ -65,6 +65,9 @@ export const getItems = (states, signal) =>
 export const getExceptions = (signal) => fetchJSON('/v1/exceptions', signal);
 export const getItem = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}`, signal);
 export const getItemEvidence = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/evidence`, signal);
+// An origination's own facts and where its judgement stands — where a
+// judgement's session card links, since /v1/items/{id} 404s on an ing- id.
+export const getIngress = (id, signal) => fetchJSON(`/v1/ingress/${encodeURIComponent(id)}`, signal);
 export const getProvenanceChain = (sha, signal) => fetchJSON(`/v1/provenance/${encodeURIComponent(sha)}/chain`, signal);
 export const provenanceExportURL = (sha) => `/v1/provenance/${encodeURIComponent(sha)}/export`;
 export const getPlan = (ref, signal) => fetchJSON(`/v1/plans/${encodeURIComponent(ref)}`, signal);

@@ -31,7 +31,7 @@ func Items(ing ingress.Ingress, p Plan) []queue.WorkItem {
 			ID: p.ItemID(n.ID), Tenant: ing.Tenant, Box: ing.Box,
 			Ingress: ing.ID, Plan: p.Ref, Node: n.ID, Kind: string(ing.Kind),
 			Requester: ing.Requester, Repo: repo,
-			Task: n.Task, Depth: ing.Depth, DependsOn: deps,
+			Task: n.Task, Summary: n.Summary, Depth: ing.Depth, DependsOn: deps,
 			Sections: n.Sections, Model: n.Model,
 			// Repair work wakes with the attempt it follows rather than cold;
 			// the origination is where that travels, the same way the depth
