@@ -30,7 +30,21 @@ const (
 	RoleGate     Role = "gate"
 	RoleDeployer Role = "deployer"
 	RoleCurator  Role = "curator"
+	// RolePlanner decomposes an origination into a graph of units. It
+	// judges and reads; it never writes a tree, and its default mode says so.
+	// A planner is not a coordinator with a standing session — it is one
+	// decomposer among several, recorded under an agentref like any run.
+	RolePlanner Role = "planner"
 )
+
+// Known reports whether r names a role this system has a seat for.
+func (r Role) Known() bool {
+	switch r {
+	case RoleBuilder, RoleGate, RoleDeployer, RoleCurator, RolePlanner:
+		return true
+	}
+	return false
+}
 
 // Scope is a layer's position in the composition order, from most general to
 // most specific.
@@ -41,7 +55,10 @@ const (
 	ScopeRole Scope = "role" // what this kind of agent does
 	ScopeBox  Scope = "box"  // this system's stack and policies
 	ScopeRepo Scope = "repo" // repository-specific guidance
-	ScopeTask Scope = "task" // the WorkItem's own instruction
+	// ScopeSection is a region of a repository: what this unit of work is
+	// expressed in, applied after the repository and before the task.
+	ScopeSection Scope = "section"
+	ScopeTask    Scope = "task" // the WorkItem's own instruction
 )
 
 // SourceKind is how a layer's material was obtained.
@@ -207,7 +224,24 @@ type Layer struct {
 	Tools        ToolPolicy
 	// Model overrides the runtime default. Empty inherits from the layer
 	// beneath.
+	//
+	// The value is the agent's own — what its model option lists, verbatim.
+	// The runtime applies it through the protocol after the session opens
+	// and asserts the answer; a value the agent does not list fails the run
+	// before a prompt is sent. Left empty everywhere, the agent runs its
+	// default, which for a harness that reads the machine's settings is
+	// whatever the machine says: a choice nobody made.
 	Model string
+	// Session is the rest of the session configuration, by the id the agent
+	// gives each option — what the protocol calls session config options:
+	// effort, a fast mode, a sub-agent, whatever this agent exposes. The
+	// same contract as Model: the agent's own values, applied through the
+	// protocol, asserted back, refused otherwise. Per key, the most specific
+	// non-empty value wins.
+	//
+	// Model is not spelled here. The protocol gives it a category of its
+	// own, every agent has one, and the record calls it out by name.
+	Session map[string]string
 }
 
 // Request asks for the agent that should run one piece of work.
@@ -220,6 +254,11 @@ type Request struct {
 	// Task is the WorkItem's own instruction, applied as the most specific
 	// layer.
 	Task string
+	// Model is the tier the plan chose for this unit, when it chose one. It
+	// rides the task layer — the most specific statement there is — so it
+	// wins over every section, role and box default and is part of the
+	// agentref. Empty means the plan expressed no preference.
+	Model string
 	// Extra layers supplied by the caller, applied after those the resolver
 	// finds. This is how a definition is written directly in text, and how an
 	// exception path overrides one without a commit.
@@ -256,6 +295,7 @@ type Bundle struct {
 	Context      ContextSet
 	Tools        ToolPolicy
 	Model        string
+	Session      map[string]string
 	// Envelope is the data handling actually in force — the origination's
 	// declaration intersected with the ceiling it ran under. It is part of the
 	// digest, so a different envelope is a different agent on the record,

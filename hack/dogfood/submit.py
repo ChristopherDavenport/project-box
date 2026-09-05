@@ -30,11 +30,20 @@ REPO = "ChristopherDavenport/project-box"
 TENANT = "davenport"
 ROUTE = "issues"
 
+# The repo-specific half of the working contract. The general half — commit
+# or escalate, hand off rather than degrade — is the runtime's, in the prompt.
+#
+# This used to open with "Read docs/ARCHITECTURE.md and docs/PLAN.md before
+# changing anything". Those are 86KB each; loaded at turn one they sat in
+# every later turn's context, and on round 4's 120-call run they were about a
+# fifth of the whole bill. CLAUDE.md is the brief now — the SDK loads it with
+# project scope — and it names the sections to read instead of the files.
 CONTRACT = """\
-You are working in a checkout of project-box itself. Read docs/ARCHITECTURE.md
-and docs/PLAN.md before changing anything: this repository states its decisions
-and their reasoning, and a change that contradicts a recorded decision without
-saying so is wrong even when it compiles.
+You are working in a checkout of project-box itself. CLAUDE.md is the brief.
+The recorded decisions are docs/PLAN.md section 6 and their reasoning is in
+docs/ARCHITECTURE.md by heading: read the section your change touches, never
+the file. A change that contradicts a recorded decision without saying so is
+wrong even when it compiles.
 
 Make the change precisely and minimally, with the tests that assert it — a
 property that is not tested is a comment. Commit your work. If the issue is a

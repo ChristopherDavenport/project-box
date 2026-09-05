@@ -158,6 +158,12 @@ func TestThePromptIsReadableAfterTheRun(t *testing.T) {
 			t.Errorf("the recorded prompt is missing %q:\n%s", want, prompt)
 		}
 	}
+	// Once. The composer ends the instructions with the task layer and the
+	// prompt used to append the task again under its heading, so every
+	// builder prompt carried the whole issue twice — re-read on every turn.
+	if n := strings.Count(prompt, "make the change"); n != 1 {
+		t.Errorf("the task appears %d times in the prompt, want once:\n%s", n, prompt)
+	}
 	// And where it came from — layers with their digests, the tool policy,
 	// which is what makes the agentref checkable against content rather than
 	// merely comparable to itself.

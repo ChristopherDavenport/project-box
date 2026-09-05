@@ -44,8 +44,14 @@ func TestDogfoodBoxIsNarrow(t *testing.T) {
 	if bx.Seat == "" {
 		t.Error("no seat: without one there is no continuity to carry between runs")
 	}
-	if c.Budget.MaxConcurrent != 1 {
-		t.Errorf("max_concurrent = %d, want 1", c.Budget.MaxConcurrent)
+	// Two, not one, since sections: the point of the dogfood is now also
+	// that two units in disjoint regions run side by side, and one seat
+	// cannot show that. Still bounded small — the spend is real.
+	if c.Budget.MaxConcurrent < 1 || c.Budget.MaxConcurrent > 2 {
+		t.Errorf("max_concurrent = %d, want 1 or 2", c.Budget.MaxConcurrent)
+	}
+	if c.Budget.WindowReserve <= 0 {
+		t.Error("no window_reserve: the account's window is the brake that actually bound in round 4")
 	}
 	if forge.Lane(r.Lane) != forge.LaneGated {
 		t.Errorf("lane = %q, want %q — gates then land, until the optimistic lane is rehearsed on a scratch mirror",
@@ -76,5 +82,47 @@ func TestDogfoodMeasuresWhatItSpends(t *testing.T) {
 	}
 	if c.Budget.AllowUnmetered {
 		t.Error("allow_unmetered: an agent whose spend is invisible is the position round 1 cost a morning to learn")
+	}
+}
+
+// TestDogfoodDeclaresItsModel: round 4's finding, held. A box that does not
+// say which model it runs runs whatever the machine's settings say — which
+// for four rounds was the most expensive model with a million-token window,
+// chosen by nobody and, until the session record existed, recorded nowhere.
+// The value is free to move; the field being set is not.
+func TestDogfoodDeclaresItsModel(t *testing.T) {
+	c, err := Load(dogfoodConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Boxes[0].Model == "" {
+		t.Error("no model: the builders would run whatever ~/.claude says, and the record would not say what that was")
+	}
+}
+
+// TestDogfoodExpressesWorkInSections: the dogfood is where fan-out and
+// scoping are measured, so it declares where its own work is expressed and
+// plans every issue by judgement. The section list is free to move; the
+// mechanism being exercised is not.
+func TestDogfoodExpressesWorkInSections(t *testing.T) {
+	c, err := Load(dogfoodConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bx := c.Boxes[0]
+	if len(bx.Repos[0].Sections) < 3 {
+		t.Errorf("sections = %d: the dogfood exists to run units side by side, and one region cannot", len(bx.Repos[0].Sections))
+	}
+	planned := false
+	for _, k := range bx.Kinds {
+		if k.Name == "issue" && k.Decompose.Decomposer == "planner" {
+			planned = true
+		}
+	}
+	if !planned {
+		t.Error("issues are not planned by judgement: every unit would be the whole repository on one tier")
+	}
+	if _, ok := bx.Roles["planner"]; !ok {
+		t.Error("no planner tier: the dial to raise first when plans come back wrong is not on the record")
 	}
 }

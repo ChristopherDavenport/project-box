@@ -162,3 +162,32 @@ func TestUngovernedSurfaces(t *testing.T) {
 		t.Fatalf("ungoverned: %+v", un)
 	}
 }
+
+// TestSessionOptionsMergePerKey: session options are the model's rule applied
+// per key — the most specific non-empty value wins, keys nobody sets stay
+// absent so the agent's default stays in force AND on the record — and a
+// session value is part of the agentref, because an agent at a different
+// effort is a different agent.
+func TestSessionOptionsMergePerKey(t *testing.T) {
+	ls := layers()
+	ls[0].Session = map[string]string{"effort": "high", "fast_mode": "false"}
+	ls[2].Session = map[string]string{"effort": "low", "agent": ""}
+	b, err := (&Composer{Source: ls}).Resolve(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Session["effort"] != "low" || b.Session["fast_mode"] != "false" {
+		t.Fatalf("session merge: %v", b.Session)
+	}
+	if _, set := b.Session["agent"]; set {
+		t.Fatalf("an empty value was carried as a setting: %v", b.Session)
+	}
+	plain, _ := (&Composer{Source: layers()}).Resolve(context.Background(), request())
+	if plain.Ref == b.Ref {
+		t.Fatal("a session option did not change the agentref")
+	}
+	e, _ := (&Composer{Source: ls}).Explain(context.Background(), b)
+	if !bytes.Contains(e, []byte("session.effort: low")) {
+		t.Fatalf("Explain does not show the session option:\n%s", e)
+	}
+}

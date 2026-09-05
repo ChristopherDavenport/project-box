@@ -77,6 +77,13 @@ func (r *recorder) count() int {
 	return len(r.sent)
 }
 
+// all is every notice this recorder was handed, copied out under the lock.
+func (r *recorder) all() []Notice {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]Notice(nil), r.sent...)
+}
+
 // TestExceptionsAgeAndAreOrderedLoudestFirst. The queue could say WHAT was
 // parked and never for how long, and it returned them in arrival order —
 // which is the order the factory would take work in and exactly the wrong

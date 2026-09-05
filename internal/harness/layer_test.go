@@ -161,3 +161,36 @@ func TestUnresolvableSkillFailsTheRun(t *testing.T) {
 		t.Error("skills were pinned with no resolver and the run proceeded")
 	}
 }
+
+// TestModelRidesTheHarnessLayer. The model and the session options are part
+// of the box's surface for the same reason plugins are: they decide what the
+// agent IS. A box that says nothing about them still resolves to the digest
+// it always had, so the record does not churn for configs that did not
+// change.
+func TestModelRidesTheHarnessLayer(t *testing.T) {
+	bare := resolve(t, &Source{Box: "pb"})
+	sonnet := resolve(t, &Source{Box: "pb", Model: "sonnet"})
+	haiku := resolve(t, &Source{Box: "pb", Model: "haiku"})
+	effort := resolve(t, &Source{Box: "pb", Model: "sonnet", Session: map[string]string{"effort": "low"}})
+
+	if sonnet.Model != "sonnet" || effort.Session["effort"] != "low" {
+		t.Fatalf("the surface did not reach the bundle: model=%q session=%v", sonnet.Model, effort.Session)
+	}
+	if bare.Ref == sonnet.Ref || sonnet.Ref == haiku.Ref || sonnet.Ref == effort.Ref {
+		t.Fatal("different models or session options resolved to the same agentref")
+	}
+	if resolve(t, &Source{Box: "pb", Model: "sonnet"}).Ref != sonnet.Ref {
+		t.Fatal("the same model resolved to two different refs — resolution is not deterministic")
+	}
+	// A box that grants nothing but a model still has a harness layer: the
+	// model is a grant.
+	found := false
+	for _, l := range sonnet.Layers {
+		if l.Name == "harness" && l.Model == "sonnet" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no harness layer carried the model: %+v", sonnet.Layers)
+	}
+}

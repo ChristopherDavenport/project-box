@@ -25,18 +25,32 @@ drain: 60s
 build_timeout: 30m
 
 budget:
-  # One at a time. Issue #18 (three concurrent runs producing one) is fixed,
-  # but the point of the dogfood is the agent, not the lease.
-  max_concurrent: 1
-  # Sized from measurement, not from hope. Four runs: 1.0M, 5.3M, 7.5M,
-  # 20.1M — mean 8.5M. A 6M window admitted 0.7 average runs an hour, so the
-  # factory was braked essentially all the time and the number was doing
-  # nothing but stopping work. 30M admits about 3.5, which at fifteen to
-  # twenty minutes a run is roughly continuous operation for one seat.
+  # Sized from four rounds on a model nobody chose (see `model:` below):
+  # 1.0M, 5.3M, 7.5M, 20.1M, then round 4's 25.1M — 98.5% of it cache reads
+  # at ~206K of context a call. Neither brake here is the one that bound.
+  # The factory runs on a subscription, and a subscription's five-hour
+  # window is shared with the human on the same account and invisible to
+  # this meter: round 4's one big run consumed it, the next run hit
+  # "session limit" five minutes in, and nothing here had refused anything.
+  # The agent-result record now carries the account's own limit report
+  # (status, window, utilization, reset), which is the currency a brake for
+  # that has to be denominated in.
   #
-  # ~$24/hour at the observed $0.85/M. Hot-reloadable: edit and `kill -HUP`.
-  max_tokens_per_window: 30000000
+  # Round 5's numbers, sized to not run out mid-round rather than to keep the
+  # seat busy: units are narrow and on Sonnet now, and the point is to
+  # measure them, not to fill the hour. Four starts an hour, fifteen million
+  # tokens of volume, two side by side so the section leases are exercised.
+  # Resize from what round 5 shows. Hot-reloadable: edit and `kill -HUP`.
+  max_concurrent: 2
+  max_per_window: 4
+  max_tokens_per_window: 15000000
   window: 1h
+  # The brake in the currency that actually bound. The account's five-hour
+  # window is shared with the human on this machine and invisible to the
+  # meter until a run ends; every run now reports it, and above this share
+  # the meter refuses new starts until the window resets. Half is Chris's.
+  # `hack/dogfood/window.py` asks the same question before a round starts.
+  window_reserve: 0.5
   # The runaway bound, which the window cannot express: the window gates
   # starts, so its real ceiling is "the limit, plus one whole run". That is
   # how 6M became 25,419,130 in round 3.
@@ -44,9 +58,10 @@ budget:
   # Set it ABOVE the most expensive legitimate run, not near it. A killed run
   # produces nothing at all, so a ceiling tight enough to truncate real work
   # spends the tokens and throws away the commit — strictly worse than the
-  # overshoot it prevents. 25M is the 20.1M measured above plus room; it is
-  # here to catch pathology, not to economise.
-  max_tokens_per_run: 25000000
+  # overshoot it prevents. 25M was round 4's whole-repository run on a
+  # million-token window; a unit on Sonnet has a 200K window and a section,
+  # so 12M is sixty full-context turns and still only catches pathology.
+  max_tokens_per_run: 12000000
   # Deliberately absent: allow_unmetered. A run that will not say what it
   # cost should stop the factory — that is the whole finding from round 1.
 
@@ -54,6 +69,44 @@ boxes:
   - name: pb
     agent: claude-agent-acp
     seat: mason
+    # The model, by the value the agent lists for its model option. Left
+    # unset, claude-agent-acp runs whatever ~/.claude/settings.json says —
+    # on this machine fable[1m], the most expensive model with a
+    # million-token window, which is how round 4's #16 run came to re-read
+    # ~206K of context on each of 120 calls. Applied through
+    # session/set_config_option once the session opens and asserted back:
+    # a value the agent does not list fails the run before a prompt is
+    # sent, and the agent-session record lists what it offered instead. A
+    # session/new probe on 2026-09-04 listed: default, opus[1m],
+    # claude-fable-5-1[1m], fable[1m], sonnet, haiku.
+    #
+    # sonnet: a 200K window bounds what every turn re-reads, and the tier is
+    # priced for routine work. Whether it lands this repository's changes is
+    # round 5's measurement, not this file's claim.
+    model: sonnet
+    # The rest of the session by option id, same contract. The same probe
+    # showed effort inherited as xhigh; it stays the agent's default until a
+    # Sonnet round says what effort buys.
+    # session:
+    #   effort: high
+    # Tiers by role. The planner judges once per origination over a
+    # read-only tree; the builder expresses each unit. Both inherit the
+    # box's `model:` unless stated here, and a section's or a plan node's
+    # tier wins over both. Raise the planner's tier first if plans come back
+    # wrong: a bad plan costs every unit under it.
+    roles:
+      planner: {model: sonnet}
+    # Every issue is planned by judgement before it is work: a graph of
+    # units, each with its sections, its dependencies and its tier, recorded
+    # on the origination's chain with the model that judged. Opt-in here and
+    # nowhere else — the seeded declaration keeps the identity plan, and a
+    # box with no agent is refused this at load. A planner that fails parks
+    # the origination in the exception queue; retry and resolve reach it
+    # from the room like any item.
+    kinds:
+      - name: issue
+        decompose: {decomposer: planner}
+        completion: {graph: true}
     # What the builders load. Before this block existed the answer was
     # "whatever ~/.claude has enabled", decided by nobody and recorded
     # nowhere: a probe of this very box found 44 plugins, 79 skills, three
@@ -98,5 +151,44 @@ boxes:
         role: service
         lane: gated
         route: issues
-        # One file, shared with CI: generate the bundle, build, test.
         check: ./hack/check.sh
+        # Where work is expressed. A unit names the sections its paths fall
+        # in; two units in disjoint sections run at once, two in one take
+        # turns, and a unit that names none is the whole repository and waits
+        # for all of them. The builder is told its section's paths and runs
+        # the section's check while iterating; the repository's full check
+        # above still runs at the gate. Paths not covered by any section are
+        # reached only by a whole-repository unit.
+        sections:
+          - name: forge
+            purpose: git mirrors, leases, workspaces, landing
+            paths: [internal/forge]
+            check: go test ./internal/forge/...
+          - name: loop
+            purpose: the unit's transaction — queue, claim, plan, build, gate, land, capacity
+            paths: [internal/loop, internal/queue, internal/pump, internal/plan, internal/kind, internal/ingress, internal/capacity]
+            check: go test ./internal/loop/... ./internal/queue/... ./internal/pump/... ./internal/plan/... ./internal/kind/... ./internal/ingress/... ./internal/capacity/...
+          - name: agent
+            purpose: the agent plane — layers, the ACP runtime, harness, seats, knowledge
+            paths: [internal/agent, internal/harness, internal/seat, internal/knowledge]
+            check: go test ./internal/agent/... ./internal/harness/... ./internal/seat/... ./internal/knowledge/...
+          - name: evidence
+            purpose: the chain and the store beneath it
+            paths: [internal/evidence, internal/store]
+            check: go test ./internal/evidence/... ./internal/store/...
+          - name: daemon
+            purpose: boxd, its API and gateway, box.yaml, the control room's server side
+            paths: [internal/daemon, internal/api, internal/gateway, internal/boxcfg, internal/control, internal/boxctx, internal/version, cmd]
+            check: go test ./internal/daemon/... ./internal/api/... ./internal/gateway/... ./internal/boxcfg/... ./internal/control/... ./cmd/...
+          - name: deploy
+            purpose: the estate, rendering, the ladder, campaigns, checks
+            paths: [internal/deploy, internal/render, internal/ladder, internal/estate, internal/campaign, internal/checks, deploy]
+            check: go test ./internal/deploy/... ./internal/render/... ./internal/ladder/... ./internal/estate/... ./internal/campaign/... ./internal/checks/...
+          - name: room
+            purpose: the web control room
+            paths: [web]
+            check: cd web && npm run build
+          - name: docs
+            purpose: the design record and the briefs
+            paths: [docs, README.md, CLAUDE.md]
+            check: "true"
