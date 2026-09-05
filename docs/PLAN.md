@@ -1592,3 +1592,14 @@ untitled rows turned out to be the runtime dropping every tool event whose
 content was a list, a decoder typed for the chunk's object, found in round
 7 and fixed in #48); and an unsectioned unit has no check to iterate on. Round 7 measures
 effort `high` on a daemon that applies it.
+
+Round 7 (2026-09-05, #47, `docs/experiments/round7-2026-09-05.md`): effort
+`high` on both roles, asserted at the wire and on every request; one unit
+for two sections landed on `factory` for $6.29 and 13.21M tokens. Against
+round 6's planner at `xhigh`, the same requests and tool calls, half the
+output and half the wall time per request, the same money: the bill is the
+context re-read (62% cache reads, 98% of tokens), which effort does not
+touch. A node naming two sections carried one context of 174K where round
+6's split halves stayed under 124K. Found beside it: the untitled Read and
+Bash rows were the runtime dropping every tool event whose content was a
+list, not the adapter's timing (#48). Round 8 runs #45 and #46 at `high`.
