@@ -176,6 +176,40 @@ func TestLastObjectIsStringAware(t *testing.T) {
 	}
 }
 
+// TestThePlannerAsksForASummary: the sections layer instructs the planner to
+// carry a one-line summary per unit, distinct from the task the builder reads.
+func TestThePlannerAsksForASummary(t *testing.T) {
+	repo := forge.Repo{Name: "app", Sections: []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
+	}}
+	instructions := sectionsLayer(repo).Instructions
+	if !strings.Contains(instructions, "summary: one line the room shows for this unit; the task is what the builder reads.") {
+		t.Fatalf("the planner was not asked for a summary:\n%s", instructions)
+	}
+}
+
+// TestAPlanCarriesPerUnitSummaries: a planner answer naming "summary" on a
+// unit becomes a plan.Node with that Summary set, read-only alongside the
+// task — never folded into it.
+func TestAPlanCarriesPerUnitSummaries(t *testing.T) {
+	repo := forge.Repo{Name: "app", Sections: []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
+	}}
+	text := "```json\n" +
+		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","summary":"Widgets endpoint","sections":["api"],"depends_on":[]}],"why":"one unit"}` +
+		"\n```"
+	nodes, err := parsePlan(text, repo)
+	if err != nil {
+		t.Fatalf("parsePlan: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Summary != "Widgets endpoint" {
+		t.Fatalf("the unit's summary was lost: %+v", nodes)
+	}
+	if nodes[0].Task != "Add GET /v1/widgets" {
+		t.Fatalf("the summary displaced the task: %+v", nodes)
+	}
+}
+
 func keysOf(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
