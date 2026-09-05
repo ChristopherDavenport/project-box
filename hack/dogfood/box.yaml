@@ -24,6 +24,14 @@ every: 15s
 drain: 60s
 build_timeout: 30m
 
+# The run log: what each agent did while it ran — every tool call and what
+# it was doing, what it said, what policy refused — kept beside the chain so
+# the room can show a unit's page after the run, not only while it runs.
+# Telemetry, pruned by age; thirty days is longer than any round is looked
+# at, and a frame is a line, not a record. Absent would keep every frame.
+runs:
+  keep_for: 720h
+
 budget:
   # Sized from four rounds on a model nobody chose (see `model:` below):
   # 1.0M, 5.3M, 7.5M, 20.1M, then round 4's 25.1M — 98.5% of it cache reads
