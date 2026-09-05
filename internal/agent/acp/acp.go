@@ -134,8 +134,9 @@ type Update struct {
 	// when the dialect gave nothing to match on — which is a fact about
 	// enforcement and must not be papered over with a placeholder here.
 	Tool string
-	// Text is the agent's message for UpdateMessage, and the handoff's notes
-	// for UpdateHandoff.
+	// Text is the agent's message for UpdateMessage, the handoff's notes
+	// for UpdateHandoff, and the call's human title for UpdateTool — what
+	// the tool is doing, as against Tool, which is its name.
 	Text string
 	// Reason is the agent's own words for the two box verbs.
 	Reason string
@@ -615,7 +616,12 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				seenCalls[key] = true
 				if first {
 					res.ToolCalls = append(res.ToolCalls, name)
-					emit(Update{Kind: UpdateTool, Tool: name})
+					// The stable name is what policy matches; the title is
+					// what the call is doing — "Read internal/api/api.go",
+					// the Bash command line — and is the half a watcher
+					// wants. A timeline that only said "Read" eleven times
+					// in a row said nothing.
+					emit(Update{Kind: UpdateTool, Tool: name, Text: u.Update.Title})
 					if name == "" {
 						// Nothing to match on, so enforcement did not happen
 						// here and must not be reported as if it had. Counted,

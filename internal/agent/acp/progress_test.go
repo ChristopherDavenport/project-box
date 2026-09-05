@@ -80,6 +80,12 @@ func TestTheRunIsVisibleWhileItIsStillRunning(t *testing.T) {
 	if first := pick(got, UpdateMessage, func(u Update) string { return u.Text })[0]; !strings.Contains(first, "Reading the tree first.") {
 		t.Errorf("first message frame = %q, want the text that preceded the first tool call", first)
 	}
+	// The name says which tool; the title says what it is doing. A timeline
+	// of eleven "Read" frames in a row was the live view before the title
+	// rode along — a fact about activity, not about the run.
+	if want := []string{"Read README.md", "cd /work/ws-1 && go build ./... && go test ./...", "widget.go"}; !slices.Equal(pick(got, UpdateTool, func(u Update) string { return u.Text }), want) {
+		t.Errorf("tool titles = %q, want %q", pick(got, UpdateTool, func(u Update) string { return u.Text }), want)
+	}
 }
 
 // TestTheLiveAccountAndTheSettledOneAgree is the property that makes the live
