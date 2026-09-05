@@ -57,6 +57,49 @@ func TestRetryReachesAFailedPlan(t *testing.T) {
 	}
 }
 
+// TestIngressAnswersWhereTheItemPage404s is issue #47's backend half: GET
+// /v1/items/{id} 404s on an ing- id today because it only ever calls
+// Queue.Load, and a judgement's card has nowhere honest to link. This is the
+// route that answers instead — the origination's own facts, not the queue's.
+func TestIngressAnswersWhereTheItemPage404s(t *testing.T) {
+	w := rig(t)
+	ctx := context.Background()
+	w.srv.Plans = &plan.Store{Log: w.srv.Store.Log(), Actor: "d"}
+	ing, _, err := w.srv.Router.Open(ctx, w.srv.Routes["issues"], ingress.Delivery{Key: "issue-judge", Payload: []byte("decompose this")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = kind.SeedIssue
+
+	sock := filepath.Join(t.TempDir(), "boxd.sock")
+	ln, err := Listen("unix:" + sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &http.Server{Handler: w.srv.Handler()}
+	go hs.Serve(ln)
+	t.Cleanup(func() { hs.Close() })
+	c, err := Dial("unix:"+sock, "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	view, err := c.Ingress(ctx, ing.ID)
+	if err != nil {
+		t.Fatalf("GET /v1/ingress/%s: %v", ing.ID, err)
+	}
+	if view.ID != ing.ID || view.Box != ing.Box || view.Repo != ing.Repo {
+		t.Fatalf("origination facts: %+v, want %+v", view, ing)
+	}
+	if view.Standing != "" {
+		t.Fatalf("standing = %q before any planning event, want empty", view.Standing)
+	}
+
+	if _, err := c.Ingress(ctx, "ing-nonesuch"); err == nil {
+		t.Fatal("an unknown ingress id was accepted")
+	}
+}
+
 // TestPlanGraphOverTheWire: the read-only surface issue #13's decomposition
 // stage never grew. Two sealed plans for the same origination, recorded on
 // its chain — the fan-out and a diagram over the socket for the newer one,

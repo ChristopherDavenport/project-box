@@ -152,6 +152,14 @@ func (c *Client) Plan(ctx context.Context, ref string) (PlanView, error) {
 	return out, c.do(ctx, "GET", "/v1/plans/"+ref, nil, &out)
 }
 
+// Ingress fetches one origination's facts and where its judgement stands —
+// where a judgement's session card links, since an origination is not a
+// queue item and Item's route 404s on one.
+func (c *Client) Ingress(ctx context.Context, id string) (IngressView, error) {
+	var out IngressView
+	return out, c.do(ctx, "GET", "/v1/ingress/"+id, nil, &out)
+}
+
 // IngressPlans lists every plan recorded for an origination, oldest first —
 // what a diff view uses to find the previous run of the same decomposer
 // without pulling every full graph.

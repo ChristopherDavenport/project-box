@@ -1,6 +1,7 @@
 package control
 
 import (
+	"strings"
 	"sync"
 	"time"
 )
@@ -163,6 +164,30 @@ func (l *Live) Watching(id string) bool {
 		}
 	}
 	return false
+}
+
+// Prefixed returns the distinct item ids in the window whose id has the given
+// prefix, in first-seen order.
+//
+// Item and Watching both need an id in hand already; a judgement's card does
+// not have one to hold until this exists, because nothing indexes the window
+// by anything but the id a caller already knows.
+func (l *Live) Prefixed(prefix string) []string {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for _, f := range l.frames {
+		if !strings.HasPrefix(f.Item, prefix) || seen[f.Item] {
+			continue
+		}
+		seen[f.Item] = true
+		out = append(out, f.Item)
+	}
+	return out
 }
 
 // Head is the newest sequence issued, so a subscriber can start from now
