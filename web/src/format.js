@@ -24,9 +24,12 @@ export function clip(s, n = 200) {
   return s.length > n ? s.slice(0, n - 1) + '…' : s;
 }
 
-/** title is the one line a task is known by: its first. */
-export function title(task) {
-  return firstLine(task);
+/** title is the one line a unit is known by: its summary, when the record
+ *  carries one, else the first line of its task — the reading every record
+ *  written before `summary` existed still gets. A bare task string (no
+ *  backing record, as on the open-ingress form) is accepted directly. */
+export function title(item) {
+  return item?.summary || firstLine(typeof item === 'string' ? item : item?.task);
 }
 
 /** taskURL is the first link in a task's text — an issue, usually. */

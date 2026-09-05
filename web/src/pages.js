@@ -52,7 +52,7 @@ const WHERE = {
 // row one dead runner is holding, is sorting.
 const COLUMNS = [
   { key: 'state', label: 'State', get: (e) => e.state },
-  { key: 'work', label: 'Work', get: (e) => title(e.task) || e.id },
+  { key: 'work', label: 'Work', get: (e) => title(e) || e.id },
   { key: 'why', label: 'Blocked by', get: (e) => why(e) },
   { key: 'stage', label: 'Stage', get: (e) => e.stage ?? '' },
   { key: 'holder', label: 'Held by', get: (e) => e.runner ?? '' },
@@ -208,14 +208,14 @@ export class BoxDashboard extends LitElement {
       <jh-list-group accessible-label="In-flight work">
         ${live.map((e) => html`
           <jh-list-item
-            primary-text=${title(e.task) || e.id}
+            primary-text=${title(e) || e.id}
             secondary-text=${e.note ? firstLine(e.note) : origin(e) || place(e)}
             primary-metadata=${e.stage ?? ''}
             secondary-metadata=${e.stage ? `${age(e.in_state_sec)} in stage` : `${age(e.age_sec)} old`}
             show-divider>
             <span slot="jh-list-item-left">${stateTag(e.state)}</span>
             <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
-              label="Open" accessible-label=${`Open ${title(e.task) || e.id}`} href=${'/items/' + e.id}></jh-button>
+              label="Open" accessible-label=${`Open ${title(e) || e.id}`} href=${'/items/' + e.id}></jh-button>
           </jh-list-item>`)}
       </jh-list-group>`;
   }
@@ -377,7 +377,7 @@ export class BoxWork extends LitElement {
               <tr>
                 <td><div class="stack">${stateTag(e.state)}${e.ready ? html`<span class="ready">ready</span>` : nothing}</div></td>
                 <th scope="row">
-                  <a href=${'/items/' + e.id}>${title(e.task) || e.id}</a>
+                  <a href=${'/items/' + e.id}>${title(e) || e.id}</a>
                   ${e.note ? html`<div class="note" title=${e.note}>${firstLine(e.note)}</div>` : nothing}
                 </th>
                 <td>${e.blocked_by?.length
@@ -525,7 +525,7 @@ export class BoxSessions extends LitElement {
   _card(s) {
     const frames = this._timeline(s);
     return html`
-      <jh-card header-title=${title(s.task) || s.id} header-subtitle=${origin(s) || place(s)} padding="medium">
+      <jh-card header-title=${title(s) || s.id} header-subtitle=${origin(s) || place(s)} padding="medium">
         <div class="meta">
           ${s.judgement ? html`<jh-tag size="small" label="judgement"></jh-tag>` : stateTag(s.state)}
           ${s.stage ? html`<jh-tag size="small" label=${s.stage}></jh-tag><span>${age(s.in_state_sec)} in stage</span>` : nothing}
@@ -605,7 +605,7 @@ export class BoxExceptions extends LitElement {
   }
 
   _done(verb, it) {
-    toast(`${verb}: ${title(it.task) || it.id}`, 'positive');
+    toast(`${verb}: ${title(it) || it.id}`, 'positive');
     this._refresh();
   }
 
@@ -629,7 +629,7 @@ export class BoxExceptions extends LitElement {
 
   _card(it) {
     return html`
-      <jh-card header-title=${title(it.task) || it.id} header-subtitle=${origin(it) || place(it)} padding="medium">
+      <jh-card header-title=${title(it) || it.id} header-subtitle=${origin(it) || place(it)} padding="medium">
         <div class="meta">
           <jh-tag size="small" class=${SEVERITY_APPEARANCE[it.severity ?? 'medium'] ?? 'neutral'} label=${`severity ${it.severity ?? 'medium'}`}></jh-tag>
           ${it.stage ? html`<jh-tag size="small" label=${`at ${it.stage}`}></jh-tag>` : nothing}
@@ -640,11 +640,11 @@ export class BoxExceptions extends LitElement {
         </div>
         ${it.note ? html`<p class="note">${it.note}</p>` : nothing}
         <div class="actions">
-          <box-reason label="Retry" confirm="Retry" appearance="primary" glyph="rotate" prompt=${`Retry ${title(it.task)}`}
+          <box-reason label="Retry" confirm="Retry" appearance="primary" glyph="rotate" prompt=${`Retry ${title(it)}`}
             .action=${(r) => retryItem(it.id, r)} @box-done=${() => this._done('Retried', it)}></box-reason>
-          <box-reason label="Resolve" confirm="Resolve" appearance="secondary" glyph="check" prompt=${`Resolve ${title(it.task)}`}
+          <box-reason label="Resolve" confirm="Resolve" appearance="secondary" glyph="check" prompt=${`Resolve ${title(it)}`}
             .action=${(r) => resolveItem(it.id, r)} @box-done=${() => this._done('Resolved', it)}></box-reason>
-          <jh-button appearance="tertiary" size="small" label="Open" accessible-label=${`Open ${title(it.task) || it.id}`} href=${'/items/' + it.id}></jh-button>
+          <jh-button appearance="tertiary" size="small" label="Open" accessible-label=${`Open ${title(it) || it.id}`} href=${'/items/' + it.id}></jh-button>
         </div>
       </jh-card>`;
   }
@@ -764,7 +764,7 @@ export class BoxItem extends LitElement {
   }
 
   _done(verb, item) {
-    toast(`${verb}: ${title(item.task) || item.id}`, 'positive');
+    toast(`${verb}: ${title(item) || item.id}`, 'positive');
     this._refresh();
   }
 
@@ -773,7 +773,7 @@ export class BoxItem extends LitElement {
     const parkedOrFailed = item.state === 'parked' || item.state === 'failed';
     const tone = parkedOrFailed ? 'negative' : item.state === 'done' ? 'positive' : 'neutral';
     return html`
-      <jh-card header-title=${title(item.task) || item.id} header-subtitle=${origin(item) || place(item)} padding="medium">
+      <jh-card header-title=${title(item) || item.id} header-subtitle=${origin(item) || place(item)} padding="medium">
         <div class="meta">
           ${stateTag(item.state)}
           ${item.stage && item.stage !== item.state ? html`<jh-tag size="small" label=${`at ${item.stage}`}></jh-tag>` : nothing}
@@ -939,7 +939,7 @@ export class BoxIngress extends LitElement {
   _head(ing) {
     const running = !ing.standing;
     return html`
-      <jh-card header-title=${title(ing.task) || ing.id} header-subtitle=${place(ing)} padding="medium">
+      <jh-card header-title=${title(ing) || ing.id} header-subtitle=${place(ing)} padding="medium">
         <div class="meta">
           <jh-tag size="small" class=${running ? 'brand' : (STANDING_APPEARANCE[ing.standing] ?? 'neutral')} label=${running ? 'judgement' : ing.standing}></jh-tag>
         </div>
