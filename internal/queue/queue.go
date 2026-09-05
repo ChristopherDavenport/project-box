@@ -150,6 +150,12 @@ type WorkItem struct {
 	// Repo is the target repository within the Box, empty when the Box has
 	// exactly one executor.
 	Repo string `json:"repo,omitempty"`
+	// OriginKey is the delivery key of the ingress this item traces to,
+	// inherited unchanged — e.g. "issue-42" for an issue-route ingress. See
+	// [ingress.Ingress.Key]. It is not a second lookup of the origination:
+	// the loop reads a GitHub issue number off this exact, already-settled
+	// shape rather than deriving one some other way.
+	OriginKey string `json:"origin_key,omitempty"`
 	// DependsOn names items that must settle DONE before this one is
 	// claimable — the work graph. A parked or failed dependency parks its
 	// dependents with the cause named; execution order is nobody's plan,
