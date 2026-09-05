@@ -1585,8 +1585,10 @@ the xhigh control. Found beside it: the meter charges a unit that only waited
 on a section as a start, so a whole-repository unit was refused with three
 agents run (cap raised to 5 until the meter counts runs); a restart keeps the
 meter's count, correctly; the room showed a run only on one page, only while
-it ran, never for the planner, and untitled for Read and Bash (#44: late
-titles said once, the planner's hook, replay on the item's stream, an Agent
-card on the item page, and a run log in the store beside the chain, pruned
-by age); and an unsectioned unit has no check to iterate on. Round 7 measures
+it ran, never for the planner, and untitled for Read and Bash (#44: the
+planner's hook, replay on the item's stream, an Agent card on the item
+page, and a run log in the store beside the chain, pruned by age — and the
+untitled rows turned out to be the runtime dropping every tool event whose
+content was a list, a decoder typed for the chunk's object, found in round
+7 and fixed in #48); and an unsectioned unit has no check to iterate on. Round 7 measures
 effort `high` on a daemon that applies it.
