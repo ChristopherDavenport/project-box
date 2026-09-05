@@ -300,6 +300,13 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				TTL:          30 * time.Minute,
 				BuildTimeout: cfg.BuildTimeoutDuration(),
 			}
+			if r.Land == boxcfg.LandPullRequest {
+				// Validated at Load: pull_request landing does not reach here
+				// without a known land_token, and "gh" is the only one today.
+				lp.PRLander = func(inner *gitforge.Lander) forge.Lander {
+					return gitforge.NewPRLander(inner, ghAuthToken)
+				}
+			}
 			if agentBuilder != nil {
 				lp.Builder, lp.Handoff = agentBuilder, agentBuilder.Handoff
 			} else {

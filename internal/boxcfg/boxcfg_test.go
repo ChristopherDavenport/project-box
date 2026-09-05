@@ -260,3 +260,86 @@ boxes:
 		t.Fatalf("defaulted check: ForgeRepo().Check = %q, want %q", got, "true")
 	}
 }
+
+// TestLandPullRequestNeedsAToken: a repo asking to land through a pull
+// request without a declared token source would leave the daemon unable to
+// open one when the loop first tries to land — refused at Load rather than
+// discovered mid-run (issue #22).
+func TestLandPullRequestNeedsAToken(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+`))
+	if err == nil || !strings.Contains(err.Error(), "land_token") {
+		t.Fatalf("pull_request with no land_token: err = %v", err)
+	}
+}
+
+// TestLandUnknownValueIsRefused: "land" only knows one spelling for opening a
+// pull request first; anything else is a typo the operator should hear about
+// at load, not a silently-ignored default back to a direct push.
+func TestLandUnknownValueIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: merge_queue
+`))
+	if err == nil || !strings.Contains(err.Error(), `land "merge_queue"`) {
+		t.Fatalf("unknown land value: err = %v", err)
+	}
+}
+
+// TestLandPullRequestWithTokenLoads: the happy path — a repo that declares
+// both the pull_request mode and its token source loads cleanly, and the
+// values survive to where the daemon reads them to wire git.PRLander.
+func TestLandPullRequestWithTokenLoads(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Boxes[0].Repos[0]
+	if r.Land != LandPullRequest || r.LandToken != "gh" {
+		t.Fatalf("repo land = %q land_token = %q, want %q and %q", r.Land, r.LandToken, LandPullRequest, "gh")
+	}
+}
+
+// TestLandDefaultsToDirectPush: a repo that says nothing about landing keeps
+// today's behavior — Land empty, no token required.
+func TestLandDefaultsToDirectPush(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Repos[0].Land; got != "" {
+		t.Fatalf("repo land = %q, want empty", got)
+	}
+}
