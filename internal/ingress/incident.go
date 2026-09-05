@@ -7,6 +7,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
 // CanClose reports whether an ingress may be closed, and what still blocks
@@ -29,6 +30,41 @@ func (i Ingress) CanClose() (bool, string) {
 	return true, ""
 }
 
+// Load folds an origination out of its chain.
+//
+// A FOLD and not a head read, and the difference is a bug rather than a
+// preference. An origination's chain carries the origination AND every
+// authority it exercised, so `Head` returns whatever happened last — and a
+// break-glass body is valid JSON that unmarshals into an Ingress perfectly
+// well. After one invocation the origination read back as an all-zero struct
+// with no tenant, no box, no requester and no kind, and every caller treated
+// it as real: not an error, not a refusal, just an origination that had
+// quietly become nothing.
+//
+// Same failure the work item's chain had, same fix. Select on the record kind
+// and let a writer of anything else be irrelevant to the fold — see
+// [queue.StateRecord] for the contract's other half.
+func Load(ctx context.Context, log evidence.Log, t tenant.ID, id string) (Ingress, bool, error) {
+	var ing Ingress
+	found := false
+	for rec, err := range log.Since(ctx, t, Scope(id), 1) {
+		if err != nil {
+			return Ingress{}, false, err
+		}
+		if rec.Kind != RecordOpen {
+			continue
+		}
+		if err := json.Unmarshal(rec.Body, &ing); err != nil {
+			return Ingress{}, false, fmt.Errorf("ingress: %s: %w", id, err)
+		}
+		if ing.Opened.IsZero() {
+			ing.Opened = rec.At
+		}
+		found = true
+	}
+	return ing, found, nil
+}
+
 // Preempt takes a lease over a live claim on an incident's authority, and
 // records that it did. The store's Preempt is deliberately mechanical; this
 // is where the authority question is answered: only an OPEN INCIDENT
@@ -46,7 +82,7 @@ func Preempt(ctx context.Context, ing Ingress, leaser forge.Leaser, log evidence
 	}
 	body, _ := json.Marshal(map[string]any{"repo": req.Repo, "ref": req.Ref, "token": lease.Token, "incident": ing.ID})
 	if _, err := log.Append(ctx, evidence.Record{
-		Tenant: ing.Tenant, Scope: "ingress/" + ing.ID,
+		Tenant: ing.Tenant, Scope: Scope(ing.ID),
 		Kind: "preempted", Subject: req.Repo + "@" + req.Ref,
 		Actor: actor, Body: body,
 	}); err != nil {
@@ -67,7 +103,7 @@ func BreakGlass(ctx context.Context, ing Ingress, log evidence.Log, actor, what 
 	}
 	body, _ := json.Marshal(map[string]string{"what": what, "incident": ing.ID})
 	_, err := log.Append(ctx, evidence.Record{
-		Tenant: ing.Tenant, Scope: "ingress/" + ing.ID,
+		Tenant: ing.Tenant, Scope: Scope(ing.ID),
 		Kind: "break-glass", Subject: ing.ID,
 		Actor: actor, Body: body,
 	})

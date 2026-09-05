@@ -246,15 +246,7 @@ func (p *Pump) Tick(ctx context.Context) (int, error) {
 }
 
 func (p *Pump) findIngress(ctx context.Context, id string) (ingress.Ingress, bool, error) {
-	head, err := p.Store.Log().Head(ctx, p.Tenant, "ingress/"+id)
-	if err != nil || head.Seq == 0 {
-		return ingress.Ingress{}, false, err
-	}
-	var ing ingress.Ingress
-	if err := ingressUnmarshal(head.Body, &ing); err != nil {
-		return ingress.Ingress{}, false, err
-	}
-	return ing, true, nil
+	return ingress.Load(ctx, p.Store.Log(), p.Tenant, id)
 }
 
 // Daemon ticks the pump and the Box's standing tasks until the context ends.
