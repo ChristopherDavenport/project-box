@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -43,6 +44,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/seat"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
+	"github.com/ChristopherDavenport/project-box/internal/version"
 	"github.com/ChristopherDavenport/project-box/web"
 
 	"gopkg.in/yaml.v3"
@@ -115,6 +117,26 @@ type Daemon struct {
 	// refused at load.
 	planners *acp.Planners
 	plans    *plan.Store
+	// selfDeploy remembers commits the standing self-deploy chore has already
+	// refused, so a bad commit is not re-attempted every housekeeping pass —
+	// the refusal itself is already on the chain.
+	selfDeploy *selfDeployState
+	// Exec re-execs the process on the same argv and environment, completing
+	// a self-deploy once Run has returned [ErrSelfDeployed] and the caller
+	// has done its own shutdown (closing the store, letting the API finish
+	// draining). Nil is a no-op: only cmd/boxd, which owns argv and the
+	// syscall, ever sets it — a Daemon nobody wired for self-deploy has
+	// nothing to call.
+	Exec func() error
+	// exePath resolves the running binary's own path — os.Executable in
+	// production. A test substitutes a path of its own so a self-deploy run
+	// never renames over the test binary.
+	exePath func() (string, error)
+	// build reports this binary's own build fact — version.ThisBuild in
+	// production. `go test` does not stamp VCS info the way `go build` does,
+	// so a test substitutes a fixed fact rather than depending on how the
+	// test binary itself happened to be built.
+	build func() version.Build
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -139,12 +161,15 @@ func New(path string) (*Daemon, error) {
 	}
 	d := &Daemon{
 		ConfigPath: path, store: s, tenant: t, mirror: m,
-		queue:    &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
-		meter:    &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
-		live:     &control.Live{},
-		planners: &acp.Planners{},
-		plans:    &plan.Store{Log: s.Log(), Actor: cfg.Runner},
-		cfg:      cfg, every: cfg.EveryDuration(),
+		queue:      &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
+		meter:      &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
+		live:       &control.Live{},
+		planners:   &acp.Planners{},
+		plans:      &plan.Store{Log: s.Log(), Actor: cfg.Runner},
+		selfDeploy: &selfDeployState{},
+		exePath:    os.Executable,
+		build:      version.ThisBuild,
+		cfg:        cfg, every: cfg.EveryDuration(),
 	}
 	// The deterministic, agent-free set, plus the one judgement this daemon
 	// can offer. Registering it here does not put an agent on the intake
@@ -648,6 +673,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 						slog.Info("run log pruned", "frames", n, "older_than", keep)
 					}
 				}
+				// Last: a successful pass returns ErrSelfDeployed, ending
+				// this Run so the deferred httpSrv.Shutdown above still
+				// fires. Ordered last so every other standing chore gets its
+				// turn on this tick before the process hands off.
+				if err := d.selfDeployChore(workCtx); err != nil {
+					slog.Info("self-deploy: re-exec required", "err", err)
+					return err
+				}
 			}
 		}
 	}
@@ -676,6 +709,7 @@ var StandingScopes = []string{
 	"control/config",
 	"control/escalations",
 	"control/review",
+	"control/self-deploy",
 	"index/ingress",
 	"index/pending",
 }

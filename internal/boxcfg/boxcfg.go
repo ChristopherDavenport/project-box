@@ -279,6 +279,25 @@ type Box struct {
 	Kinds []Kind `yaml:"kinds"`
 	Seat  string `yaml:"seat"`
 	Repos []Repo `yaml:"repos"`
+	// SelfDeploy, set, turns on the standing chore that stops claims, waits
+	// for running work to settle, checks and rebuilds the daemon at the
+	// branch's new head, and re-execs on the same socket and store. Absent
+	// means never — the daemon only changes binaries when somebody restarts
+	// it, today's behavior and the default every existing config keeps.
+	SelfDeploy *SelfDeploy `yaml:"self_deploy"`
+}
+
+// SelfDeploy is box.yaml's self_deploy: block — see [Box.SelfDeploy].
+type SelfDeploy struct {
+	// From is the branch this box follows; a moved head is a deploy
+	// candidate.
+	From string `yaml:"from"`
+	// Repo names which of the box's repositories the chore rebuilds from.
+	// Required when the box declares more than one repo — picking one
+	// implicitly would be exactly the derived value this system refuses
+	// everywhere else. A box with exactly one repo may leave this empty and
+	// get that repo.
+	Repo string `yaml:"repo"`
 }
 
 // Kind is box.yaml's spelling of [kind.Declaration].
@@ -687,6 +706,7 @@ func (c *Config) validate() error {
 			}
 			bx.Agent = wrapped
 		}
+		explicitCheck := map[string]bool{}
 		for j := range bx.Repos {
 			r := &bx.Repos[j]
 			if r.Name == "" || r.Remote == "" {
@@ -714,6 +734,7 @@ func (c *Config) validate() error {
 			if len(bx.Agent) == 0 && r.Build == "" {
 				return fmt.Errorf("boxcfg: box %s repo %s: no agent and no build command — nothing would ever do the work", bx.Name, r.Name)
 			}
+			explicitCheck[r.Name] = r.Check != ""
 			if r.Check == "" {
 				r.Check = "true"
 			}
@@ -736,6 +757,39 @@ func (c *Config) validate() error {
 				return err
 			}
 		}
+		if err := validateSelfDeploy(bx, explicitCheck); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// validateSelfDeploy resolves and checks a box's self_deploy: block, if it
+// has one. explicitCheck records — per repo name, before the loop above
+// defaulted an absent check: to "true" — whether the operator actually wrote
+// one: a self-deploy target that never got a real check would otherwise look
+// exactly like one that always passes, and a commit that cannot be judged
+// must not be deployed.
+func validateSelfDeploy(bx *Box, explicitCheck map[string]bool) error {
+	sd := bx.SelfDeploy
+	if sd == nil {
+		return nil
+	}
+	if sd.From == "" {
+		return fmt.Errorf("boxcfg: box %s: self_deploy needs from — the branch this box follows", bx.Name)
+	}
+	if sd.Repo == "" {
+		if len(bx.Repos) != 1 {
+			return fmt.Errorf("boxcfg: box %s: self_deploy has no repo, and the box declares %d — picking one implicitly is the derived value this system refuses everywhere else; name it in self_deploy.repo", bx.Name, len(bx.Repos))
+		}
+		sd.Repo = bx.Repos[0].Name
+	}
+	had, ok := explicitCheck[sd.Repo]
+	if !ok {
+		return fmt.Errorf("boxcfg: box %s: self_deploy.repo %q is not one of this box's repositories", bx.Name, sd.Repo)
+	}
+	if !had {
+		return fmt.Errorf("boxcfg: box %s: self_deploy.repo %s has no check — a self-deploy target with no check cannot be judged, and a commit that cannot be judged must not be deployed", bx.Name, sd.Repo)
 	}
 	return nil
 }

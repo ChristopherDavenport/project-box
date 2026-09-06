@@ -443,3 +443,152 @@ boxes:
 		t.Fatalf("repo review = %q, want %q", got, ReviewJudgement)
 	}
 }
+
+// TestSelfDeployAbsentByDefault: no self_deploy: block is the every-existing-
+// config case, and it must stay exactly today's behavior — no chore, ever.
+func TestSelfDeployAbsentByDefault(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Boxes[0].SelfDeploy != nil {
+		t.Fatalf("self_deploy = %+v, want nil (absent means never)", c.Boxes[0].SelfDeploy)
+	}
+}
+
+// TestSelfDeployNeedsFrom: the branch to follow is not optional.
+func TestSelfDeployNeedsFrom(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {repo: app}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err == nil || !strings.Contains(err.Error(), "self_deploy needs from") {
+		t.Fatalf("self_deploy with no from: err = %v", err)
+	}
+}
+
+// TestSelfDeployDefaultsRepoWhenThereIsOnlyOne: naming the repo is optional
+// when there is nothing to disambiguate.
+func TestSelfDeployDefaultsRepoWhenThereIsOnlyOne(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].SelfDeploy.Repo; got != "app" {
+		t.Fatalf("self_deploy.repo = %q, want the box's sole repo %q", got, "app")
+	}
+}
+
+// TestSelfDeployRefusesAmbiguityAcrossSeveralRepos: picking one implicitly
+// would be exactly the derived value this system refuses everywhere else.
+func TestSelfDeployRefusesAmbiguityAcrossSeveralRepos(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main}
+    repos:
+      - name: api
+        remote: /tmp/api.git
+        build: 'true'
+        check: 'go test ./...'
+      - name: web
+        remote: /tmp/web.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err == nil || !strings.Contains(err.Error(), "self_deploy has no repo") {
+		t.Fatalf("self_deploy with two repos and no repo named: err = %v", err)
+	}
+}
+
+// TestSelfDeployRefusesAnUnknownRepo: a self_deploy.repo that names nothing
+// in the box is a config the operator should be told about at load.
+func TestSelfDeployRefusesAnUnknownRepo(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main, repo: nope}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err == nil || !strings.Contains(err.Error(), `self_deploy.repo "nope" is not one of this box's repositories`) {
+		t.Fatalf("self_deploy.repo naming an unknown repo: err = %v", err)
+	}
+}
+
+// TestSelfDeployRefusesARepoWithNoCheck: a self-deploy target with no check
+// cannot be judged, and a commit that cannot be judged must not be deployed —
+// this must be caught even though an absent check: elsewhere defaults to
+// "true" and would otherwise look like a check that always passes.
+func TestSelfDeployRefusesARepoWithNoCheck(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+`))
+	if err == nil || !strings.Contains(err.Error(), "self_deploy.repo app has no check") {
+		t.Fatalf("self_deploy.repo with no check: err = %v", err)
+	}
+}
+
+// TestSelfDeployLoadsWithAnExplicitRepo: the happy path with several repos
+// and the ambiguity resolved by naming one.
+func TestSelfDeployLoadsWithAnExplicitRepo(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main, repo: api}
+    repos:
+      - name: api
+        remote: /tmp/api.git
+        build: 'true'
+        check: 'go test ./...'
+      - name: web
+        remote: /tmp/web.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].SelfDeploy; got == nil || got.From != "main" || got.Repo != "api" {
+		t.Fatalf("self_deploy = %+v, want {From: main, Repo: api}", got)
+	}
+}
