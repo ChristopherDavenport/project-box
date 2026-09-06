@@ -263,6 +263,12 @@ type WorkItem struct {
 	// that parked it, meaningful only while the item is parked, and dropped
 	// on the way back off the exception queue.
 	Severity Severity `json:"severity,omitempty"`
+	// ParkedBy names the dependency whose park or failure cascaded into THIS
+	// item's parking. Meaningful only while parked, and cleared on the way
+	// back off the exception queue — it is what lets a later release tell
+	// "still parked by the thing that just landed" from "parked for its own
+	// reasons" or "re-parked by a newer cause".
+	ParkedBy string `json:"parked_by,omitempty"`
 }
 
 // ErrStopped reports that the stop button is down: no new claims, tenant-wide,
@@ -375,6 +381,14 @@ func (q *Queue) Submit(ctx context.Context, w WorkItem) (WorkItem, error) {
 	if err := q.record(ctx, w, "queued", w.ID, ""); err != nil {
 		return WorkItem{}, err
 	}
+	// A reverse-dependency index entry per edge, written once here regardless
+	// of whether the dependency ever parks: release-time lookup then does not
+	// depend on exactly when a cascade park happened.
+	for _, dep := range w.DependsOn {
+		if err := q.index(ctx, w.Tenant, "dependents/"+dep, w.ID, ""); err != nil {
+			return w, err
+		}
+	}
 	return w, q.index(ctx, w.Tenant, "pending", w.ID, w.Task)
 }
 
@@ -406,6 +420,7 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 			// read as routine than it may park mysteriously when its root
 			// is what died.
 			w.Severity = d.Severity.OrDefault()
+			w.ParkedBy = dep
 			if rerr := q.record(ctx, w, "parked", w.ID, w.Note); rerr != nil {
 				return w, forge.Lease{}, rerr
 			}
@@ -517,8 +532,37 @@ func (q *Queue) Done(ctx context.Context, w WorkItem, lease forge.Lease, head fo
 		// every settled change, cheap to walk.
 		err = q.index(ctx, w.Tenant, "landings", w.ID, string(head))
 	}
+	if err == nil {
+		err = q.releaseDependents(ctx, w.Tenant, w.ID)
+	}
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
+}
+
+// releaseDependents reopens whatever this item's landing left parked on it.
+//
+// A dependent parked by cascade stays parked forever unless something
+// revisits it: nothing about the dependency landing later ever touched the
+// leaf, so an operator had to notice the stale note and retry it by hand.
+// This is that revisit, scoped tightly by ParkedBy so it never disturbs a
+// leaf parked for its own reasons, or one re-parked by a newer cause since.
+func (q *Queue) releaseDependents(ctx context.Context, t tenant.ID, id string) error {
+	for rec, err := range q.Store.Log().Since(ctx, t, "index/dependents/"+id, 1) {
+		if err != nil {
+			return err
+		}
+		dep, err := q.Load(ctx, t, rec.Subject)
+		if err != nil {
+			return err
+		}
+		if dep.State != StateParked || dep.ParkedBy != id {
+			continue
+		}
+		if _, err := q.reopen(ctx, t, dep.ID, q.Runner, StatePending, "retried", fmt.Sprintf("dependency %s landed", id)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Fail settles the item unsuccessfully.
@@ -619,6 +663,7 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 	// have a retried item come back already shouting, and would restart a
 	// later parking's clock with the previous parking's volume.
 	w.Severity = ""
+	w.ParkedBy = ""
 	// The actor is the operator, not the runner: this is the one transition a
 	// person makes by hand, and an audit that could not tell it from the
 	// daemon's own work would be missing the only human act in the loop.
