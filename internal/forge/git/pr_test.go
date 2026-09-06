@@ -604,6 +604,119 @@ func TestPRPostsCheckRunWithVerdicts(t *testing.T) {
 	}
 }
 
+// TestPRPostsReviewCheckAlongsideCheck is issue #62: the reviewer's verdict
+// must reach GitHub as its own box/review check run, addressable apart from
+// box/check's roll-up, with its conclusion and text taken from the review
+// verdict alone rather than the resolved decision over every verdict.
+func TestPRPostsReviewCheckAlongsideCheck(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+		Verdicts: []forge.Verdict{
+			{Gate: "build-and-test", Decision: forge.DecisionPass, Reason: "all green"},
+			{Gate: "review", Decision: forge.DecisionPass, Reason: "looks right",
+				Evidence: []forge.EvidenceRef{{Kind: forge.EvidenceKindRecord, URI: "rec-review1"}}},
+		},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+
+	if len(x.gh.checks) != 2 {
+		t.Fatalf("want two check-runs posted, got %d: %+v", len(x.gh.checks), x.gh.checks)
+	}
+	var check, review *ghCheckRun
+	for i := range x.gh.checks {
+		switch x.gh.checks[i].Name {
+		case "box/check":
+			check = &x.gh.checks[i]
+		case "box/review":
+			review = &x.gh.checks[i]
+		}
+	}
+	if check == nil {
+		t.Fatalf("want a box/check run, got %+v", x.gh.checks)
+	}
+	if review == nil {
+		t.Fatalf("want a box/review run, got %+v", x.gh.checks)
+	}
+	if review.HeadSHA != string(head) {
+		t.Fatalf("box/review head_sha = %q, want %q", review.HeadSHA, head)
+	}
+	if review.Conclusion != "success" {
+		t.Fatalf("box/review conclusion = %q, want success", review.Conclusion)
+	}
+	if !strings.Contains(review.Output.Summary, "looks right") {
+		t.Fatalf("box/review summary = %q, want it to carry the review verdict's own reason", review.Output.Summary)
+	}
+	if strings.Contains(review.Output.Summary, "build-and-test") {
+		t.Fatalf("box/review summary = %q, want only the review verdict, not the other gate", review.Output.Summary)
+	}
+	if !strings.Contains(review.Output.Text, "rec-review1") {
+		t.Fatalf("box/review text = %q, want it to carry the review verdict's evidence id", review.Output.Text)
+	}
+}
+
+// TestPRPostsFailingReviewCheck confirms a failing review verdict posts a
+// failing box/review, independent of what the other gates in the same
+// ChangeSet decided.
+func TestPRPostsFailingReviewCheck(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+		Verdicts: []forge.Verdict{
+			{Gate: "review", Decision: forge.DecisionFail, Reason: "missing test coverage"},
+		},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+
+	var review *ghCheckRun
+	for i := range x.gh.checks {
+		if x.gh.checks[i].Name == "box/review" {
+			review = &x.gh.checks[i]
+		}
+	}
+	if review == nil {
+		t.Fatalf("want a box/review run, got %+v", x.gh.checks)
+	}
+	if review.Conclusion != "failure" {
+		t.Fatalf("box/review conclusion = %q, want failure", review.Conclusion)
+	}
+	if !strings.Contains(review.Output.Summary, "missing test coverage") {
+		t.Fatalf("box/review summary = %q, want it to carry the failing reason", review.Output.Summary)
+	}
+}
+
 // TestPRPostsNoCheckRunWithoutVerdicts is the optimistic lane's edge case
 // named in issue #58: a ChangeSet that reaches Land with no verdict yet must
 // never have one fabricated for it.

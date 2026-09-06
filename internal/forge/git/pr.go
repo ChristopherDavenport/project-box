@@ -108,6 +108,21 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 				checkSummary(cs.Verdicts), verdictText(cs.Verdicts)); err != nil {
 				return forge.Landing{}, fmt.Errorf("git: pr: check for %s: %w", mem.Repo, err)
 			}
+			// box/check stays the roll-up over every gate, the reviewer
+			// included. box/review carries that one gate's own verdict
+			// besides, because issue #62 wants the judgement addressable on
+			// its own check, not only folded into the roll-up's text. No
+			// verdict names the reviewer in the optimistic lane above, and
+			// also whenever the gate list this run used didn't include one
+			// — absent stays absent rather than a box/review invented for a
+			// change no reviewer read.
+			if rv, ok := reviewVerdict(cs.Verdicts); ok {
+				if err := p.postCheck(ctx, tok, owner, name, string(mem.Head), "box/review",
+					checkConclusion(rv.Decision), fmt.Sprintf("review: %s", rv.Decision),
+					checkSummary([]forge.Verdict{rv}), verdictText([]forge.Verdict{rv})); err != nil {
+					return forge.Landing{}, fmt.Errorf("git: pr: review check for %s: %w", mem.Repo, err)
+				}
+			}
 		}
 	}
 
@@ -320,6 +335,27 @@ func (p *PRLander) postLandFailure(ctx context.Context, cs forge.ChangeSet, land
 	}
 	_ = p.postCheck(ctx, tok, owner, name, string(mem.Head), "box/land",
 		"failure", "land failed", landErr.Error(), "")
+}
+
+// ReviewGateName is the [forge.Verdict.Gate] value the review gate posts —
+// the literal string "review". internal/agent/acp defines the reviewer
+// itself (its Name() returns this same string, there called ReviewerName),
+// and internal/forge/git must not import internal/agent/acp, so the string
+// is the seam instead — the same treatment forge.EvidenceKindRecord gets,
+// and for the same reason (internal/forge/gate.go:51-58).
+const ReviewGateName = "review"
+
+// reviewVerdict finds the verdict the review gate posted among vs, if any.
+// Not every gate list a run uses includes a reviewer, and the optimistic
+// lane calls this with no verdicts at all, so absence is reported rather
+// than papered over with a zero value that would read as a real verdict.
+func reviewVerdict(vs []forge.Verdict) (forge.Verdict, bool) {
+	for _, v := range vs {
+		if v.Gate == ReviewGateName {
+			return v, true
+		}
+	}
+	return forge.Verdict{}, false
 }
 
 // checkConclusion maps a resolved gate decision onto the GitHub Checks API's
