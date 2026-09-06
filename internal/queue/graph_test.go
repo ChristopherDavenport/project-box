@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -154,4 +155,206 @@ func TestFailedRootParksTheLeaves(t *testing.T) {
 		t.Fatalf("pending dep should block, not fail: %v", err)
 	}
 	_ = late
+}
+
+// TestDoneReleasesDependentsParkedByIt: the counterpart to
+// TestFailedRootParksTheLeaves — once the cause of a cascade park lands, the
+// dependents it parked come back, each carrying the record of why.
+func TestDoneReleasesDependentsParkedByIt(t *testing.T) {
+	qu := q(t)
+	ctx := context.Background()
+	root := submit(t, qu, "root")
+	b := submit(t, qu, "B", "root")
+	c := submit(t, qu, "C", "root")
+
+	w, lease, err := qu.Claim(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "gate failed hard"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := qu.Claim(ctx, b); !errors.Is(err, ErrDependencyFailed) {
+		t.Fatalf("B should cascade-park: %v", err)
+	}
+	if _, _, err := qu.Claim(ctx, c); !errors.Is(err, ErrDependencyFailed) {
+		t.Fatalf("C should cascade-park: %v", err)
+	}
+	gotB, _ := qu.Load(ctx, tn, "B")
+	if gotB.State != StateParked || gotB.ParkedBy != "root" {
+		t.Fatalf("B: %+v", gotB)
+	}
+	gotC, _ := qu.Load(ctx, tn, "C")
+	if gotC.State != StateParked || gotC.ParkedBy != "root" {
+		t.Fatalf("C: %+v", gotC)
+	}
+
+	// root lands.
+	w, lease, err = qu.Claim(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Done(ctx, w, lease, forge.Commit("sha-root")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"B", "C"} {
+		got, err := qu.Load(ctx, tn, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.State != StatePending {
+			t.Fatalf("%s should be released to pending, got: %+v", id, got)
+		}
+		if got.ParkedBy != "" {
+			t.Fatalf("%s should have ParkedBy cleared, got: %+v", id, got)
+		}
+		found := false
+		for rec, err := range qu.Store.Log().Since(ctx, tn, scope(id), 1) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rec.Kind == "retried" && string(rec.Body) != "" {
+				var reopened WorkItem
+				if err := json.Unmarshal(rec.Body, &reopened); err != nil {
+					t.Fatal(err)
+				}
+				if reopened.Note == "dependency root landed" {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s: expected a retried record noting the dependency landed", id)
+		}
+	}
+}
+
+// TestDoneLeavesAnUnrelatedParkUntouched: an item parked for its own gate
+// failure — never a cascade — must not be disturbed when unrelated work
+// reaches Done.
+func TestDoneLeavesAnUnrelatedParkUntouched(t *testing.T) {
+	qu := q(t)
+	ctx := context.Background()
+	standalone := submit(t, qu, "standalone")
+	other := submit(t, qu, "other")
+
+	w, lease, err := qu.Claim(ctx, standalone)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "its own gate failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	w, lease, err = qu.Claim(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Done(ctx, w, lease, forge.Commit("sha-other")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := qu.Load(ctx, tn, "standalone")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StateParked || got.Note != "its own gate failed" {
+		t.Fatalf("standalone should stay parked for its own reason, got: %+v", got)
+	}
+}
+
+// TestExceptionsIndexDropsReleasedItems mirrors the fold internal/control's
+// Room.Exceptions performs: after release, an item's current state is
+// StatePending, so folding by current state no longer surfaces it even
+// though the exceptions index still remembers the original parking.
+func TestExceptionsIndexDropsReleasedItems(t *testing.T) {
+	qu := q(t)
+	ctx := context.Background()
+	root := submit(t, qu, "root")
+	leaf := submit(t, qu, "leaf", "root")
+
+	w, lease, err := qu.Claim(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "gate failed hard"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := qu.Claim(ctx, leaf); !errors.Is(err, ErrDependencyFailed) {
+		t.Fatalf("leaf should cascade-park: %v", err)
+	}
+
+	w, lease, err = qu.Claim(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Done(ctx, w, lease, forge.Commit("sha-root")); err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]bool{}
+	stillException := map[string]bool{}
+	for rec, err := range qu.Store.Log().Since(ctx, tn, "index/exceptions", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[rec.Subject] {
+			continue
+		}
+		seen[rec.Subject] = true
+		got, err := qu.Load(ctx, tn, rec.Subject)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.State == StateParked {
+			stillException[rec.Subject] = true
+		}
+	}
+	if stillException["leaf"] {
+		t.Fatalf("leaf was released and must no longer fold as an exception")
+	}
+}
+
+// TestReparkAfterRetryLeavesDependentsAlone: root parks, cascades to B,
+// gets retried, and parks again for a different reason — release only ever
+// fires from Done, so parking root a second time must leave B exactly where
+// the first cascade left it.
+func TestReparkAfterRetryLeavesDependentsAlone(t *testing.T) {
+	qu := q(t)
+	ctx := context.Background()
+	root := submit(t, qu, "root")
+	b := submit(t, qu, "B", "root")
+
+	w, lease, err := qu.Claim(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "first failure"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := qu.Claim(ctx, b); !errors.Is(err, ErrDependencyFailed) {
+		t.Fatalf("B should cascade-park: %v", err)
+	}
+
+	// root retried and parks again, for a different reason — never landing.
+	if _, err := qu.Retry(ctx, tn, "root", "operator", "manual retry"); err != nil {
+		t.Fatal(err)
+	}
+	w, lease, err = qu.Claim(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "second, unrelated failure"); err != nil {
+		t.Fatal(err)
+	}
+
+	gotB, err := qu.Load(ctx, tn, "B")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotB.State != StateParked || gotB.ParkedBy != "root" {
+		t.Fatalf("B must stay untouched by root's second park (never a Done), got: %+v", gotB)
+	}
 }
