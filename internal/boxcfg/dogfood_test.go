@@ -26,6 +26,12 @@ const dogfoodConfig = "../../hack/dogfood/box.yaml"
 // the branch humans work in, and nothing would say so. Widening the dogfood
 // is now a test failure, which is the only form in which "start narrow"
 // survives contact with a config file.
+//
+// Since 2026-09-06 (PLAN §6) the factory is meant to reach main — through a
+// pull request the gate has judged, never by a bare fenced push. So the
+// branch half of the posture is no longer "never main"; it is "main without
+// the lander is refused", which is the one combination deleting a line can
+// still produce.
 func TestDogfoodBoxIsNarrow(t *testing.T) {
 	c, err := Load(dogfoodConfig)
 	if err != nil {
@@ -48,9 +54,11 @@ func TestDogfoodBoxIsNarrow(t *testing.T) {
 	}
 	// Two, not one, since sections: the point of the dogfood is now also
 	// that two units in disjoint regions run side by side, and one seat
-	// cannot show that. Still bounded small — the spend is real.
-	if c.Budget.MaxConcurrent < 1 || c.Budget.MaxConcurrent > 2 {
-		t.Errorf("max_concurrent = %d, want 1 or 2", c.Budget.MaxConcurrent)
+	// cannot show that. Three since round 9: a unit waiting on a section
+	// lease holds its seat, so with two seats one wait idled every unit in
+	// another section. Still bounded small — the spend is real.
+	if c.Budget.MaxConcurrent < 1 || c.Budget.MaxConcurrent > 3 {
+		t.Errorf("max_concurrent = %d, want 1 to 3", c.Budget.MaxConcurrent)
 	}
 	if c.Budget.WindowReserve <= 0 {
 		t.Error("no window_reserve: the account's window is the brake that actually bound in round 4")

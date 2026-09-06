@@ -534,6 +534,7 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Roles, sections and tiers are configuration; the planner is a decomposer with an agentref, not a coordinator | Gas City's automation model is sound and its traceability is absent, and a coordinator-shaped design keeps its judgement in a context window nobody can read back — so the judgement is one run on the origination's chain, its continuity is a seat, and every borrowed mechanism lands as a declared unit of software rather than a persona |
 | A section is a lease, and an unsectioned unit is the whole repository | the land window already serializes the branch, so two units were never going to corrupt each other — they were going to conflict, and a conflicting replay is rebuilt by an agent; a lease spends a tick to save a session, and "names none" must mean "waits for all" or a plan that forgot a section would run that unit beside everything |
 | A failed judgement parks the origination, not the tick | there is no item yet to park, and a tick error is retried next tick, so a planner out of budget re-run every fifteen seconds would be the spend loop the meter exists to prevent; the origination is the exception, in the item's shape, with the item's verbs |
+| The dogfood lands on main through a pull request, and a judgement reviews the landing before the push | a branch of its own was the fence while the fence was unproven; nine rounds in, the lease token and the expected-old-value push are what hold, and refs/heads/factory had become a queue a person drained by hand. The request is the visible record and the check run carries the gate's verdict; the fenced push of the exact built commit is still the mechanism, so approvals keep binding to the commit. Whether a PERSON must also approve is a requirement of policy, as the human-approval section already says — zero here, because this box is its own staging; a count where the boundary demands one |
 
 ## 7. Deferred decisions
 
@@ -1574,3 +1575,69 @@ account window 91% against a 0.5 reserve). Round 6 runs #15 at effort
 `high` on both roles. Gas City's answer to the same arithmetic is metered
 billing and idle-is-free, not thrift; the credential decision is what
 remains.
+
+Round 6 (2026-09-04, #15, `docs/experiments/round6-2026-09-04.md`): three
+units and a plan landed on `factory` for $5.66 and 9.09M tokens against
+round 5's two for $9.22 — and the effort it was meant to measure never
+reached the agent: the daemon dropped the roles block, every session
+asserted xhigh, and nothing on the chain could say a tier had been asked for
+(#42 fixes it, with the test that fails on that shape). The round ran on as
+the xhigh control. Found beside it: the meter charges a unit that only waited
+on a section as a start, so a whole-repository unit was refused with three
+agents run (cap raised to 5 until the meter counts runs); a restart keeps the
+meter's count, correctly; the room showed a run only on one page, only while
+it ran, never for the planner, and untitled for Read and Bash (#44: the
+planner's hook, replay on the item's stream, an Agent card on the item
+page, and a run log in the store beside the chain, pruned by age — and the
+untitled rows turned out to be the runtime dropping every tool event whose
+content was a list, a decoder typed for the chunk's object, found in round
+7 and fixed in #48); and an unsectioned unit has no check to iterate on. Round 7 measures
+effort `high` on a daemon that applies it.
+
+Round 7 (2026-09-05, #47, `docs/experiments/round7-2026-09-05.md`): effort
+`high` on both roles, asserted at the wire and on every request; one unit
+for two sections landed on `factory` for $6.29 and 13.21M tokens. Against
+round 6's planner at `xhigh`, the same requests and tool calls, half the
+output and half the wall time per request, the same money: the bill is the
+context re-read (62% cache reads, 98% of tokens), which effort does not
+touch. A node naming two sections carried one context of 174K where round
+6's split halves stayed under 124K. Found beside it: the untitled Read and
+Bash rows were the runtime dropping every tool event whose content was a
+list, not the adapter's timing (#48). Round 8 runs #45 and #46 at `high`.
+
+Round 8 (2026-09-05, #45 #46 #22 #51, `docs/experiments/round8-2026-09-05.md`):
+four issues at once, ten units and two retries landed on `factory` for
+$17.83 and 32.7M tokens in 59 minutes, 50 of them agent time. The plans were
+right. The brakes were the finding: judgement runs inside the tick, so three
+planners ran in series and ready units waited behind them (#50); round 7 and
+three planners hit the hour's volume cap; the wait-as-a-start double count
+charged seven starts for one whole-repository unit while the round was
+fixing it; a waiting unit holds a seat a runnable one could use; and two
+gate failures went unnamed because the record keeps the check's tail (#52).
+The fence worked: a landing refused under a moved head was rebased
+mechanically and re-gated. The dogfood now lands through pull requests
+(#22) and shows a unit by its summary (#51) once restarted on the merge.
+
+Decision (2026-09-06): the dogfood lands on `main`, through pull requests,
+and not on a branch of its own. Issue #7's shape held the factory to
+`factory` so that a bare fenced push could never reach the branch a human
+works in; nine rounds later the fence, the gate and the lander are the parts
+that have held, and `factory` had become a queue a person drained by hand
+(#53 carried two rounds at once). The mechanism is #22's as it stands: a
+`box/<run>` pull request opened against `main`, the gate's verdict on it as
+a check run (#58), then the same fenced push of the exact built commit,
+which GitHub marks merged on its own — so approvals keep binding to the
+commit and `box provenance <sha>` keeps matching what landed. Before the
+push, a judgement reviews the change: the `gate` role's seat, which has had
+a name and no occupant since the roles existed, reads the diff against the
+origination and §6 and answers pass or fail with the reason on the chain,
+and absence of that judgement is not a pass. Whether a person must ALSO
+approve is a requirement of policy, exactly as ARCHITECTURE's human-approval
+section has it: zero approvers here, because this box is its own staging;
+an installation whose boundary demands one names a count in its box and the
+approval gate goes pending until distinct non-self reviews cover the commit.
+TestDogfoodBoxIsNarrow now refuses `main` WITHOUT the pull-request lander
+rather than refusing `main`. The flip is three landings in order — round 9
+with #59 (the lander's title) promoted to `main`, the reviewer under the
+gate role, then the two lines in `hack/dogfood/box.yaml` and a restart —
+and until the second has landed the box keeps landing on `factory`.

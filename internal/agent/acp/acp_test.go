@@ -794,27 +794,54 @@ func fakeAgent(scenario string) {
 						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Bash"}}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "latetitle":
-				// The real dialect's order for a Read or a Bash: the call is
-				// announced under its _meta name with no title, and the title
-				// — the path, the command line — arrives on the update that
-				// follows. A second title for the same call says nothing new.
-				// An Edit arrives titled from the first.
+				// The real dialect for a Read and a Bash, shape for shape, as
+				// recorded against claude-agent-acp 0.70 on 2026-09-05: the
+				// call announced with a placeholder title and an empty
+				// content LIST, the proper title on the update that follows
+				// (with content, which for a Bash carries its description),
+				// a bare _meta-only update, the title repeated, and the
+				// completion with the output. Content is a list on every one
+				// of these and an object only on a message chunk; a decoder
+				// that typed it for the chunk dropped all of these but the
+				// bare one.
+				meta := func(tool string) map[string]any {
+					return map[string]any{"claudeCode": map[string]any{"toolName": tool}}
+				}
 				f.notify("session/update", map[string]any{"sessionId": sessionID,
-					"update": map[string]any{"sessionUpdate": "tool_call",
-						"toolCallId": "t-1", "status": "pending",
-						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Read"}}}})
+					"update": map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t-1",
+						"title": "Read File", "kind": "read", "status": "pending",
+						"rawInput": map[string]any{}, "locations": []any{}, "content": []any{}, "_meta": meta("Read")}})
 				f.notify("session/update", map[string]any{"sessionId": sessionID,
-					"update": map[string]any{"sessionUpdate": "tool_call_update",
-						"toolCallId": "t-1", "status": "in_progress", "title": "Read main.go",
-						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Read"}}}})
+					"update": map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "t-1",
+						"title": "Read README.md", "kind": "read",
+						"rawInput": map[string]any{"file_path": "/work/README.md"}, "content": []any{}, "_meta": meta("Read")}})
 				f.notify("session/update", map[string]any{"sessionId": sessionID,
-					"update": map[string]any{"sessionUpdate": "tool_call_update",
-						"toolCallId": "t-1", "status": "completed", "title": "Read main.go",
-						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Read"}}}})
+					"update": map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "t-1", "_meta": meta("Read")}})
 				f.notify("session/update", map[string]any{"sessionId": sessionID,
-					"update": map[string]any{"sessionUpdate": "tool_call",
-						"toolCallId": "t-2", "status": "pending", "title": "Edit main.go",
-						"_meta": map[string]any{"claudeCode": map[string]any{"toolName": "Edit"}}}})
+					"update": map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "t-1", "status": "completed",
+						"rawOutput": "1\t# hello\n", "_meta": meta("Read"),
+						"content": []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "# hello"}}}}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t-2",
+						"title": "Terminal", "kind": "execute", "status": "pending",
+						"rawInput": map[string]any{}, "content": []any{}, "_meta": meta("Bash")}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "t-2",
+						"title": "ls hack", "kind": "execute",
+						"rawInput": map[string]any{"command": "ls hack", "description": "List the harness"},
+						"content":  []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "List the harness"}}},
+						"_meta":    meta("Bash")}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "t-2",
+						"title": "ls hack", "kind": "execute", "rawInput": map[string]any{"command": "ls hack"}, "_meta": meta("Bash")}})
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "tool_call_update", "toolCallId": "t-2", "status": "completed",
+						"rawOutput": "box.yaml\n", "_meta": meta("Bash"),
+						"content": []any{map[string]any{"type": "content", "content": map[string]any{"type": "text", "text": "box.yaml"}}}}})
+				// And a chunk, whose content is the object: still the text.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "DONE"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "metadenied":
 				// A DENIED tool that names itself only in the metadata. This
