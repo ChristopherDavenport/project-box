@@ -290,12 +290,43 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				return nil, nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
 			}
 			check := r.Check
+			if r.Review == boxcfg.ReviewJudgement && agentBuilder == nil {
+				// Refused at Load (boxcfg.validate): review: judgement with no
+				// agent never reaches here. A nil agentBuilder in this branch
+				// is this assembly disagreeing with that refusal, not a
+				// config an operator could have written.
+				return nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: review: judgement with no agent builder — should have been refused at Load", bx.Name, r.Name)
+			}
+			reviews := r.Review == boxcfg.ReviewJudgement
 			lp := &loop.Loop{
 				Store: d.store, Runner: d.cfgRunner(), Mirror: d.mirror, Repo: repo, Branch: r.Branch,
 				Lane: forge.Lane(r.Lane), Meter: d.meter,
 				Gates: func(ws forge.Workspace) []forge.Gate {
-					return []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
+					gates := []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
 						Commands: [][]string{{"sh", "-c", check}}}}
+					if reviews {
+						// After the command gate: paying for an agent to read
+						// a diff that did not build is what the loop's
+						// stop-at-first-fail exists to avoid, but the gate
+						// SET still names the reviewer second so the order is
+						// on the record rather than incidental.
+						gates = append(gates, &acp.Reviewer{
+							Store: d.store, Tenant: d.tenant, Box: bx.Name,
+							Command:         bx.Agent,
+							MaxTokens:       cfg.Budget.MaxTokensPerRun,
+							Composer:        agentBuilder.Composer,
+							Seat:            &seat.Seat{Name: bx.Seat + "-gate", Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
+							Repo:            repo,
+							Workspace:       ws,
+							Root:            filepath.Join(cfg.Root, "reviews"),
+							InheritSettings: bx.Harness.Plugins == boxcfg.PluginsInherit,
+							Spend: func(ctx context.Context, run string, u acp.Usage) {
+								d.meter.Charge(ctx, run, SpendOf(u))
+							},
+							Progress: d.progress,
+						})
+					}
+					return gates
 				},
 				TTL:          30 * time.Minute,
 				BuildTimeout: cfg.BuildTimeoutDuration(),

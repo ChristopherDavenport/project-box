@@ -1462,3 +1462,97 @@ func TestNegativeBuildTimeoutMeansNoBound(t *testing.T) {
 		t.Fatalf("an unset timeout should default, got %v", d)
 	}
 }
+
+// failingGate always fails, with a fixed reason — the command gate on a
+// build whose tests are red.
+type failingGate struct{ name, reason string }
+
+func (g failingGate) Name() string { return g.name }
+
+func (g failingGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	return forge.Verdict{Gate: g.name, Decision: forge.DecisionFail, Reason: g.reason}, nil
+}
+
+// TestFailingGateShortCircuitsLaterGates: with a reviewer wired in after the
+// command gate (internal/daemon.assemble, review: judgement), a failing build
+// must not also pay for an agent run to read a diff that did not build.
+// forge.Resolve's own doc comment already says a failure outranks a pending
+// verdict for exactly this reason; the gate loop has to stop asking before
+// forge.Resolve ever sees the second verdict, not merely discard it after.
+func TestFailingGateShortCircuitsLaterGates(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	asked := 0
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{
+			failingGate{name: "build-and-test", reason: "tests are red"},
+			countingGate{name: "review", n: &asked},
+		}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-shortcircuit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-shortcircuit", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("a failing first gate should park, got %s (%s)", item.State, item.Note)
+	}
+	if !strings.Contains(item.Note, "tests are red") {
+		t.Fatalf("parked reason should carry the first gate's verdict: %q", item.Note)
+	}
+	if asked != 0 {
+		t.Fatalf("the second gate should never have been asked once the first failed: asked %d times", asked)
+	}
+}
+
+// erroringGate never concludes — the shape of infrastructure trouble a real
+// reviewer can hit (an answer that did not parse, a workspace that would not
+// produce a diff): [forge.Gate]'s hardest rule is that this is never recorded
+// as a rejected change.
+type erroringGate struct{ name string }
+
+func (g erroringGate) Name() string { return g.name }
+
+func (g erroringGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	return forge.Verdict{}, fmt.Errorf("%s: the answer did not parse", g.name)
+}
+
+// TestErroringGateFailsTheItemNeverParksIt: a gate that could not conclude —
+// infrastructure trouble, not a verdict — must settle the item as
+// [queue.StateFailed], never [queue.StateParked]: parking records a
+// judgement, and an error is the one case where nobody made one.
+func TestErroringGateFailsTheItemNeverParksIt(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{erroringGate{name: "review"}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-gateerror"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-gateerror", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateFailed {
+		t.Fatalf("a gate that could not conclude should fail the item, got %s (%s)", item.State, item.Note)
+	}
+	if item.State == queue.StateParked {
+		t.Fatal("infrastructure trouble must never be recorded as a rejected change")
+	}
+	if !strings.Contains(item.Note, "review") || !strings.Contains(item.Note, "did not parse") {
+		t.Fatalf("the failure note should name the gate and the trouble: %q", item.Note)
+	}
+}

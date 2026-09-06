@@ -343,3 +343,103 @@ boxes:
 		t.Fatalf("repo land = %q, want empty", got)
 	}
 }
+
+// TestReviewDefaultsToCommandGateAlone: a repo that says nothing about review
+// keeps today's behavior — no reviewer in the gate set.
+func TestReviewDefaultsToCommandGateAlone(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Repos[0].Review; got != "" {
+		t.Fatalf("repo review = %q, want empty", got)
+	}
+}
+
+// TestReviewUnknownValueIsRefused: "review" only knows one spelling for
+// putting a judgement in front of a landing; anything else is a typo the
+// operator should hear about at load.
+func TestReviewUnknownValueIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        review: careful
+`))
+	if err == nil || !strings.Contains(err.Error(), `review "careful"`) {
+		t.Fatalf("unknown review value: err = %v", err)
+	}
+}
+
+// TestReviewJudgementNeedsAnAgent: a build command cannot judge a diff, so a
+// box with no agent asking for review: judgement is refused at Load rather
+// than failing every change it admits.
+func TestReviewJudgementNeedsAnAgent(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: go build ./...
+        review: judgement
+`))
+	if err == nil || !strings.Contains(err.Error(), "review: judgement with no agent") {
+		t.Fatalf("review: judgement with no agent: err = %v", err)
+	}
+}
+
+// TestReviewJudgementRefusesTheOptimisticLane: the optimistic lane lands
+// first and gates afterward, so a reviewer there would read a diff already
+// on the branch — not a review before the push, which is the whole point.
+func TestReviewJudgementRefusesTheOptimisticLane(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        lane: optimistic
+        review: judgement
+`))
+	if err == nil || !strings.Contains(err.Error(), "review: judgement with lane: optimistic") {
+		t.Fatalf("review: judgement with lane: optimistic: err = %v", err)
+	}
+}
+
+// TestReviewJudgementLoads: the happy path — a repo declaring review:
+// judgement on the (default) gated lane, with an agent, loads cleanly.
+func TestReviewJudgementLoads(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        lane: gated
+        review: judgement
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Repos[0].Review; got != ReviewJudgement {
+		t.Fatalf("repo review = %q, want %q", got, ReviewJudgement)
+	}
+}

@@ -518,6 +518,12 @@ type Repo struct {
 	// landing without one is refused at Load: the daemon would have no way
 	// to open the pull request when the loop first tries to land.
 	LandToken string `yaml:"land_token"`
+	// Review names the judgement a change must pass before it lands. ""
+	// (the default) is today's behavior: the command gate alone decides.
+	// "judgement" puts the gate-role reviewer agent
+	// (internal/agent/acp.Reviewer) after the command gate, so a change
+	// also has to satisfy a reader before it reaches the branch.
+	Review string `yaml:"review"`
 	// Sections are this repository's named regions — see [forge.Section].
 	// A repository that declares none has one region: itself, and every
 	// unit of work in it takes turns.
@@ -527,6 +533,11 @@ type Repo struct {
 // LandPullRequest is the [Repo.Land] value that opens a pull request before
 // landing. Any other value, including "", lands with a direct fenced push.
 const LandPullRequest = "pull_request"
+
+// ReviewJudgement is the [Repo.Review] value that puts the gate-role reviewer
+// after the command gate. Any other value, including "", leaves the command
+// gate as the only judgement.
+const ReviewJudgement = "judgement"
 
 // Sections converts the declared regions to the forge's form.
 func (r Repo) forgeSections() []forge.Section {
@@ -711,6 +722,15 @@ func (c *Config) validate() error {
 			}
 			if r.Land == LandPullRequest && r.LandToken != "gh" {
 				return fmt.Errorf("boxcfg: box %s repo %s: land: %s needs land_token — only \"gh\" (gh auth token) is known today, and without one the daemon has no way to open the pull request", bx.Name, r.Name, LandPullRequest)
+			}
+			if r.Review != "" && r.Review != ReviewJudgement {
+				return fmt.Errorf("boxcfg: box %s repo %s: review %q — only %q is known, or leave it unset for the command gate alone", bx.Name, r.Name, r.Review, ReviewJudgement)
+			}
+			if r.Review == ReviewJudgement && len(bx.Agent) == 0 {
+				return fmt.Errorf("boxcfg: box %s repo %s: review: %s with no agent — a build command cannot judge a diff", bx.Name, r.Name, ReviewJudgement)
+			}
+			if r.Review == ReviewJudgement && forge.Lane(r.Lane) == forge.LaneOptimistic {
+				return fmt.Errorf("boxcfg: box %s repo %s: review: %s with lane: %s — the optimistic lane lands first and gates afterward, so a review there would read a diff already on the branch, never a review before the push", bx.Name, r.Name, ReviewJudgement, forge.LaneOptimistic)
 			}
 			if err := validateSections(bx, r); err != nil {
 				return err

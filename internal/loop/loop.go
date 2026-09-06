@@ -494,6 +494,14 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 					passedNow = append(passedNow, g.Name())
 				}
 				verdicts = append(verdicts, v)
+				if v.Decision == forge.DecisionFail {
+					// forge.Resolve's own rule, applied before the loop pays
+					// for the gates after this one: a failure outranks a
+					// pending verdict, so asking a reviewer to read a diff
+					// that already failed its tests judges nothing Resolve
+					// will not already discard.
+					break
+				}
 			}
 			if forge.Resolve(verdicts) == forge.DecisionFail {
 				return fmt.Errorf("gates failed") // marks the stage span failed; the reasons go to evidence and the park note
