@@ -584,6 +584,36 @@ func fakeAgent(scenario string) {
 			case "planner-escalate":
 				f.request("_box/escalate", map[string]any{"reason": "this origination is a question, not a change"})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "review-pass", "review-fail", "review-silent", "review-neither":
+				// The gate role's occupant. Every scenario first reports what
+				// it was actually handed — where it is standing, whether that
+				// place will take a write, and the patch it was given — so a
+				// test can assert the material from the agent's side of the
+				// wire rather than from the directory the test laid out.
+				cwd, _ := os.Getwd()
+				writable := "no"
+				if err := os.WriteFile("probe.txt", []byte("x"), 0o644); err == nil {
+					writable = "yes"
+					os.Remove("probe.txt")
+				}
+				patch, _ := os.ReadFile("diff.patch")
+				answer := fmt.Sprintf("cwd:%s writable:%s\n--- diff.patch ---\n%s--- end of diff.patch ---\n", cwd, writable, patch)
+				switch scenario {
+				case "review-pass":
+					answer += "\n```json\n" + `{"verdict":"pass","reason":"does what the origination asked, inside the section it declared"}` +
+						"\n```\nHANDOFF: the widget package is reviewed and its default is blue\n"
+				case "review-fail":
+					answer += "\n```json\n" + `{"verdict":"fail","reason":"the change edits db/schema.sql, which the unit never declared"}` + "\n```\n"
+				case "review-silent":
+					answer += "\nLooks fine to me, I suppose.\n"
+				case "review-neither":
+					answer += "\n```json\n" + `{"verdict":"maybe","reason":"I could not make up my mind"}` + "\n```\n"
+				}
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": answer}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn",
+					"usage": map[string]any{"inputTokens": 4200, "outputTokens": 90}}})
 			case "metered":
 				// The real dialect, copied from claude-agent-acp's
 				// sessionUsage() and turnOutcome(): usage on the prompt
