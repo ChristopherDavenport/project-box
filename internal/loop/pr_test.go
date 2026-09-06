@@ -219,6 +219,37 @@ func TestGatedLaneCarriesVerdictsToLand(t *testing.T) {
 	}
 }
 
+// TestChangeSetCarriesWorkItemSummary is issue #59's plumbing half: a
+// WorkItem's Summary (issue #51) has to reach Members[0].Summary on the
+// ChangeSet the loop builds, since that is the only thing PRLander (see
+// internal/forge/git/pr.go) can title a PR from without truncating the
+// task's whole paragraph. Title truncation itself is exercised in
+// internal/forge/git/pr_test.go, not here.
+func TestChangeSetCarriesWorkItemSummary(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	stub := wirePRStub(e, "")
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-93"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	wi := ItemFor(ing, "wi-summary", "close issue 93, a much longer task paragraph than the summary")
+	wi.Summary = "close issue 93"
+	item, _ := q.Submit(ctx, wi)
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("did not land: %+v", item)
+	}
+	if len(stub.cs.Members) == 0 || stub.cs.Members[0].Summary != "close issue 93" {
+		t.Fatalf("ChangeSet Members[0].Summary = %q, want %q", stub.cs.Members[0].Summary, "close issue 93")
+	}
+}
+
 // TestOptimisticLaneLandsSameCommitWithPRLander is the same guarantee for
 // the land-then-check lane: a green run lands and settles exactly as it does
 // unwrapped, PRLander configured or not.

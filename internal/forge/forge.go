@@ -162,4 +162,9 @@ type Member struct {
 	// Lease is the claim held over Branch. A member without a live lease
 	// cannot land.
 	Lease Lease
+	// Summary is the one-line summary of the work that produced Head — the
+	// same field queue.WorkItem carries (see internal/queue) — carried
+	// through so a lander can title work without truncating the full task
+	// paragraph. Empty when the work that produced Head had none.
+	Summary string
 }

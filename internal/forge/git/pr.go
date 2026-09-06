@@ -59,20 +59,23 @@ func NewPRLander(inner *Lander, token TokenSource) *PRLander {
 var _ forge.Lander = (*PRLander)(nil)
 
 // Land opens or reuses one pull request per member — head the disposable
-// run branch `box/<run>`, base the member's branch, title the ChangeSet's
-// Intent, and a body naming DrivingIssue with "Fixes #<n>" when the change
-// originated from one — then delegates to the wrapped Lander for the actual
-// landing. A retried tick reuses the still-open PR for the same head branch
-// rather than opening a duplicate.
+// run branch `box/<run>`, base the member's branch, title the first member's
+// Summary (falling back to the landed commit's subject line, and truncated
+// to fit GitHub's 256-character limit — see [truncateTitle]), and a body
+// naming DrivingIssue with "Fixes #<n>" when the change originated from one,
+// plus the task's own first paragraph — then delegates to the wrapped Lander
+// for the actual landing. A retried tick reuses the still-open PR for the
+// same head branch rather than opening a duplicate.
 func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing, error) {
 	if len(cs.Members) == 0 {
 		return forge.Landing{}, errors.New("git: empty ChangeSet")
 	}
 	branch := "box/" + cs.Run
-	body := ""
-	if cs.DrivingIssue != "" {
-		body = "Fixes #" + cs.DrivingIssue
+	title, err := p.prTitle(ctx, cs)
+	if err != nil {
+		return forge.Landing{}, fmt.Errorf("git: pr: title: %w", err)
 	}
+	body := p.prBody(cs)
 
 	prURLs := make(map[string]string, len(cs.Members))
 	for _, mem := range cs.Members {
@@ -88,7 +91,7 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 		if err != nil {
 			return forge.Landing{}, fmt.Errorf("git: pr: token: %w", err)
 		}
-		prURL, err := p.ensurePR(ctx, tok, owner, name, branch, mem.Branch, cs.Intent, body)
+		prURL, err := p.ensurePR(ctx, tok, owner, name, branch, mem.Branch, title, body)
 		if err != nil {
 			return forge.Landing{}, fmt.Errorf("git: pr: open pr for %s: %w", mem.Repo, err)
 		}
@@ -128,6 +131,68 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 			fmt.Sprintf(`{"pr_url":%q,"issue":%q}`, prURL, cs.DrivingIssue))
 	}
 	return landing, err
+}
+
+// prTitle computes the single title used for every per-member PR a ChangeSet
+// opens (see [PRLander.Land]) — titling every PR from cs.Intent, the
+// planner's whole task paragraph, is what produces GitHub's 422 "title is
+// too long" this exists to avoid. It prefers the first member's Summary —
+// the one-line room summary carried onto [forge.Member] — and falls back to
+// the landed commit's own subject line when that member had none. cs.Intent
+// itself is never truncated; only the copy used as a title is.
+func (p *PRLander) prTitle(ctx context.Context, cs forge.ChangeSet) (string, error) {
+	mem := cs.Members[0]
+	if mem.Summary != "" {
+		return truncateTitle(mem.Summary, 256), nil
+	}
+	ws := p.inner.m.workDir(cs.Run, mem.Repo)
+	out, err := run(ctx, ws, "log", "-1", "--format=%s", string(mem.Head))
+	if err != nil {
+		return "", fmt.Errorf("commit subject for %s: %w", mem.Head, err)
+	}
+	return truncateTitle(strings.TrimSpace(out), 256), nil
+}
+
+// truncateTitle cuts s to at most max characters, preferring to cut at the
+// last space at or before the limit so a title never ends mid-word; when no
+// space falls within the limit it hard-cuts at max rather than leave the
+// title over length.
+func truncateTitle(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := s[:max]
+	if i := strings.LastIndexByte(cut, ' '); i >= 0 {
+		return cut[:i]
+	}
+	return cut
+}
+
+// prBody composes the PR body: "Fixes #<n>" when the change originated from
+// a GitHub issue (unaffected by this fix — a PR title and body are labels on
+// the PR, never on the commit, and approvals bind to the commit per
+// docs/PLAN.md §6, not the pull request), followed by the task's first
+// paragraph (cs.Intent split on the first blank line), and — for a
+// ChangeSet with more than one member, which production loop.go never
+// builds today — a list of the other members' repos so the PR still says
+// what else the changeset touches.
+func (p *PRLander) prBody(cs forge.ChangeSet) string {
+	var b strings.Builder
+	if cs.DrivingIssue != "" {
+		b.WriteString("Fixes #" + cs.DrivingIssue + "\n\n")
+	}
+	para := cs.Intent
+	if i := strings.Index(cs.Intent, "\n\n"); i >= 0 {
+		para = cs.Intent[:i]
+	}
+	b.WriteString(strings.TrimSpace(para))
+	if len(cs.Members) > 1 {
+		b.WriteString("\n\nAlso touches:\n")
+		for _, m := range cs.Members[1:] {
+			b.WriteString("- " + m.Repo + "\n")
+		}
+	}
+	return b.String()
 }
 
 // pushRunBranch collects the member's head from its workspace, exactly the

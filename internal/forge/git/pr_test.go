@@ -3,8 +3,10 @@ package git
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -24,10 +26,23 @@ import (
 // repo in for a remote one, not a new test dependency.
 func githubRemote(t *testing.T, real string) string {
 	t.Helper()
-	const fake = "https://github.com/acme/app.git"
-	t.Setenv("GIT_CONFIG_COUNT", "1")
-	t.Setenv("GIT_CONFIG_KEY_0", "url."+real+".insteadOf")
-	t.Setenv("GIT_CONFIG_VALUE_0", fake)
+	return githubRemoteNamed(t, real, "acme/app")
+}
+
+// githubRemoteNamed is [githubRemote] generalized to redirect more than one
+// owner/repo, for tests that need a second, distinct backing remote: it
+// appends to whatever GIT_CONFIG_COUNT this test has already set rather than
+// resetting it, so multiple calls within one test compose.
+func githubRemoteNamed(t *testing.T, real, ownerRepo string) string {
+	t.Helper()
+	fake := "https://github.com/" + ownerRepo + ".git"
+	idx := 0
+	if n := os.Getenv("GIT_CONFIG_COUNT"); n != "" {
+		idx, _ = strconv.Atoi(n)
+	}
+	t.Setenv("GIT_CONFIG_COUNT", strconv.Itoa(idx+1))
+	t.Setenv(fmt.Sprintf("GIT_CONFIG_KEY_%d", idx), "url."+real+".insteadOf")
+	t.Setenv(fmt.Sprintf("GIT_CONFIG_VALUE_%d", idx), fake)
 	return fake
 }
 
@@ -252,6 +267,213 @@ func TestPROmitsFixesLineWithoutDrivingIssue(t *testing.T) {
 	body := x.gh.byHead["acme/app#box/run-1"].Body
 	if strings.Contains(body, "Fixes #") {
 		t.Fatalf("pr body = %q, want no Fixes # line when DrivingIssue is empty", body)
+	}
+}
+
+// TestPRTitledFromMemberSummary is issue #59: PRLander used to title every
+// PR with the ChangeSet's whole Intent, which is the planner's unbounded
+// task paragraph and is what produced GitHub's 422 "title is too long". When
+// the first member carries a Summary, the PR must be titled from that, never
+// from Intent.
+func TestPRTitledFromMemberSummary(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1",
+		Intent: "a much longer task paragraph the planner wrote for the builder, never meant to title a PR",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease, Summary: "fix the thing"}},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	title := x.gh.byHead["acme/app#box/run-1"].Title
+	if title != "fix the thing" {
+		t.Fatalf("title = %q, want %q", title, "fix the thing")
+	}
+	if strings.Contains(title, cs.Intent) {
+		t.Fatalf("title = %q, must not contain the task text", title)
+	}
+}
+
+// TestPRTitledFromCommitSubjectWhenSummaryEmpty covers the fallback: a
+// member with no Summary (e.g. a work item predating issue #51's field, or
+// one where Summary was never populated) is titled from the landed commit's
+// own subject line instead — still never from Intent.
+func TestPRTitledFromCommitSubjectWhenSummaryEmpty(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "some commit subject")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1",
+		Intent: "the planner's whole task paragraph, still never a title",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	title := x.gh.byHead["acme/app#box/run-1"].Title
+	if title != "some commit subject" {
+		t.Fatalf("title = %q, want %q", title, "some commit subject")
+	}
+	if strings.Contains(title, cs.Intent) {
+		t.Fatalf("title = %q, must not contain the task text", title)
+	}
+}
+
+// TestPRTitleTruncatedAtWordBoundary is the 422 issue #59 fixes directly: a
+// Summary over GitHub's 256-character title limit must be cut to fit, at a
+// word boundary rather than mid-word, and Intent (the untruncated task text)
+// must never appear in the title.
+func TestPRTitleTruncatedAtWordBoundary(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	// 28 ten-char words joined by single spaces: 307 characters, well past
+	// 256, with a space every 11 characters so the exact cut point is easy
+	// to hand-verify. Char 256 lands inside word 23 (0-indexed), so the cut
+	// must back up to the space ending word 22, at byte 252.
+	word := "0123456789"
+	words := make([]string, 28)
+	for i := range words {
+		words[i] = word
+	}
+	summary := strings.Join(words, " ")
+	if len(summary) <= 256 {
+		t.Fatalf("test setup: summary too short: %d bytes", len(summary))
+	}
+	want := summary[:252]
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1",
+		Intent: "the planner's whole task paragraph, never a title, regardless of Summary's length",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease, Summary: summary}},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	title := x.gh.byHead["acme/app#box/run-1"].Title
+	if title != want {
+		t.Fatalf("title = %q (%d bytes), want %q (%d bytes)", title, len(title), want, len(want))
+	}
+	if len(title) > 256 {
+		t.Fatalf("title exceeds GitHub's 256-character limit: %d bytes", len(title))
+	}
+	if summary[len(title)] != ' ' {
+		t.Fatalf("title %q does not end at a word boundary: next original character is %q", title, string(summary[len(title)]))
+	}
+	if strings.Contains(title, cs.Intent) {
+		t.Fatalf("title = %q, must not contain the task text", title)
+	}
+}
+
+// TestPRTwoMembersTitledFromFirstSummaryBodyMentionsSecond is the multi-repo
+// case: production loop.go never builds a ChangeSet with more than one
+// member (confirmed by grep — this repo runs one repo per Loop), so this
+// ChangeSet is built by hand, the same way changeset() in git_test.go builds
+// a single-member one. Every PR a multi-member ChangeSet opens is titled
+// from the first member's Summary, and the body says what else the
+// changeset touches.
+func TestPRTwoMembersTitledFromFirstSummaryBodyMentionsSecond(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease1, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire app: %v", err)
+	}
+	ws1, err := x.m.Checkout(ctx, lease1, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout app: %v", err)
+	}
+	head1 := buildOn(t, ws1, "feature-1")
+
+	// A second, distinct backing remote — built the same way fix(t) builds
+	// the first — fetched into the same mirror under its own repo name.
+	remote2 := filepath.Join(t.TempDir(), "remote2.git")
+	seed2 := t.TempDir()
+	mustGit(t, "", "init", "--bare", remote2)
+	mustGit(t, remote2, "symbolic-ref", "HEAD", "refs/heads/main")
+	mustGit(t, "", "clone", remote2, filepath.Join(seed2, "clone"))
+	clone2 := filepath.Join(seed2, "clone")
+	os.WriteFile(filepath.Join(clone2, "README.md"), []byte("seed2\n"), 0o644)
+	mustGit(t, clone2, "add", ".")
+	mustGit(t, clone2, "commit", "-m", "seed2")
+	mustGit(t, clone2, "push", "origin", "HEAD:refs/heads/main")
+	base2 := forge.Commit(strings.TrimSpace(mustGit(t, clone2, "rev-parse", "HEAD")))
+
+	repo2 := forge.Repo{Name: "app2", Remote: githubRemoteNamed(t, remote2, "acme/app2"), Role: forge.RoleService, DefaultBranch: "main"}
+	if err := x.m.Fetch(ctx, repo2); err != nil {
+		t.Fatalf("fetch app2: %v", err)
+	}
+	lease2, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app2", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire app2: %v", err)
+	}
+	ws2, err := x.m.Checkout(ctx, lease2, base2)
+	if err != nil {
+		t.Fatalf("checkout app2: %v", err)
+	}
+	head2 := buildOn(t, ws2, "feature-2")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1",
+		Intent: "a task paragraph spanning two repos, never a title",
+		Members: []forge.Member{
+			{Repo: "app", Branch: "main", Base: x.f.base, Head: head1, Lease: lease1, Summary: "close two repos at once"},
+			{Repo: "app2", Branch: "main", Base: base2, Head: head2, Lease: lease2, Summary: "should never surface as a title"},
+		},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+
+	title1 := x.gh.byHead["acme/app#box/run-1"].Title
+	title2 := x.gh.byHead["acme/app2#box/run-1"].Title
+	if title1 != "close two repos at once" {
+		t.Fatalf("app title = %q, want the first member's summary", title1)
+	}
+	if title2 != "close two repos at once" {
+		t.Fatalf("app2 title = %q, want it titled from the first member's summary too", title2)
+	}
+
+	body := x.gh.byHead["acme/app#box/run-1"].Body
+	if !strings.Contains(body, "app2") {
+		t.Fatalf("pr body = %q, want it to mention the other member's repo (app2)", body)
 	}
 }
 

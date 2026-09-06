@@ -212,6 +212,7 @@ func (l *Loop) Poll(ctx context.Context, item queue.WorkItem) bool {
 		Members: []forge.Member{{
 			Repo: l.Repo.Name, Branch: l.Branch,
 			Base: forge.Commit(item.BuiltBase), Head: forge.Commit(item.Built),
+			Summary: item.Summary,
 		}},
 	}
 	outstanding := 0
@@ -437,6 +438,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			Intent: item.Task, DrivingIssue: drivingIssue(item.OriginKey),
 			Members: []forge.Member{{
 				Repo: l.Repo.Name, Branch: l.Branch, Base: base, Head: head,
+				Summary: item.Summary,
 			}},
 		}
 
