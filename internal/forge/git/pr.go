@@ -93,9 +93,30 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 			return forge.Landing{}, fmt.Errorf("git: pr: open pr for %s: %w", mem.Repo, err)
 		}
 		prURLs[mem.Repo] = prURL
+
+		// The commit and PR now exist on GitHub, which the Checks API
+		// requires. cs.Verdicts is empty in the optimistic lane, which lands
+		// before its gates run — post nothing there rather than fabricate a
+		// decision nobody made.
+		if len(cs.Verdicts) > 0 {
+			decision := forge.Resolve(cs.Verdicts)
+			if err := p.postCheck(ctx, tok, owner, name, string(mem.Head), "box/check",
+				checkConclusion(decision), fmt.Sprintf("gate: %s", decision),
+				checkSummary(cs.Verdicts), verdictText(cs.Verdicts)); err != nil {
+				return forge.Landing{}, fmt.Errorf("git: pr: check for %s: %w", mem.Repo, err)
+			}
+		}
 	}
 
 	landing, err := p.inner.Land(ctx, cs)
+	if err != nil {
+		// A force-with-lease rejection (git.go's "push refused" error) would
+		// otherwise show up nowhere the PR's reader would see it, and the
+		// last box/check would still read green. Best effort: a failure to
+		// report the failure must never mask the failure itself, so its own
+		// error is swallowed and the wrapped land error returns unchanged.
+		p.postLandFailure(ctx, cs, landing, err)
+	}
 	for i := range landing.Landed {
 		pl := &landing.Landed[i]
 		prURL, ok := prURLs[pl.Repo]
@@ -201,6 +222,121 @@ func (p *PRLander) createPR(ctx context.Context, token, owner, repo, head, base,
 		return "", fmt.Errorf("create pr: %w", err)
 	}
 	return out.HTMLURL, nil
+}
+
+// postLandFailure reports the member that stopped the landing as a failing
+// box/land check on its own head sha, naming landErr as the reason. It looks
+// up that member itself rather than take one as a parameter because the
+// caller only learns which member failed from landing.Failed.
+func (p *PRLander) postLandFailure(ctx context.Context, cs forge.ChangeSet, landing forge.Landing, landErr error) {
+	var mem forge.Member
+	found := false
+	for _, m := range cs.Members {
+		if m.Repo == landing.Failed {
+			mem = m
+			found = true
+			break
+		}
+	}
+	if !found {
+		return
+	}
+	repo, ok := p.inner.m.Repo(mem.Repo)
+	if !ok {
+		return
+	}
+	owner, name, err := parseGitHubRemote(repo.Remote)
+	if err != nil {
+		return
+	}
+	tok, err := p.token(ctx)
+	if err != nil {
+		return
+	}
+	_ = p.postCheck(ctx, tok, owner, name, string(mem.Head), "box/land",
+		"failure", "land failed", landErr.Error(), "")
+}
+
+// checkConclusion maps a resolved gate decision onto the GitHub Checks API's
+// vocabulary. cs.Verdicts only reaches this file once loop.go has already
+// resolved it to DecisionPass, so this branch is exercised by direct callers
+// of PRLander (tests, and any future caller) rather than the loop today.
+func checkConclusion(d forge.Decision) string {
+	if d == forge.DecisionPass {
+		return "success"
+	}
+	return "failure"
+}
+
+// checkSummary mirrors internal/loop's reasons(vs []forge.Verdict) string —
+// same semicolon-joined, first-line-only formatting — rather than reinventing
+// the joining logic. It differs in one way: that function only names
+// failing gates, because it is only ever called on a ChangeSet that has
+// already failed. A box/check summary has to describe a *passing* verdict
+// set just as clearly, so this reports every verdict, not only the failures.
+func checkSummary(vs []forge.Verdict) string {
+	out := ""
+	for _, v := range vs {
+		if out != "" {
+			out += "; "
+		}
+		line := v.Reason
+		if i := strings.IndexByte(line, '\n'); i >= 0 {
+			line = line[:i]
+		}
+		out += fmt.Sprintf("%s: %s (%s)", v.Gate, v.Decision, line)
+	}
+	if out == "" {
+		out = "no gate examined the change"
+	}
+	return out
+}
+
+// verdictText names the evidence-chain record backing each verdict — not
+// every [forge.EvidenceRef] a gate attached (a gate.Command's own transcript
+// reference is a local filesystem path, meaningless to a reader on GitHub) —
+// so an auditor can walk from the check straight back to the chain that
+// produced it.
+func verdictText(vs []forge.Verdict) string {
+	var ids []string
+	for _, v := range vs {
+		for _, e := range v.Evidence {
+			if e.Kind == forge.EvidenceKindRecord && e.URI != "" {
+				ids = append(ids, e.URI)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	return "evidence: " + strings.Join(ids, ", ")
+}
+
+type checkRunInput struct {
+	Name       string         `json:"name"`
+	HeadSHA    string         `json:"head_sha"`
+	Status     string         `json:"status"`
+	Conclusion string         `json:"conclusion"`
+	Output     checkRunOutput `json:"output"`
+}
+
+type checkRunOutput struct {
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
+	Text    string `json:"text,omitempty"`
+}
+
+// postCheck reports one GitHub check run — box/check for the gate verdict,
+// box/land for a fencing rejection — on the commit sha the run is about,
+// reusing [PRLander.call] so it is exercised against the same
+// httptest.Server as PR creation.
+func (p *PRLander) postCheck(ctx context.Context, token, owner, repo, sha, name, conclusion, title, summary, text string) error {
+	in := checkRunInput{
+		Name: name, HeadSHA: sha, Status: "completed", Conclusion: conclusion,
+		Output: checkRunOutput{Title: title, Summary: summary, Text: text},
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/check-runs", p.apiBase, owner, repo)
+	return p.call(ctx, http.MethodPost, endpoint, token, in, nil)
 }
 
 // call issues one GitHub REST API request. in nil omits the body; out nil

@@ -479,7 +479,15 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 					return gateInfra
 				}
 				body, _ := json.Marshal(v)
-				l.record(ctx, item, "gate", string(head), string(body))
+				rec := l.recordEvidence(ctx, item, "gate", string(head), string(body))
+				if rec.ID != "" {
+					// The chain's own id, threaded onto the verdict it
+					// belongs to, so a Lander that publishes verdicts
+					// outside this process (git.PRLander's GitHub check)
+					// gives its reader a way back to the chain instead of
+					// just an assertion.
+					v.Evidence = append(v.Evidence, forge.EvidenceRef{Kind: forge.EvidenceKindRecord, URI: rec.ID})
+				}
 				if v.Decision == forge.DecisionPass {
 					passedNow = append(passedNow, g.Name())
 				}
@@ -523,6 +531,11 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		item.KeepCandidate(head, base, passedNow)
 		return q.Wait(ctx, item, claim, reasons(verdicts))
 	}
+
+	// Only the gated lane reaches here with a resolved verdict in hand — a
+	// Lander that publishes it (git.PRLander's GitHub check) reads it off
+	// the ChangeSet rather than a second, out-of-band channel.
+	cs.Verdicts = verdicts
 
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
@@ -935,15 +948,23 @@ func (l *Loop) settle(ctx context.Context, item queue.WorkItem) queue.WorkItem {
 }
 
 func (l *Loop) record(ctx context.Context, item queue.WorkItem, kind, subject, body string) {
+	l.recordEvidence(ctx, item, kind, subject, body)
+}
+
+// recordEvidence is [Loop.record] with the appended record handed back, for
+// the one call site that needs to thread the chain's own id onward (the gate
+// verdict, onto its [forge.Verdict]) rather than merely append and forget.
+func (l *Loop) recordEvidence(ctx context.Context, item queue.WorkItem, kind, subject, body string) evidence.Record {
 	if body == "" {
 		b, _ := json.Marshal(item)
 		body = string(b)
 	}
-	l.Store.Log().Append(ctx, evidence.Record{
+	rec, _ := l.Store.Log().Append(ctx, evidence.Record{
 		Tenant: item.Tenant, Scope: "workitem/" + item.ID,
 		Kind: kind, Subject: subject, Actor: l.Runner, OnBehalfOf: item.Requester,
 		Body: []byte(body), Trace: telemetry.TraceID(ctx),
 	})
+	return rec
 }
 
 // failing names the gates that did not pass, in the order they answered.

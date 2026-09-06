@@ -48,6 +48,15 @@ type Verdict struct {
 	Evidence []EvidenceRef
 }
 
+// EvidenceKindRecord marks an [EvidenceRef] whose URI is an [evidence.Record]
+// ID rather than a log path or artifact digest — the kind a reader outside
+// this process (git.PRLander's GitHub check) can follow straight back into
+// the evidence chain. Shared between internal/loop, which attaches it, and
+// internal/forge/git, which reads it back: the two cannot share a helper
+// function directly (internal/loop imports internal/forge/git, so the
+// reverse would cycle), so the string is the seam instead.
+const EvidenceKindRecord = "evidence-record"
+
 // EvidenceRef is a durable pointer to what a gate actually observed: a test
 // log, a build record, a review, a policy decision. Verdicts are recorded in
 // the evidence log and outlive the run that produced them, so evidence is

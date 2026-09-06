@@ -42,12 +42,30 @@ type fakeGitHub struct {
 	byHead  map[string]ghPR
 	creates int
 	next    int
+	checks  []ghCheckRun
 }
 
 type ghPR struct {
 	Title string `json:"title"`
 	Body  string `json:"body"`
 	URL   string `json:"html_url"`
+}
+
+// ghCheckRun is what a test reads back after PRLander posts to
+// /check-runs: enough of the GitHub Checks API's create-check-run body to
+// assert on name, sha, conclusion, and the output an auditor would read.
+type ghCheckRun struct {
+	Owner      string `json:"-"`
+	Repo       string `json:"-"`
+	Name       string `json:"name"`
+	HeadSHA    string `json:"head_sha"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	Output     struct {
+		Title   string `json:"title"`
+		Summary string `json:"summary"`
+		Text    string `json:"text"`
+	} `json:"output"`
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -60,7 +78,7 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 
 func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) != 4 || parts[0] != "repos" || parts[3] != "pulls" {
+	if len(parts) != 4 || parts[0] != "repos" {
 		http.NotFound(w, r)
 		return
 	}
@@ -68,8 +86,8 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	switch r.Method {
-	case http.MethodGet:
+	switch {
+	case parts[3] == "pulls" && r.Method == http.MethodGet:
 		head := r.URL.Query().Get("head") // "owner:branch"
 		hp := strings.SplitN(head, ":", 2)
 		key := owner + "/" + repo + "#" + hp[len(hp)-1]
@@ -78,7 +96,7 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 			out = append(out, pr)
 		}
 		json.NewEncoder(w).Encode(out)
-	case http.MethodPost:
+	case parts[3] == "pulls" && r.Method == http.MethodPost:
 		var in struct{ Title, Head, Base, Body string }
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -91,6 +109,16 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		g.byHead[key] = pr
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(pr)
+	case parts[3] == "check-runs" && r.Method == http.MethodPost:
+		var in ghCheckRun
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		in.Owner, in.Repo = owner, repo
+		g.checks = append(g.checks, in)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(in)
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
@@ -301,5 +329,144 @@ func TestPRRetryReusesOpenPR(t *testing.T) {
 	got := strings.TrimSpace(mustGit(t, x.f.remote, "rev-parse", "refs/heads/main"))
 	if forge.Commit(got) != head2 {
 		t.Fatalf("remote main = %s, want %s", got, head2)
+	}
+}
+
+// TestPRPostsCheckRunWithVerdicts is issue #58: a gate's resolved verdict,
+// carried on ChangeSet.Verdicts, must reach GitHub as a box/check run named
+// on the built head — not just fence-pushed silently — and the run's output
+// must carry the evidence record id so an auditor can walk from the check
+// back to the chain.
+func TestPRPostsCheckRunWithVerdicts(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+		Verdicts: []forge.Verdict{
+			{Gate: "build-and-test", Decision: forge.DecisionPass, Reason: "all green",
+				Evidence: []forge.EvidenceRef{{Kind: forge.EvidenceKindRecord, URI: "rec-abc123"}}},
+		},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+
+	if len(x.gh.checks) != 1 {
+		t.Fatalf("want exactly one check-run posted, got %d: %+v", len(x.gh.checks), x.gh.checks)
+	}
+	got := x.gh.checks[0]
+	if got.Name != "box/check" {
+		t.Fatalf("check name = %q, want box/check", got.Name)
+	}
+	if got.HeadSHA != string(head) {
+		t.Fatalf("check head_sha = %q, want %q", got.HeadSHA, head)
+	}
+	if got.Conclusion != "success" {
+		t.Fatalf("check conclusion = %q, want success", got.Conclusion)
+	}
+	if !strings.Contains(got.Output.Text, "rec-abc123") {
+		t.Fatalf("check output text = %q, want it to carry the evidence record id", got.Output.Text)
+	}
+}
+
+// TestPRPostsNoCheckRunWithoutVerdicts is the optimistic lane's edge case
+// named in issue #58: a ChangeSet that reaches Land with no verdict yet must
+// never have one fabricated for it.
+func TestPRPostsNoCheckRunWithoutVerdicts(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	if len(x.gh.checks) != 0 {
+		t.Fatalf("want no check-run posted for an empty verdict set, got %d: %+v", len(x.gh.checks), x.gh.checks)
+	}
+}
+
+// TestPRPostsFailingLandCheckOnFencingRejection is issue #58's other half: a
+// force-with-lease rejection (git.go's "push refused" error) has to surface
+// on GitHub as a failing box/land check, or a reader sees a PR whose last
+// check was a green box/check and no sign the actual land ever ran.
+func TestPRPostsFailingLandCheckOnFencingRejection(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	// Sabotage: main moves out-of-band after the build, so the fenced push
+	// PRLander delegates to will be refused.
+	rogue := filepath.Join(t.TempDir(), "rogue")
+	mustGit(t, "", "clone", x.f.remote, rogue)
+	mustGit(t, rogue, "commit", "--allow-empty", "-m", "out of band")
+	mustGit(t, rogue, "push", "origin", "HEAD:refs/heads/main")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+		Verdicts: []forge.Verdict{
+			{Gate: "build-and-test", Decision: forge.DecisionPass, Reason: "all green"},
+		},
+	}
+	_, err = x.pr.Land(ctx, cs)
+	if err == nil {
+		t.Fatal("land should have been refused: base moved out from under it")
+	}
+
+	var landChecks []ghCheckRun
+	for _, c := range x.gh.checks {
+		if c.Name == "box/land" {
+			landChecks = append(landChecks, c)
+		}
+	}
+	if len(landChecks) != 1 {
+		t.Fatalf("want exactly one box/land check posted, got %d: %+v", len(landChecks), x.gh.checks)
+	}
+	got := landChecks[0]
+	if got.HeadSHA != string(head) {
+		t.Fatalf("box/land head_sha = %q, want %q", got.HeadSHA, head)
+	}
+	if got.Conclusion != "failure" {
+		t.Fatalf("box/land conclusion = %q, want failure", got.Conclusion)
+	}
+	if !strings.Contains(got.Output.Summary, "push refused") {
+		t.Fatalf("box/land summary = %q, want it to carry the fencing rejection's reason", got.Output.Summary)
 	}
 }
