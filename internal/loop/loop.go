@@ -240,12 +240,15 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		return item, err
 	}
 	// The workspace outlives the lease for exactly as long as the resume point
-	// does: held while the item waits with a commit to come back to or has
-	// handed off with a change its successor continues, handed back to Prune
-	// the moment it settles or gives that commit up.
+	// does: held while the item waits with a commit to come back to, has
+	// handed off with a change its successor continues, or parked with a
+	// gate's refusal on a commit worth a second look — handed back to Prune
+	// the moment it settles or gives that commit up. Built is empty for every
+	// OTHER park (a denied authorization, a build failure, a lost land race),
+	// so the guard below still discriminates correctly without checking why.
 	defer func() {
 		switch out.State {
-		case queue.StateWaiting, queue.StateHandedOff:
+		case queue.StateWaiting, queue.StateHandedOff, queue.StateParked:
 			if out.Built != "" {
 				l.Mirror.Hold(item.ID, l.Repo.Name)
 				return
@@ -373,117 +376,123 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	// would gate and land it, which is the degraded commit the verb exists to
 	// avoid producing.
 	if !resumed || item.Unfinished {
-		if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
-			bctx, cancelBuild := l.buildDeadline(ctx)
-			defer cancelBuild()
-			if l.Meter != nil {
-				l.Meter.Start(ctx, item.ID)
-			}
-			var berr error
-			head, berr = l.Builder.Build(bctx, ws, item.Task)
-			if berr == nil {
-				l.record(ctx, item, "built", string(head), "")
-			} else if bctx.Err() != nil && ctx.Err() == nil {
-				// The clock ran out, not the caller. Say so plainly: "context
-				// deadline exceeded" on a parked item tells nobody which
-				// deadline or how long it was.
-				berr = fmt.Errorf("build exceeded its %s budget and was stopped: %w", l.buildTimeout(), berr)
-			}
-			return berr
-		}); serr != nil {
-			var ho *Handoff
-			if errors.As(serr, &ho) {
-				return l.handOff(ctx, q, item, claim, base, ho)
-			}
-			var esc *Escalation
-			if errors.As(serr, &esc) {
-				// The agent's own act, attributed to the agent: actor is the
-				// seat, not the runner that hosted it.
-				l.Store.Log().Append(ctx, evidence.Record{
-					Tenant: item.Tenant, Scope: "workitem/" + item.ID,
-					Kind: "escalated", Subject: item.ID, Actor: esc.Seat,
-					OnBehalfOf: item.Requester, Body: []byte(esc.Reason),
-					Trace: telemetry.TraceID(ctx),
-				})
-				// An agent declining is a considered act, not an emergency:
-				// somebody has to read it, and it can wait for the morning.
-				item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, esc.Error())
-				return l.settle(ctx, item), nil
-			}
-			item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, "build: "+serr.Error())
-			return l.settle(ctx, item), nil
+		var built forge.Commit
+		var settled queue.WorkItem
+		var ok bool
+		if built, settled, err, ok = l.buildOnce(ctx, q, item, claim, ws, base); !ok {
+			return settled, err
 		}
+		head = built
+		// This pass paid for a build, whether or not it started from a
+		// resume point (an unfinished one still had to be built out). The
+		// fallback below exists only for the pass that did NOT build — a
+		// finished resume whose gate answers first — so a gate failure here
+		// is a genuine refusal of fresh content and must park, not build
+		// again a second time in the same Run.
+		resumed = false
 	}
 
 	// The gating ChangeSet carries no lease: the branch is not ours yet, and
 	// gates judge content rather than authority. The land window fills it in.
-	cs := forge.ChangeSet{
-		ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
-		Intent: item.Task, DrivingIssue: drivingIssue(item.OriginKey),
-		Members: []forge.Member{{
-			Repo: l.Repo.Name, Branch: l.Branch, Base: base, Head: head,
-		}},
-	}
-
-	if l.Lane == forge.LaneOptimistic {
-		return l.runOptimistic(ctx, q, item, claim, ws, cs, base, head)
-	}
-
-	// Gates already satisfied on THIS head are carried, not re-run. An item
-	// waiting on a person is re-drained every tick for as long as the review
-	// takes, and re-running the whole suite each time is how a worker that is
-	// doing nothing keeps a machine busy: the deterministic shells — the
-	// build, the test run — cannot change their mind about a commit that has
-	// not moved. The gate whose answer CAN change is the human one, and it is
-	// a store read. Any change of head clears the carry, because replayed or
-	// rebuilt content is a different question.
-	carried := item.PassedGates
-	if string(head) != item.Built {
-		carried = nil
-	}
+	//
+	// A resumed change gets exactly one free re-check at the gate below
+	// without paying for a build: that is the whole fix for issue #57. If
+	// that check fails, this falls through and builds afresh — same claim,
+	// same lease, one resume point re-set rather than a second one opened —
+	// and only THAT build's gate result reaches the switch below. `resumed`
+	// flips to false the moment the fallback build runs, so a second failure
+	// parks for real instead of looping again.
+	var cs forge.ChangeSet
 	var verdicts []forge.Verdict
 	var passedNow []string
-	var gateInfra error
-	gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
-		for _, g := range l.Gates(ws) {
-			if slices.Contains(carried, g.Name()) {
-				// No new evidence: the gate ran once on this content and its
-				// verdict is already on the chain. Recording it again would
-				// be minting a judgement nobody made.
-				verdicts = append(verdicts, forge.Verdict{
-					Gate: g.Name(), Decision: forge.DecisionPass,
-					Reason: "passed on " + short(head) + ", carried while the head stands",
-				})
-				passedNow = append(passedNow, g.Name())
-				continue
-			}
-			v, err := g.Evaluate(ctx, cs)
-			if err != nil {
-				// Infrastructure trouble is never recorded as a rejected change.
-				gateInfra = fmt.Errorf("gate %s could not conclude: %v", g.Name(), err)
-				return gateInfra
-			}
-			body, _ := json.Marshal(v)
-			l.record(ctx, item, "gate", string(head), string(body))
-			if v.Decision == forge.DecisionPass {
-				passedNow = append(passedNow, g.Name())
-			}
-			verdicts = append(verdicts, v)
+	for {
+		cs = forge.ChangeSet{
+			ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
+			Intent: item.Task, DrivingIssue: drivingIssue(item.OriginKey),
+			Members: []forge.Member{{
+				Repo: l.Repo.Name, Branch: l.Branch, Base: base, Head: head,
+			}},
 		}
-		if forge.Resolve(verdicts) == forge.DecisionFail {
-			return fmt.Errorf("gates failed") // marks the stage span failed; the reasons go to evidence and the park note
+
+		if l.Lane == forge.LaneOptimistic {
+			return l.runOptimistic(ctx, q, item, claim, ws, cs, base, head)
 		}
-		return nil
-	})
-	if gateInfra != nil {
-		return q.Fail(ctx, item, claim, gateInfra.Error())
+
+		// Gates already satisfied on THIS head are carried, not re-run. An
+		// item waiting on a person is re-drained every tick for as long as
+		// the review takes, and re-running the whole suite each time is how a
+		// worker that is doing nothing keeps a machine busy: the
+		// deterministic shells — the build, the test run — cannot change
+		// their mind about a commit that has not moved. The gate whose
+		// answer CAN change is the human one, and it is a store read. Any
+		// change of head clears the carry, because replayed or rebuilt
+		// content is a different question.
+		carried := item.PassedGates
+		if string(head) != item.Built {
+			carried = nil
+		}
+		verdicts, passedNow = nil, nil
+		var gateInfra error
+		gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
+			for _, g := range l.Gates(ws) {
+				if slices.Contains(carried, g.Name()) {
+					// No new evidence: the gate ran once on this content and its
+					// verdict is already on the chain. Recording it again would
+					// be minting a judgement nobody made.
+					verdicts = append(verdicts, forge.Verdict{
+						Gate: g.Name(), Decision: forge.DecisionPass,
+						Reason: "passed on " + short(head) + ", carried while the head stands",
+					})
+					passedNow = append(passedNow, g.Name())
+					continue
+				}
+				v, err := g.Evaluate(ctx, cs)
+				if err != nil {
+					// Infrastructure trouble is never recorded as a rejected change.
+					gateInfra = fmt.Errorf("gate %s could not conclude: %v", g.Name(), err)
+					return gateInfra
+				}
+				body, _ := json.Marshal(v)
+				l.record(ctx, item, "gate", string(head), string(body))
+				if v.Decision == forge.DecisionPass {
+					passedNow = append(passedNow, g.Name())
+				}
+				verdicts = append(verdicts, v)
+			}
+			if forge.Resolve(verdicts) == forge.DecisionFail {
+				return fmt.Errorf("gates failed") // marks the stage span failed; the reasons go to evidence and the park note
+			}
+			return nil
+		})
+		if gateInfra != nil {
+			return q.Fail(ctx, item, claim, gateInfra.Error())
+		}
+		_ = gerr
+
+		if !resumed || forge.Resolve(verdicts) != forge.DecisionFail {
+			break
+		}
+		// The free re-check just failed a second time (once here, once when
+		// this item first parked): the builder runs, on the same claim and
+		// lease, and only its outcome settles this Run.
+		resumed = false
+		var built forge.Commit
+		var settled queue.WorkItem
+		var ok bool
+		if built, settled, err, ok = l.buildOnce(ctx, q, item, claim, ws, base); !ok {
+			return settled, err
+		}
+		head = built
 	}
-	_ = gerr
 	switch forge.Resolve(verdicts) {
 	case forge.DecisionFail:
-		// A change judged and refused: nothing landed, nothing is broken, and
-		// the queue is the right place for it to wait.
-		return q.Park(ctx, item, claim, queue.SeverityMedium, reasons(verdicts))
+		// A change judged and refused: nothing landed, nothing is broken,
+		// and the queue is the right place for it to wait. Kept as a
+		// candidate rather than dropped — one free re-check next time costs
+		// a gate run, not another agent session, and ParkKeepingResume is
+		// what makes that the one park that does not throw the commit away.
+		item.KeepCandidate(head, base, passedNow)
+		return q.ParkKeepingResume(ctx, item, claim, queue.SeverityMedium, reasons(verdicts))
 	case forge.DecisionPending:
 		// Carry the commit forward so the next tick re-enters at the gate
 		// rather than at the builder, and the satisfied gates with it so it
@@ -527,6 +536,61 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		checks.Status{Green: true, Lane: string(forge.LaneGated)}, l.Runner)
 	item, err = q.Done(ctx, item, claim, head)
 	return l.settle(ctx, item), err
+}
+
+// buildOnce runs the builder once and returns the commit it produced.
+//
+// Extracted out of Run because it now runs from two places: the ordinary
+// build step, and the fallback a resumed commit's second gate failure takes
+// (see the comment above the gate loop in Run). Both call sites need the same
+// handoff, escalation, and failure handling — a Handoff or an Escalation or a
+// bare build error each settle the item and end the run right there, which
+// buildOnce reports back with ok=false so the caller returns its result
+// unchanged rather than falling into the gate loop with nothing built.
+func (l *Loop) buildOnce(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, ws forge.Workspace, base forge.Commit) (head forge.Commit, settled queue.WorkItem, err error, ok bool) {
+	serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
+		bctx, cancelBuild := l.buildDeadline(ctx)
+		defer cancelBuild()
+		if l.Meter != nil {
+			l.Meter.Start(ctx, item.ID)
+		}
+		var berr error
+		head, berr = l.Builder.Build(bctx, ws, item.Task)
+		if berr == nil {
+			l.record(ctx, item, "built", string(head), "")
+		} else if bctx.Err() != nil && ctx.Err() == nil {
+			// The clock ran out, not the caller. Say so plainly: "context
+			// deadline exceeded" on a parked item tells nobody which
+			// deadline or how long it was.
+			berr = fmt.Errorf("build exceeded its %s budget and was stopped: %w", l.buildTimeout(), berr)
+		}
+		return berr
+	})
+	if serr == nil {
+		return head, queue.WorkItem{}, nil, true
+	}
+	var ho *Handoff
+	if errors.As(serr, &ho) {
+		settled, err = l.handOff(ctx, q, item, claim, base, ho)
+		return "", settled, err, false
+	}
+	var esc *Escalation
+	if errors.As(serr, &esc) {
+		// The agent's own act, attributed to the agent: actor is the seat,
+		// not the runner that hosted it.
+		l.Store.Log().Append(ctx, evidence.Record{
+			Tenant: item.Tenant, Scope: "workitem/" + item.ID,
+			Kind: "escalated", Subject: item.ID, Actor: esc.Seat,
+			OnBehalfOf: item.Requester, Body: []byte(esc.Reason),
+			Trace: telemetry.TraceID(ctx),
+		})
+		// An agent declining is a considered act, not an emergency: somebody
+		// has to read it, and it can wait for the morning.
+		item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, esc.Error())
+		return "", l.settle(ctx, item), nil, false
+	}
+	item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, "build: "+serr.Error())
+	return "", l.settle(ctx, item), nil, false
 }
 
 // openLandWindow takes the branch for the length of a landing and confirms it

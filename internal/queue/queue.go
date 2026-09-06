@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
@@ -439,8 +440,28 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 // forgotten a field cannot forget an argument, and the room's routing is only
 // as good as the loudest thing it is told.
 func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, sev Severity, reason string) (WorkItem, error) {
+	return q.park(ctx, w, lease, sev, reason, true)
+}
+
+// ParkKeepingResume parks the item exactly as Park does, but without
+// dropping a resume point the caller has just set.
+//
+// It exists for one call site: a gate that refused a resumed commit. A
+// second look at the same commit costs a gate run; buying a fresh one from
+// the builder costs an agent session. One free re-check is cheaper than the
+// run it might save, so the exception queue gets to hold that commit rather
+// than throw it away — every other park still drops it, because a build
+// failure, a denied authorization, or a lost land race have no commit worth
+// re-offering.
+func (q *Queue) ParkKeepingResume(ctx context.Context, w WorkItem, lease forge.Lease, sev Severity, reason string) (WorkItem, error) {
+	return q.park(ctx, w, lease, sev, reason, false)
+}
+
+func (q *Queue) park(ctx context.Context, w WorkItem, lease forge.Lease, sev Severity, reason string, drop bool) (WorkItem, error) {
 	w.State, w.Note, w.Severity = StateParked, reason, sev.OrDefault()
-	w.dropResume()
+	if drop {
+		w.dropResume()
+	}
 	err := q.record(ctx, w, "parked", w.ID, reason)
 	if err == nil {
 		err = q.index(ctx, w.Tenant, "exceptions", w.ID, reason)
@@ -449,11 +470,14 @@ func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, sev Sev
 	return w, err
 }
 
-// dropResume clears the resume point. Every settle does this: the built
-// commit either landed or was judged and refused, so a later attempt must
-// build afresh rather than re-offer a commit whose verdict is on the record.
-// Wait and HandOff are the transitions that keep it, because they are the
-// states the same tree is still worth coming back to.
+// dropResume clears the resume point. Most settles do this: the built commit
+// either landed or was judged and refused, so a later attempt must build
+// afresh rather than re-offer a commit whose verdict is on the record. Wait
+// and HandOff keep it outright, because they are the states the same tree is
+// still worth coming back to; a gate-refusal Park and a plain-reason Retry
+// keep it too, as the one bounded exception each — see [ParkKeepingResume]
+// and [reopen] — because a second look at the same commit is cheaper than
+// buying it again from the builder.
 func (w *WorkItem) dropResume() {
 	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = "", "", nil, false
 }
@@ -595,9 +619,10 @@ func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id, actor, why string)
 // The counterpart to Resolve, and the reason parking could not simply be
 // terminal: an item parks for transient reasons too — a flaky gate, a
 // timeout, an agent that ran out of room — and without this the factory could
-// never recover work it had already been asked to do. The resume point is
-// already gone (Park drops it), so a retry builds afresh rather than
-// re-offering a commit whose verdict is on the record.
+// never recover work it had already been asked to do. If the park it is
+// leaving kept a resume point, the retry keeps it too and re-enters at the
+// gate rather than the builder — unless the operator's note says to rebuild,
+// which drops it and builds afresh.
 func (q *Queue) Retry(ctx context.Context, t tenant.ID, id, actor, note string) (WorkItem, error) {
 	return q.reopen(ctx, t, id, actor, StatePending, "retried", note)
 }
@@ -614,7 +639,15 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 		return w, fmt.Errorf("queue: item %s is %s, not parked — only an exception can be %s", id, w.State, kind)
 	}
 	w.State, w.Note = to, note
-	w.dropResume()
+	// Resolve always drops the resume point: closing an exception without a
+	// landing is final, and there is no attempt left to come back to. Retry
+	// keeps it — the gate that refused this commit may answer differently a
+	// minute later, and re-running it is cheaper than an agent run — unless
+	// the operator's own note says the commit itself is the problem, in
+	// which case a rebuild is exactly what they asked for.
+	if kind == "resolved" || strings.Contains(strings.ToLower(note), "rebuild") {
+		w.dropResume()
+	}
 	// Off the exception queue is off it. Leaving the severity behind would
 	// have a retried item come back already shouting, and would restart a
 	// later parking's clock with the previous parking's volume.
