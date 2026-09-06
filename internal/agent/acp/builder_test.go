@@ -50,6 +50,23 @@ func rig(t *testing.T, scenario string) (*sqlite.Store, *loop.Loop, *ingress.Sto
 	seedDir := filepath.Join(t.TempDir(), "seed")
 	mustSh(t, "", "git", "clone", remote, seedDir)
 	os.WriteFile(filepath.Join(seedDir, "README.md"), []byte("app\n"), 0o644)
+	// api and cmd/api exist so a unit naming the "api" section (see
+	// TestTheSectionReachesThePromptAndTheRef and the context-narrowing
+	// tests below) has real paths to materialize: `git archive` fails its
+	// whole call on a pathspec that matches nothing, and a section's own
+	// declared paths are never filtered around that the way the always-set
+	// is.
+	os.MkdirAll(filepath.Join(seedDir, "api"), 0o755)
+	os.WriteFile(filepath.Join(seedDir, "api", "handler.go"), []byte("package api\n"), 0o644)
+	os.MkdirAll(filepath.Join(seedDir, "cmd", "api"), 0o755)
+	os.WriteFile(filepath.Join(seedDir, "cmd", "api", "main.go"), []byte("package main\n"), 0o644)
+	// db and extra exist for the context-narrowing tests: db is a second
+	// section's exclusive path (the union case), extra belongs to neither
+	// declared section and must never be materialized for a sectioned run.
+	os.MkdirAll(filepath.Join(seedDir, "db"), 0o755)
+	os.WriteFile(filepath.Join(seedDir, "db", "schema.sql"), []byte("-- schema\n"), 0o644)
+	os.MkdirAll(filepath.Join(seedDir, "extra"), 0o755)
+	os.WriteFile(filepath.Join(seedDir, "extra", "only.txt"), []byte("neither section\n"), 0o644)
 	mustSh(t, seedDir, "git", "add", ".")
 	mustSh(t, seedDir, "git", "commit", "-m", "seed")
 	mustSh(t, seedDir, "git", "push", "origin", "HEAD:refs/heads/main")
@@ -392,16 +409,20 @@ func TestTheEnvelopeInForceIsOnTheRecord(t *testing.T) {
 		return rec.AgentRef, rec.Envelope
 	}
 
-	ref, envelope := run(t, []agent.Class{"embargoed"})
+	// Unclassified is in the readable set alongside the declared class: the
+	// run's own workspace is now a real context grant (issue #55) and it
+	// carries no class of its own, so an envelope that cannot read
+	// unclassified material could never read the repository it is building.
+	ref, envelope := run(t, []agent.Class{"embargoed", agent.Unclassified})
 	// The intersection is what is recorded, not the declaration: the run was
 	// permitted one endpoint, and "kb" never reached it.
-	want := "class=embargoed endpoints=[vendor-inregion] context=[embargoed] redaction=all payload=text"
+	want := "class=embargoed endpoints=[vendor-inregion] context=[embargoed ] redaction=all payload=text"
 	if envelope != want {
 		t.Fatalf("envelope on the record = %q, want %q", envelope, want)
 	}
 
 	// The same work under a wider envelope is a different agent on the record.
-	widerRef, wider := run(t, []agent.Class{"embargoed", "public"})
+	widerRef, wider := run(t, []agent.Class{"embargoed", "public", agent.Unclassified})
 	if wider == envelope {
 		t.Fatalf("a widened envelope recorded identically: %q", wider)
 	}
@@ -640,5 +661,219 @@ func TestAnUnsectionedUnitWithNoCheckIsToldPlainly(t *testing.T) {
 	}
 	if !strings.Contains(prompt, "No check is configured") {
 		t.Errorf("the prompt does not say plainly that no check is configured:\n%s", prompt)
+	}
+}
+
+// checkoutWorkspace materializes a real workspace directly — the same lease
+// and Mirror.Checkout call loop.Loop.Run makes internally — so a test can
+// hold ws.Dir and inspect its materialized context sibling after Build
+// returns. A direct Build call tears down neither: reclaiming a workspace is
+// the mirror's Prune, which nothing here calls.
+func checkoutWorkspace(t *testing.T, ctx context.Context, s *sqlite.Store, lp *loop.Loop, run string) forge.Workspace {
+	t.Helper()
+	base, err := lp.Mirror.Resolve(ctx, lp.Repo, "refs/heads/"+lp.Branch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := s.Leaser("runner-1").Acquire(ctx, forge.LeaseRequest{
+		Tenant: btn, Repo: lp.Repo.Name, Ref: "run/" + run, Run: run, TTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := lp.Mirror.Checkout(ctx, lease, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ws
+}
+
+// submitSectioned opens and submits a work item naming the given sections,
+// returning it for a direct Build call — the loop's claim/gate/land
+// machinery is not what these tests are exercising.
+func submitSectioned(t *testing.T, ctx context.Context, s *sqlite.Store, router *ingress.StoreRouter, key, task string, sections []string) queue.WorkItem {
+	t.Helper()
+	ing, _, err := router.Open(ctx, ingress.Route{
+		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
+	}, ingress.Delivery{Key: key})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := loop.ItemFor(ing, "wi-"+key, task)
+	item.Sections = sections
+	q := &queue.Queue{Store: s, Runner: "runner-1", TTL: time.Hour}
+	item, err = q.Submit(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return item
+}
+
+// TestASectionedUnitMaterializesItsPathsPlusTheAlwaysSet is issue #55's core
+// property: a unit naming one section gets that section's paths and the
+// (filtered) always-set under its context directory, nothing else — and the
+// workspace itself stays the complete checkout regardless, since narrowing
+// applies to the context grant, not to what the agent's own tool calls can
+// still reach in ws.Dir.
+func TestASectionedUnitMaterializesItsPathsPlusTheAlwaysSet(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	ctx := context.Background()
+	lp.Repo.Sections = []forge.Section{
+		{Name: "api", Paths: []string{"api", "cmd/api"}},
+		{Name: "db", Paths: []string{"db"}},
+	}
+	b := lp.Builder.(*Builder)
+	b.Repos = []forge.Repo{lp.Repo}
+
+	item := submitSectioned(t, ctx, s, router, "issue-ctx-one", "touch the api section", []string{"api"})
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	if _, err := b.Build(ctx, ws, item.Task); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Join(forge.ContextDir(ws.Dir), lp.Repo.Name)
+	for _, want := range []string{"api/handler.go", "cmd/api/main.go", "README.md"} {
+		if _, err := os.Stat(filepath.Join(root, want)); err != nil {
+			t.Errorf("the materialized context is missing %q: %v", want, err)
+		}
+	}
+	for _, absent := range []string{"db", "extra", "CLAUDE.md", "go.mod", "go.sum", "docs"} {
+		if _, err := os.Stat(filepath.Join(root, absent)); err == nil {
+			t.Errorf("the materialized context carries %q, which the unit was not granted", absent)
+		}
+	}
+
+	// The workspace is the complete checkout either way: narrowing the
+	// context grant does not shrink what the agent's own tool calls reach.
+	for _, want := range []string{"db/schema.sql", "extra/only.txt", "api/handler.go"} {
+		if _, err := os.Stat(filepath.Join(ws.Dir, want)); err != nil {
+			t.Errorf("the workspace is missing %q though narrowing must not touch it: %v", want, err)
+		}
+	}
+}
+
+// TestTwoNamedSectionsMaterializeTheUnion is the regression
+// TestTheSectionReachesThePromptAndTheRef cannot catch: Composer.Resolve
+// merges Layer.Context.Repos by repo name with the LAST layer winning
+// (resolve.go:179-184), so emitting one layer per section would silently
+// keep only the last section's paths. The union has to be computed once, in
+// builder.go, and carried as a single layer.
+func TestTwoNamedSectionsMaterializeTheUnion(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	ctx := context.Background()
+	lp.Repo.Sections = []forge.Section{
+		{Name: "api", Paths: []string{"api", "cmd/api"}},
+		{Name: "db", Paths: []string{"db"}},
+	}
+	b := lp.Builder.(*Builder)
+	b.Repos = []forge.Repo{lp.Repo}
+
+	item := submitSectioned(t, ctx, s, router, "issue-ctx-two", "touch api and db", []string{"api", "db"})
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	if _, err := b.Build(ctx, ws, item.Task); err != nil {
+		t.Fatal(err)
+	}
+
+	root := filepath.Join(forge.ContextDir(ws.Dir), lp.Repo.Name)
+	for _, want := range []string{"api/handler.go", "cmd/api/main.go", "db/schema.sql", "README.md"} {
+		if _, err := os.Stat(filepath.Join(root, want)); err != nil {
+			t.Errorf("the union is missing %q: %v", want, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "extra")); err == nil {
+		t.Error("the materialized context carries \"extra\", which neither named section covers")
+	}
+}
+
+// TestAnUnnarrowedRunMaterializesTheWholeTree covers both ways a unit runs
+// unnarrowed: naming no section, and naming no item at all (a probe or an
+// experiment, per builder.go's own doc comment on the item lookup).
+func TestAnUnnarrowedRunMaterializesTheWholeTree(t *testing.T) {
+	cases := []struct {
+		name string
+		item bool
+	}{
+		{"unsectioned item", true},
+		{"no item at all", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, lp, router, _, _ := rig(t, "worker")
+			ctx := context.Background()
+			lp.Repo.Sections = []forge.Section{{Name: "api", Paths: []string{"api"}}}
+			b := lp.Builder.(*Builder)
+			b.Repos = []forge.Repo{lp.Repo}
+
+			run := "wi-ctx-whole-" + strings.ReplaceAll(c.name, " ", "-")
+			task := "touch nothing in particular"
+			if c.item {
+				item := submitSectioned(t, ctx, s, router, "issue-ctx-whole-"+c.name, task, nil)
+				run = item.ID
+			}
+			ws := checkoutWorkspace(t, ctx, s, lp, run)
+			if _, err := b.Build(ctx, ws, task); err != nil {
+				t.Fatal(err)
+			}
+
+			root := filepath.Join(forge.ContextDir(ws.Dir), lp.Repo.Name)
+			for _, want := range []string{"api/handler.go", "db/schema.sql", "extra/only.txt", "README.md"} {
+				if _, err := os.Stat(filepath.Join(root, want)); err != nil {
+					t.Errorf("an unnarrowed run is missing %q from the whole tree: %v", want, err)
+				}
+			}
+		})
+	}
+}
+
+// TestASectionedAgentrefDiffersFromAnUnsectionedOne confirms the context
+// grant's digest reaches the agentref through the machinery that already
+// exists for it (resolve.go's ref over r.Paths) — a sectioned unit and an
+// otherwise-identical unsectioned one are different agents on the record,
+// not just different prompts.
+func TestASectionedAgentrefDiffersFromAnUnsectionedOne(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	ctx := context.Background()
+	lp.Repo.Sections = []forge.Section{{Name: "api", Paths: []string{"api"}}}
+	b := lp.Builder.(*Builder)
+	b.Repos = []forge.Repo{lp.Repo}
+	task := "touch the api section"
+
+	sectioned := submitSectioned(t, ctx, s, router, "issue-ref-sectioned", task, []string{"api"})
+	sectionedWS := checkoutWorkspace(t, ctx, s, lp, sectioned.ID)
+	if _, err := b.Build(ctx, sectionedWS, task); err != nil {
+		t.Fatal(err)
+	}
+
+	unsectioned := submitSectioned(t, ctx, s, router, "issue-ref-unsectioned", task, nil)
+	unsectionedWS := checkoutWorkspace(t, ctx, s, lp, unsectioned.ID)
+	if _, err := b.Build(ctx, unsectionedWS, task); err != nil {
+		t.Fatal(err)
+	}
+
+	agentref := func(item string) string {
+		var ref string
+		for r, err := range s.Log().Since(ctx, btn, "workitem/"+item, 1) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if r.Kind == "agent-run" {
+				var rec struct {
+					AgentRef string `json:"agentref"`
+				}
+				if err := json.Unmarshal(r.Body, &rec); err != nil {
+					t.Fatal(err)
+				}
+				ref = rec.AgentRef
+			}
+		}
+		return ref
+	}
+
+	sectionedRef, unsectionedRef := agentref(sectioned.ID), agentref(unsectioned.ID)
+	if sectionedRef == "" || unsectionedRef == "" {
+		t.Fatalf("missing agentref: sectioned=%q unsectioned=%q", sectionedRef, unsectionedRef)
+	}
+	if sectionedRef == unsectionedRef {
+		t.Fatalf("a sectioned run and an unsectioned run of the same task shared an agentref: %q", sectionedRef)
 	}
 }

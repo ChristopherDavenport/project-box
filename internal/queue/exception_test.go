@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -103,6 +104,90 @@ func TestRetryReturnsParkedWorkToTheQueue(t *testing.T) {
 	}
 	if _, _, err := qu.Claim(ctx, reloaded); err != nil {
 		t.Fatalf("a retried item could not be claimed: %v", err)
+	}
+}
+
+// parkKeeping parks an item the way a refused gate does now: with a resume
+// point set on it first and ParkKeeping used instead of Park, so the park
+// itself does not drop it. See [Queue.ParkKeeping].
+func parkKeeping(t *testing.T, qu *Queue, id, reason string) WorkItem {
+	t.Helper()
+	w := submit(t, qu, id)
+	w, lease, err := qu.Claim(context.Background(), w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.KeepCandidate("sha-built", "sha-base", []string{"build-and-test"})
+	w, err = qu.ParkKeeping(context.Background(), w, lease, SeverityMedium, reason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// TestRetryKeepsTheResumePointUnlessToldToRebuild. A gate-refusal park keeps
+// its resume point precisely so a retry can ask the gate again instead of
+// buying the same commit from an agent a second time — a plain retry note
+// must not throw that away, or ParkKeeping's whole reason for existing goes
+// with it.
+func TestRetryKeepsTheResumePointUnlessToldToRebuild(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	w := parkKeeping(t, qu, "wi-1", "gate refused")
+	if w.Built == "" {
+		t.Fatal("setup: ParkKeeping dropped the resume point")
+	}
+
+	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "let's ask the gate again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Built != "sha-built" || got.BuiltBase != "sha-base" || len(got.PassedGates) != 1 {
+		t.Fatalf("a plain retry dropped the resume point: %+v", got)
+	}
+
+	reloaded, err := qu.Load(ctx, tn, "wi-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Built != "sha-built" || reloaded.BuiltBase != "sha-base" {
+		t.Fatalf("the kept resume point did not survive the fold: %+v", reloaded)
+	}
+}
+
+// TestRetryWithRebuildInTheNoteDropsTheResumePoint. The one case a retry
+// still builds afresh: the operator's note itself says the commit, not just
+// the gate, is the problem. Matched case-insensitively, per the issue's own
+// wording.
+func TestRetryWithRebuildInTheNoteDropsTheResumePoint(t *testing.T) {
+	notes := []string{"rebuild from scratch", "Please REBUILD it", "the diff was bad — ReBuild"}
+	for i, note := range notes {
+		qu, ctx := q(t), context.Background()
+		id := fmt.Sprintf("wi-rebuild-%d", i)
+		parkKeeping(t, qu, id, "gate refused")
+
+		got, err := qu.Retry(ctx, tn, id, "chris", note)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Built != "" || got.BuiltBase != "" || got.PassedGates != nil {
+			t.Fatalf("note %q should have dropped the resume point: %+v", note, got)
+		}
+	}
+}
+
+// TestResolveAlwaysDropsTheResumePoint. Closing an exception is final: there
+// is no retry left to hand a kept commit to, so unlike Retry, Resolve drops
+// it regardless of what the note says.
+func TestResolveAlwaysDropsTheResumePoint(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	parkKeeping(t, qu, "wi-1", "gate refused")
+
+	got, err := qu.Resolve(ctx, tn, "wi-1", "chris", "already implemented, nothing to rebuild")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Built != "" || got.BuiltBase != "" || got.PassedGates != nil {
+		t.Fatalf("resolve kept a resume point: %+v", got)
 	}
 }
 

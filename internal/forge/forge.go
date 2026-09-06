@@ -139,6 +139,14 @@ type ChangeSet struct {
 	DrivingIssue string
 	Members      []Member
 	Created      time.Time
+	// Verdicts is the gate decision that cleared this ChangeSet to land,
+	// carried from the loop's gate resolution into Land so a Lander that
+	// talks to a code host (git.PRLander) can publish it there — a reader on
+	// GitHub sees a PR with no checks otherwise. Empty for the optimistic
+	// lane, which lands before its gates run and so has no verdict yet at
+	// land time; a Lander must treat empty as "no verdict to publish," never
+	// as a passing one.
+	Verdicts []Verdict
 }
 
 // Member is one repository's participation in a [ChangeSet].
@@ -154,4 +162,9 @@ type Member struct {
 	// Lease is the claim held over Branch. A member without a live lease
 	// cannot land.
 	Lease Lease
+	// Summary is the one-line summary of the work that produced Head — the
+	// same field queue.WorkItem carries (see internal/queue) — carried
+	// through so a lander can title work without truncating the full task
+	// paragraph. Empty when the work that produced Head had none.
+	Summary string
 }

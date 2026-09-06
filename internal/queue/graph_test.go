@@ -155,3 +155,153 @@ func TestFailedRootParksTheLeaves(t *testing.T) {
 	}
 	_ = late
 }
+
+// TestDoneReleasesCascadeParkedDependents is issue #56: a dependent parked by
+// cascade stayed parked forever, even after the dependency it named as cause
+// later landed. A diamond — root parking both b and c — should see both
+// released back to pending the moment root reaches Done, each carrying a
+// "retried" record naming root as the reason.
+func TestDoneReleasesCascadeParkedDependents(t *testing.T) {
+	qu := q(t)
+	ctx := context.Background()
+	root := submit(t, qu, "root")
+	b := submit(t, qu, "b", "root")
+	c := submit(t, qu, "c", "root")
+
+	w, lease, err := qu.Claim(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "gate failed hard"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := qu.Claim(ctx, b); !errors.Is(err, ErrDependencyFailed) {
+		t.Fatalf("b should cascade-park: %v", err)
+	}
+	if _, _, err := qu.Claim(ctx, c); !errors.Is(err, ErrDependencyFailed) {
+		t.Fatalf("c should cascade-park: %v", err)
+	}
+	for _, id := range []string{"b", "c"} {
+		got, err := qu.Load(ctx, tn, id)
+		if err != nil || got.State != StateParked || got.ParkedBy != "root" {
+			t.Fatalf("%s: %+v %v", id, got, err)
+		}
+	}
+
+	// root is retried and lands this time.
+	w, err = qu.Retry(ctx, tn, "root", "operator", "flaky gate, retrying")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, lease, err = qu.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Done(ctx, w, lease, forge.Commit("sha-root")); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, id := range []string{"b", "c"} {
+		got, err := qu.Load(ctx, tn, id)
+		if err != nil || got.State != StatePending {
+			t.Fatalf("%s should be released to pending: %+v %v", id, got, err)
+		}
+		if got.Note != "dependency root landed" {
+			t.Fatalf("%s note: %q", id, got.Note)
+		}
+		if got.ParkedBy != "" {
+			t.Fatalf("%s ParkedBy should be cleared on release: %q", id, got.ParkedBy)
+		}
+	}
+
+	// The exception index, folded by current state the way
+	// internal/control.Room.Exceptions does, no longer surfaces b or c.
+	for rec, err := range qu.Store.Log().Since(ctx, tn, "index/exceptions", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Subject != "b" && rec.Subject != "c" {
+			continue
+		}
+		got, err := qu.Load(ctx, tn, rec.Subject)
+		if err != nil || got.State == StateParked {
+			t.Fatalf("%s still reads as an open exception after release: %+v %v", rec.Subject, got, err)
+		}
+	}
+}
+
+// TestDoneLeavesSelfParkedItemAlone: an item parked for its own gate failure
+// (not a cascade) must not be disturbed when an unrelated item reaches Done.
+func TestDoneLeavesSelfParkedItemAlone(t *testing.T) {
+	qu := q(t)
+	ctx := context.Background()
+	other := submit(t, qu, "other")
+	leaf := submit(t, qu, "leaf")
+
+	w, lease, err := qu.Claim(ctx, leaf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "its own gate failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	w, lease, err = qu.Claim(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Done(ctx, w, lease, forge.Commit("sha-other")); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := qu.Load(ctx, tn, "leaf")
+	if err != nil || got.State != StateParked || got.Note != "its own gate failed" {
+		t.Fatalf("leaf parked for its own reasons should be untouched: %+v %v", got, err)
+	}
+}
+
+// TestParkAfterReleaseDoesNotRecascade: the release only fires on Done. If a
+// retried root parks again (for a different reason) instead of landing, an
+// already-released dependent is left exactly as it was — demonstrating the
+// fix does not fire on anything but Done.
+func TestParkAfterReleaseDoesNotRecascade(t *testing.T) {
+	qu := q(t)
+	ctx := context.Background()
+	root := submit(t, qu, "root")
+	b := submit(t, qu, "b", "root")
+
+	w, lease, err := qu.Claim(ctx, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "first failure"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := qu.Claim(ctx, b); !errors.Is(err, ErrDependencyFailed) {
+		t.Fatalf("b should cascade-park: %v", err)
+	}
+	before, err := qu.Load(ctx, tn, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w, err = qu.Retry(ctx, tn, "root", "operator", "retry")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, lease, err = qu.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Park(ctx, w, lease, SeverityHigh, "second failure, different cause"); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := qu.Load(ctx, tn, "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.State != before.State || after.Note != before.Note || after.ParkedBy != before.ParkedBy {
+		t.Fatalf("b should be untouched by root parking again (not Done): before %+v, after %+v", before, after)
+	}
+}

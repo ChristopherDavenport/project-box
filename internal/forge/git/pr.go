@@ -59,20 +59,23 @@ func NewPRLander(inner *Lander, token TokenSource) *PRLander {
 var _ forge.Lander = (*PRLander)(nil)
 
 // Land opens or reuses one pull request per member — head the disposable
-// run branch `box/<run>`, base the member's branch, title the ChangeSet's
-// Intent, and a body naming DrivingIssue with "Fixes #<n>" when the change
-// originated from one — then delegates to the wrapped Lander for the actual
-// landing. A retried tick reuses the still-open PR for the same head branch
-// rather than opening a duplicate.
+// run branch `box/<run>`, base the member's branch, title the first member's
+// Summary (falling back to the landed commit's subject line, and truncated
+// to fit GitHub's 256-character limit — see [truncateTitle]), and a body
+// naming DrivingIssue with "Fixes #<n>" when the change originated from one,
+// plus the task's own first paragraph — then delegates to the wrapped Lander
+// for the actual landing. A retried tick reuses the still-open PR for the
+// same head branch rather than opening a duplicate.
 func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing, error) {
 	if len(cs.Members) == 0 {
 		return forge.Landing{}, errors.New("git: empty ChangeSet")
 	}
 	branch := "box/" + cs.Run
-	body := ""
-	if cs.DrivingIssue != "" {
-		body = "Fixes #" + cs.DrivingIssue
+	title, err := p.prTitle(ctx, cs)
+	if err != nil {
+		return forge.Landing{}, fmt.Errorf("git: pr: title: %w", err)
 	}
+	body := p.prBody(cs)
 
 	prURLs := make(map[string]string, len(cs.Members))
 	for _, mem := range cs.Members {
@@ -88,14 +91,35 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 		if err != nil {
 			return forge.Landing{}, fmt.Errorf("git: pr: token: %w", err)
 		}
-		prURL, err := p.ensurePR(ctx, tok, owner, name, branch, mem.Branch, cs.Intent, body)
+		prURL, err := p.ensurePR(ctx, tok, owner, name, branch, mem.Branch, title, body)
 		if err != nil {
 			return forge.Landing{}, fmt.Errorf("git: pr: open pr for %s: %w", mem.Repo, err)
 		}
 		prURLs[mem.Repo] = prURL
+
+		// The commit and PR now exist on GitHub, which the Checks API
+		// requires. cs.Verdicts is empty in the optimistic lane, which lands
+		// before its gates run — post nothing there rather than fabricate a
+		// decision nobody made.
+		if len(cs.Verdicts) > 0 {
+			decision := forge.Resolve(cs.Verdicts)
+			if err := p.postCheck(ctx, tok, owner, name, string(mem.Head), "box/check",
+				checkConclusion(decision), fmt.Sprintf("gate: %s", decision),
+				checkSummary(cs.Verdicts), verdictText(cs.Verdicts)); err != nil {
+				return forge.Landing{}, fmt.Errorf("git: pr: check for %s: %w", mem.Repo, err)
+			}
+		}
 	}
 
 	landing, err := p.inner.Land(ctx, cs)
+	if err != nil {
+		// A force-with-lease rejection (git.go's "push refused" error) would
+		// otherwise show up nowhere the PR's reader would see it, and the
+		// last box/check would still read green. Best effort: a failure to
+		// report the failure must never mask the failure itself, so its own
+		// error is swallowed and the wrapped land error returns unchanged.
+		p.postLandFailure(ctx, cs, landing, err)
+	}
 	for i := range landing.Landed {
 		pl := &landing.Landed[i]
 		prURL, ok := prURLs[pl.Repo]
@@ -107,6 +131,68 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 			fmt.Sprintf(`{"pr_url":%q,"issue":%q}`, prURL, cs.DrivingIssue))
 	}
 	return landing, err
+}
+
+// prTitle computes the single title used for every per-member PR a ChangeSet
+// opens (see [PRLander.Land]) — titling every PR from cs.Intent, the
+// planner's whole task paragraph, is what produces GitHub's 422 "title is
+// too long" this exists to avoid. It prefers the first member's Summary —
+// the one-line room summary carried onto [forge.Member] — and falls back to
+// the landed commit's own subject line when that member had none. cs.Intent
+// itself is never truncated; only the copy used as a title is.
+func (p *PRLander) prTitle(ctx context.Context, cs forge.ChangeSet) (string, error) {
+	mem := cs.Members[0]
+	if mem.Summary != "" {
+		return truncateTitle(mem.Summary, 256), nil
+	}
+	ws := p.inner.m.workDir(cs.Run, mem.Repo)
+	out, err := run(ctx, ws, "log", "-1", "--format=%s", string(mem.Head))
+	if err != nil {
+		return "", fmt.Errorf("commit subject for %s: %w", mem.Head, err)
+	}
+	return truncateTitle(strings.TrimSpace(out), 256), nil
+}
+
+// truncateTitle cuts s to at most max characters, preferring to cut at the
+// last space at or before the limit so a title never ends mid-word; when no
+// space falls within the limit it hard-cuts at max rather than leave the
+// title over length.
+func truncateTitle(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := s[:max]
+	if i := strings.LastIndexByte(cut, ' '); i >= 0 {
+		return cut[:i]
+	}
+	return cut
+}
+
+// prBody composes the PR body: "Fixes #<n>" when the change originated from
+// a GitHub issue (unaffected by this fix — a PR title and body are labels on
+// the PR, never on the commit, and approvals bind to the commit per
+// docs/PLAN.md §6, not the pull request), followed by the task's first
+// paragraph (cs.Intent split on the first blank line), and — for a
+// ChangeSet with more than one member, which production loop.go never
+// builds today — a list of the other members' repos so the PR still says
+// what else the changeset touches.
+func (p *PRLander) prBody(cs forge.ChangeSet) string {
+	var b strings.Builder
+	if cs.DrivingIssue != "" {
+		b.WriteString("Fixes #" + cs.DrivingIssue + "\n\n")
+	}
+	para := cs.Intent
+	if i := strings.Index(cs.Intent, "\n\n"); i >= 0 {
+		para = cs.Intent[:i]
+	}
+	b.WriteString(strings.TrimSpace(para))
+	if len(cs.Members) > 1 {
+		b.WriteString("\n\nAlso touches:\n")
+		for _, m := range cs.Members[1:] {
+			b.WriteString("- " + m.Repo + "\n")
+		}
+	}
+	return b.String()
 }
 
 // pushRunBranch collects the member's head from its workspace, exactly the
@@ -201,6 +287,121 @@ func (p *PRLander) createPR(ctx context.Context, token, owner, repo, head, base,
 		return "", fmt.Errorf("create pr: %w", err)
 	}
 	return out.HTMLURL, nil
+}
+
+// postLandFailure reports the member that stopped the landing as a failing
+// box/land check on its own head sha, naming landErr as the reason. It looks
+// up that member itself rather than take one as a parameter because the
+// caller only learns which member failed from landing.Failed.
+func (p *PRLander) postLandFailure(ctx context.Context, cs forge.ChangeSet, landing forge.Landing, landErr error) {
+	var mem forge.Member
+	found := false
+	for _, m := range cs.Members {
+		if m.Repo == landing.Failed {
+			mem = m
+			found = true
+			break
+		}
+	}
+	if !found {
+		return
+	}
+	repo, ok := p.inner.m.Repo(mem.Repo)
+	if !ok {
+		return
+	}
+	owner, name, err := parseGitHubRemote(repo.Remote)
+	if err != nil {
+		return
+	}
+	tok, err := p.token(ctx)
+	if err != nil {
+		return
+	}
+	_ = p.postCheck(ctx, tok, owner, name, string(mem.Head), "box/land",
+		"failure", "land failed", landErr.Error(), "")
+}
+
+// checkConclusion maps a resolved gate decision onto the GitHub Checks API's
+// vocabulary. cs.Verdicts only reaches this file once loop.go has already
+// resolved it to DecisionPass, so this branch is exercised by direct callers
+// of PRLander (tests, and any future caller) rather than the loop today.
+func checkConclusion(d forge.Decision) string {
+	if d == forge.DecisionPass {
+		return "success"
+	}
+	return "failure"
+}
+
+// checkSummary mirrors internal/loop's reasons(vs []forge.Verdict) string —
+// same semicolon-joined, first-line-only formatting — rather than reinventing
+// the joining logic. It differs in one way: that function only names
+// failing gates, because it is only ever called on a ChangeSet that has
+// already failed. A box/check summary has to describe a *passing* verdict
+// set just as clearly, so this reports every verdict, not only the failures.
+func checkSummary(vs []forge.Verdict) string {
+	out := ""
+	for _, v := range vs {
+		if out != "" {
+			out += "; "
+		}
+		line := v.Reason
+		if i := strings.IndexByte(line, '\n'); i >= 0 {
+			line = line[:i]
+		}
+		out += fmt.Sprintf("%s: %s (%s)", v.Gate, v.Decision, line)
+	}
+	if out == "" {
+		out = "no gate examined the change"
+	}
+	return out
+}
+
+// verdictText names the evidence-chain record backing each verdict — not
+// every [forge.EvidenceRef] a gate attached (a gate.Command's own transcript
+// reference is a local filesystem path, meaningless to a reader on GitHub) —
+// so an auditor can walk from the check straight back to the chain that
+// produced it.
+func verdictText(vs []forge.Verdict) string {
+	var ids []string
+	for _, v := range vs {
+		for _, e := range v.Evidence {
+			if e.Kind == forge.EvidenceKindRecord && e.URI != "" {
+				ids = append(ids, e.URI)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	return "evidence: " + strings.Join(ids, ", ")
+}
+
+type checkRunInput struct {
+	Name       string         `json:"name"`
+	HeadSHA    string         `json:"head_sha"`
+	Status     string         `json:"status"`
+	Conclusion string         `json:"conclusion"`
+	Output     checkRunOutput `json:"output"`
+}
+
+type checkRunOutput struct {
+	Title   string `json:"title"`
+	Summary string `json:"summary"`
+	Text    string `json:"text,omitempty"`
+}
+
+// postCheck reports one GitHub check run — box/check for the gate verdict,
+// box/land for a fencing rejection — on the commit sha the run is about,
+// reusing [PRLander.call] so it is exercised against the same
+// httptest.Server as PR creation.
+func (p *PRLander) postCheck(ctx context.Context, token, owner, repo, sha, name, conclusion, title, summary, text string) error {
+	in := checkRunInput{
+		Name: name, HeadSHA: sha, Status: "completed", Conclusion: conclusion,
+		Output: checkRunOutput{Title: title, Summary: summary, Text: text},
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/check-runs", p.apiBase, owner, repo)
+	return p.call(ctx, http.MethodPost, endpoint, token, in, nil)
 }
 
 // call issues one GitHub REST API request. in nil omits the body; out nil
