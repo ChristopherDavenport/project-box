@@ -292,7 +292,7 @@ func TestPRTitledFromMemberSummary(t *testing.T) {
 
 	cs := forge.ChangeSet{
 		ID: "cs-1", Tenant: tn, Run: "run-1",
-		Intent: "a much longer task paragraph the planner wrote for the builder, never meant to title a PR",
+		Intent:  "a much longer task paragraph the planner wrote for the builder, never meant to title a PR",
 		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease, Summary: "fix the thing"}},
 	}
 	if _, err := x.pr.Land(ctx, cs); err != nil {
@@ -328,7 +328,7 @@ func TestPRTitledFromCommitSubjectWhenSummaryEmpty(t *testing.T) {
 
 	cs := forge.ChangeSet{
 		ID: "cs-1", Tenant: tn, Run: "run-1",
-		Intent: "the planner's whole task paragraph, still never a title",
+		Intent:  "the planner's whole task paragraph, still never a title",
 		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
 	}
 	if _, err := x.pr.Land(ctx, cs); err != nil {
@@ -379,7 +379,7 @@ func TestPRTitleTruncatedAtWordBoundary(t *testing.T) {
 
 	cs := forge.ChangeSet{
 		ID: "cs-1", Tenant: tn, Run: "run-1",
-		Intent: "the planner's whole task paragraph, never a title, regardless of Summary's length",
+		Intent:  "the planner's whole task paragraph, never a title, regardless of Summary's length",
 		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease, Summary: summary}},
 	}
 	if _, err := x.pr.Land(ctx, cs); err != nil {
