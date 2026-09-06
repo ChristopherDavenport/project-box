@@ -1080,6 +1080,251 @@ func TestMovedHeadRetiresTheCarriedVerdicts(t *testing.T) {
 	}
 }
 
+// failNTimesGate refuses its first failFor evaluations, then passes every
+// one after — the gate itself changing its answer between retries, the way a
+// flaky check or a fix that landed on the SAME commit's next look would.
+type failNTimesGate struct {
+	name    string
+	n       *int
+	failFor int
+}
+
+func (g failNTimesGate) Name() string { return g.name }
+
+func (g failNTimesGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	*g.n++
+	if *g.n <= g.failFor {
+		return forge.Verdict{Gate: g.name, Decision: forge.DecisionFail, Reason: fmt.Sprintf("still red on call %d", *g.n)}, nil
+	}
+	return forge.Verdict{Gate: g.name, Decision: forge.DecisionPass, Reason: "green now"}, nil
+}
+
+// revisingBuilder writes a new file every call, unlike scriptedBuilder's
+// determinism-on-the-task-text: it is the fixture for the case where the
+// builder actually revises a tree that already has a prior attempt's commit
+// on it, so a second Build on the SAME workspace produces a genuinely new
+// commit instead of "nothing to commit".
+type revisingBuilder struct{ n int }
+
+func (b *revisingBuilder) Build(_ context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	b.n++
+	name := fmt.Sprintf("attempt-%d.txt", b.n)
+	if err := os.WriteFile(filepath.Join(ws.Dir, name), []byte(task+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "commit", "-m", fmt.Sprintf("%s (attempt %d)", task, b.n)); err != nil {
+		return "", err
+	}
+	out, err := sh(ws.Dir, "git", "rev-parse", "HEAD")
+	return forge.Commit(strings.TrimSpace(out)), err
+}
+
+// TestRetriedGateNowPassingLandsWithoutRebuilding is issue #57's headline
+// case: a unit parked at the gate, retried, and the gate now passes on the
+// SAME commit — it lands without the builder running a second time. Before
+// this, Park always dropped the resume point, so this retry bought a brand
+// new agent run even though re-running the gate on the same commit was all
+// it took.
+func TestRetriedGateNowPassingLandsWithoutRebuilding(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	calls := 0
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{failNTimesGate{name: "build-and-test", n: &calls, failFor: 1}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-57a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-regate-pass", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("first gate failure should park, got %s (%s)", item.State, item.Note)
+	}
+	if item.Built == "" {
+		t.Fatal("a gate-refusal park should keep its resume point")
+	}
+	if builder.n != 1 {
+		t.Fatalf("builder ran %d times before the first park", builder.n)
+	}
+
+	retried, err := q.Retry(ctx, tn, "wi-regate-pass", "chris", "gate was probably flaky; try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Built == "" {
+		t.Fatal("a plain retry should keep the resume point a gate-refusal park set")
+	}
+
+	item, err = e.loop.Run(ctx, retried)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("gate now passing should land, got %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 1 {
+		t.Fatalf("the builder ran again on retry even though the gate alone was asked again: %d builds", builder.n)
+	}
+	if calls != 2 {
+		t.Fatalf("gate should have been asked twice, fail then pass: %d", calls)
+	}
+
+	counts := map[string]int{}
+	var kinds []string
+	for r, err := range e.store.Log().BySubject(ctx, tn, item.Head) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		counts[r.Kind]++
+		kinds = append(kinds, r.Kind)
+	}
+	if counts["built"] != 1 {
+		t.Fatalf("exactly one commit should have been built on this chain: kinds=%v", kinds)
+	}
+	if counts["gate"] != 2 {
+		t.Fatalf("expected two gate verdicts on this commit, fail then pass: kinds=%v", kinds)
+	}
+	if len(kinds) == 0 || kinds[len(kinds)-1] != "done" {
+		t.Fatalf("the chain should end in done on a fresh gate record, not a second build: kinds=%v", kinds)
+	}
+}
+
+// TestRetriedGateStillFailingRebuilds is the other half: a unit parked at the
+// gate, retried, and the gate fails AGAIN. The one free recheck a
+// gate-refusal park buys is spent, so the builder runs a second time,
+// producing a new commit, and the item settles on THAT commit's verdict —
+// parking again, with its own resume point, if it still fails.
+func TestRetriedGateStillFailingRebuilds(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	calls := 0
+	builder := &revisingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{failNTimesGate{name: "build-and-test", n: &calls, failFor: 3}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-57b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-regate-fail", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("first gate failure should park, got %s (%s)", item.State, item.Note)
+	}
+	firstHead := item.Built
+	if firstHead == "" {
+		t.Fatal("a gate-refusal park should keep its resume point")
+	}
+	if builder.n != 1 {
+		t.Fatalf("builder ran %d times before the first park", builder.n)
+	}
+
+	retried, err := q.Retry(ctx, tn, "wi-regate-fail", "chris", "try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	item, err = e.loop.Run(ctx, retried)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if builder.n != 2 {
+		t.Fatalf("a second gate failure on the resumed commit should have run the builder: %d builds", builder.n)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("still-failing gate should park again, got %s (%s)", item.State, item.Note)
+	}
+	if item.Built == "" {
+		t.Fatal("the second park should keep a resume point too")
+	}
+	if item.Built == firstHead {
+		t.Fatalf("the kept resume point should be the FRESH commit, not the one already judged: %s", item.Built)
+	}
+	if calls != 3 {
+		t.Fatalf("gate should have been asked three times: once resumed, once on retry, once on the rebuild: %d", calls)
+	}
+}
+
+// TestRetryWithNoWorkspaceLeftGoesStraightToTheBuilder is the regression
+// guard: Built now survives a gate-refusal park far more often than before,
+// so a retry whose workspace is actually gone — a reclaimed disk, a
+// different runner — must still fall back to a fresh build exactly as it did
+// before this change, rather than erroring out over a tree that is not there.
+func TestRetryWithNoWorkspaceLeftGoesStraightToTheBuilder(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	calls := 0
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{failNTimesGate{name: "build-and-test", n: &calls, failFor: 1}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-57c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-regate-nows", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked || item.Built == "" {
+		t.Fatalf("setup: expected a parked item with a resume point, got %+v", item)
+	}
+	if builder.n != 1 {
+		t.Fatalf("builder ran %d times", builder.n)
+	}
+
+	retried, err := q.Retry(ctx, tn, "wi-regate-nows", "chris", "try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Built == "" {
+		t.Fatal("retry should have kept the resume point")
+	}
+
+	// A fresh runner with no tree to adopt — a reclaimed disk, or a different
+	// machine — the case Adopt already reports as ok=false.
+	m2, err := git.NewMirror(t.TempDir(), tn, e.store.Leaser("runner-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.loop.Mirror = m2
+
+	item, err = e.loop.Run(ctx, retried)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if builder.n != 2 {
+		t.Fatalf("a lost workspace should go straight back to the builder: %d builds", builder.n)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("gate should pass on the fresh build, got %s (%s)", item.State, item.Note)
+	}
+}
+
 // chainLen counts the records in an item's evidence scope.
 func chainLen(t *testing.T, e *env, id string) int {
 	t.Helper()

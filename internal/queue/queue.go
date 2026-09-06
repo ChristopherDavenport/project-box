@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
@@ -454,8 +455,28 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 // forgotten a field cannot forget an argument, and the room's routing is only
 // as good as the loudest thing it is told.
 func (q *Queue) Park(ctx context.Context, w WorkItem, lease forge.Lease, sev Severity, reason string) (WorkItem, error) {
+	return q.park(ctx, w, lease, sev, reason, true)
+}
+
+// ParkKeeping parks like [Queue.Park] but leaves whatever resume point the
+// caller already set on w alone, instead of dropping it.
+//
+// A gate that refused a commit is not the same finality as a build failure or
+// a denied authorization: the commit itself is not the thing that was judged
+// wrong until a second attempt says so too, and re-asking the gate on retry
+// is cheaper than buying the commit again from an agent. Every other park
+// still goes through Park and still drops the resume point exactly as
+// before — this is the one exception, used only where the caller has just
+// set the resume point itself (see [WorkItem.KeepCandidate]).
+func (q *Queue) ParkKeeping(ctx context.Context, w WorkItem, lease forge.Lease, sev Severity, reason string) (WorkItem, error) {
+	return q.park(ctx, w, lease, sev, reason, false)
+}
+
+func (q *Queue) park(ctx context.Context, w WorkItem, lease forge.Lease, sev Severity, reason string, dropResume bool) (WorkItem, error) {
 	w.State, w.Note, w.Severity = StateParked, reason, sev.OrDefault()
-	w.dropResume()
+	if dropResume {
+		w.dropResume()
+	}
 	err := q.record(ctx, w, "parked", w.ID, reason)
 	if err == nil {
 		err = q.index(ctx, w.Tenant, "exceptions", w.ID, reason)
@@ -639,9 +660,13 @@ func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id, actor, why string)
 // The counterpart to Resolve, and the reason parking could not simply be
 // terminal: an item parks for transient reasons too — a flaky gate, a
 // timeout, an agent that ran out of room — and without this the factory could
-// never recover work it had already been asked to do. The resume point is
-// already gone (Park drops it), so a retry builds afresh rather than
-// re-offering a commit whose verdict is on the record.
+// never recover work it had already been asked to do. A gate-refusal park
+// keeps its resume point (see [Queue.ParkKeeping]), and a plain retry keeps
+// it too: re-asking the gate on the same commit is the one free recheck a
+// refused gate bought. A note that says to rebuild — matched case-
+// insensitively for "rebuild" — drops it instead, exactly as a retry always
+// used to, for the operator who has already judged the commit itself to be
+// the problem.
 func (q *Queue) Retry(ctx context.Context, t tenant.ID, id, actor, note string) (WorkItem, error) {
 	return q.reopen(ctx, t, id, actor, StatePending, "retried", note)
 }
@@ -658,7 +683,12 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 		return w, fmt.Errorf("queue: item %s is %s, not parked — only an exception can be %s", id, w.State, kind)
 	}
 	w.State, w.Note = to, note
-	w.dropResume()
+	// Resolve is final and always drops it — closing an exception says there
+	// is nothing left to build. Retry keeps it unless the note itself says
+	// the commit is the problem, not the gate.
+	if kind != "retried" || strings.Contains(strings.ToLower(note), "rebuild") {
+		w.dropResume()
+	}
 	// Off the exception queue is off it. Leaving the severity behind would
 	// have a retried item come back already shouting, and would restart a
 	// later parking's clock with the previous parking's volume.
