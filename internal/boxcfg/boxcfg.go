@@ -204,6 +204,67 @@ func (a *Argv) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
+// Route is a repo's ingress route: a scalar name keeps today's whole
+// meaning — polling off, every delivery by hand — or a mapping names a poll
+// interval alongside the label a polled issue must carry and the working
+// contract appended to its task text:
+//
+//	route: issues
+//	route: {name: issues, poll: 5m, label: box, contract: hack/dogfood/contract.md}
+//
+// See [Route.UnmarshalYAML].
+type Route struct {
+	Name string `yaml:"name"`
+	// Poll is how often this route's forge is checked for new issues
+	// carrying Label; empty means polling is off, today's whole behavior.
+	// Parsed the way Config's Every and Drain are — see [Route.PollDuration].
+	Poll string `yaml:"poll"`
+	// Label is the forge label a polling route only opens issues carrying.
+	// Required whenever Poll is set: the label is a person's decision about
+	// what the box takes, and an absent label is not "every open issue" —
+	// unknown never reads as zero.
+	Label string `yaml:"label"`
+	// Contract is the working contract appended to a polled issue's task
+	// text after a "---" separator, in the shape hack/dogfood/submit.py's
+	// CONTRACT constant carried by hand. It is text, or a path to a file
+	// holding it, read once at Load relative to the process's working
+	// directory — see [loadContract].
+	Contract string `yaml:"contract"`
+}
+
+// UnmarshalYAML accepts a scalar (a bare route name, polling off — today's
+// entire meaning) or a mapping naming poll/label/contract alongside it,
+// modeled on [Argv.UnmarshalYAML]'s scalar-or-sequence precedent.
+func (r *Route) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		*r = Route{Name: s}
+		return nil
+	}
+	type plain Route
+	var p plain
+	if err := n.Decode(&p); err != nil {
+		return err
+	}
+	*r = Route(p)
+	return nil
+}
+
+// PollDuration returns the parsed poll interval; zero means polling is off.
+// The error half is checked at Load (validate); by the time anything calls
+// this the value is known good, the same contract Config's EveryDuration and
+// DrainDuration keep.
+func (r Route) PollDuration() time.Duration {
+	if r.Poll == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(r.Poll)
+	return d
+}
+
 // Box is one system: many repos, one optional agent identity.
 type Box struct {
 	Name string `yaml:"name"`
@@ -520,9 +581,9 @@ type Repo struct {
 	Branch string `yaml:"branch"`
 	Role   string `yaml:"role"`
 	Lane   string `yaml:"lane"`
-	// Route is the ingress route name that targets this repo; defaults to
-	// "<box>-<name>".
-	Route string `yaml:"route"`
+	// Route is the ingress route that targets this repo; defaults to
+	// "<box>-<name>" with polling off. See [Route].
+	Route Route `yaml:"route"`
 	Build string `yaml:"build"`
 	Check string `yaml:"check"`
 	// Land selects how a build reaches the base branch. "" (the default)
@@ -741,13 +802,33 @@ func (c *Config) validate() error {
 			if err := forge.ValidateLane(forge.Lane(r.Lane), forge.Role(r.Role)); err != nil {
 				return fmt.Errorf("boxcfg: box %s repo %s: %w", bx.Name, r.Name, err)
 			}
-			if r.Route == "" {
-				r.Route = bx.Name + "-" + r.Name
+			if r.Route.Name == "" {
+				r.Route.Name = bx.Name + "-" + r.Name
 			}
-			if prev, dup := seenRoutes[r.Route]; dup {
-				return fmt.Errorf("boxcfg: route %q defined by both %s and %s/%s — route names are the API's vocabulary and must be unique", r.Route, prev, bx.Name, r.Name)
+			if prev, dup := seenRoutes[r.Route.Name]; dup {
+				return fmt.Errorf("boxcfg: route %q defined by both %s and %s/%s — route names are the API's vocabulary and must be unique", r.Route.Name, prev, bx.Name, r.Name)
 			}
-			seenRoutes[r.Route] = bx.Name + "/" + r.Name
+			seenRoutes[r.Route.Name] = bx.Name + "/" + r.Name
+			if r.Route.Poll != "" {
+				if _, err := time.ParseDuration(r.Route.Poll); err != nil {
+					return fmt.Errorf("boxcfg: box %s repo %s: route.poll: %w", bx.Name, r.Name, err)
+				}
+			}
+			if r.Route.PollDuration() > 0 {
+				if r.Route.Label == "" {
+					return fmt.Errorf("boxcfg: box %s repo %s: route polls with no label — the label is a person's decision about what the box takes, and an absent label is not \"every open issue\"", bx.Name, r.Name)
+				}
+				if !isGitHubRemote(r.Remote) {
+					return fmt.Errorf("boxcfg: box %s repo %s: route polls remote %q, which is not a github.com remote — polling speaks only that forge", bx.Name, r.Name, r.Remote)
+				}
+			}
+			if r.Route.Contract != "" {
+				resolved, err := loadContract(r.Route.Contract)
+				if err != nil {
+					return fmt.Errorf("boxcfg: box %s repo %s: route.contract: %w", bx.Name, r.Name, err)
+				}
+				r.Route.Contract = resolved
+			}
 			if len(bx.Agent) == 0 && r.Build == "" {
 				return fmt.Errorf("boxcfg: box %s repo %s: no agent and no build command — nothing would ever do the work", bx.Name, r.Name)
 			}
@@ -793,6 +874,35 @@ func (c *Config) validate() error {
 		}
 	}
 	return nil
+}
+
+// isGitHubRemote reports whether remote names a github.com repository. A
+// plain prefix check, not a parse: this package has no mirror to resolve a
+// remote against, and a polling route only needs to know which forge to
+// ask — internal/daemon's reader does the actual owner/repo split.
+func isGitHubRemote(remote string) bool {
+	return strings.HasPrefix(remote, "https://github.com/") ||
+		strings.HasPrefix(remote, "http://github.com/") ||
+		strings.HasPrefix(remote, "git@github.com:")
+}
+
+// loadContract resolves a route's contract: text, used exactly as written,
+// or a path to a file holding it, read once here relative to the process's
+// working directory. A value is treated as a path only when it is a single
+// token with no whitespace — anything else is plainly prose, not a filename
+// — and a path-shaped value that does not resolve is REFUSED rather than
+// silently used as the contract's own text: an operator who wrote a
+// filename and mistyped it should be told at Load, not find their box
+// running with the filename itself as the working contract.
+func loadContract(raw string) (string, error) {
+	if strings.ContainsAny(raw, " \t\n") {
+		return raw, nil
+	}
+	b, err := os.ReadFile(raw)
+	if err != nil {
+		return "", fmt.Errorf("%q looks like a path and does not resolve: %w", raw, err)
+	}
+	return string(b), nil
 }
 
 // validateSelfDeploy resolves and checks a box's self_deploy: block, if it
