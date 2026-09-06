@@ -559,6 +559,13 @@ type Harness struct {
 	// plugin MCP off and nothing listed, a builder has no MCP surface at all,
 	// which is the right starting point for an agent nobody is watching.
 	MCP []MCPServer `yaml:"mcp"`
+	// Env forwards environment variables from the daemon's own process into
+	// the agent BY NAME — the same discipline [Confine.Env] already keeps,
+	// and for the same reason: the daemon used to hand every builder its
+	// whole environment, every token and key on the machine included, and
+	// none of it reached the agentref. Never name=value: a config file is
+	// not a secret store.
+	Env []string `yaml:"env"`
 }
 
 // Skill pins one skill to the exact tree it names.
@@ -1116,6 +1123,11 @@ func (h *Harness) validate(box string) error {
 			return fmt.Errorf("boxcfg: box %s: mcp server %s needs exactly one of command or url", box, m.Name)
 		}
 		names[m.Name] = true
+	}
+	for _, name := range h.Env {
+		if name == "" || strings.ContainsRune(name, '=') {
+			return fmt.Errorf("boxcfg: box %s: harness.env %q — a NAME, not an assignment; a value here would put a credential in the config file", box, name)
+		}
 	}
 	return nil
 }

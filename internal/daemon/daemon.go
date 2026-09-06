@@ -300,6 +300,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			agentBuilder = &acp.Builder{
 				Store: d.store, Tenant: d.tenant, Box: bx.Name,
 				Command:   bx.Agent,
+				EnvNames:  forwardedEnv(bx),
 				MaxTokens: cfg.Budget.MaxTokensPerRun,
 				Composer: &agent.Composer{Source: &harness.Source{
 					Base: []agent.Layer{{
@@ -368,6 +369,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 						gates = append(gates, &acp.Reviewer{
 							Store: d.store, Tenant: d.tenant, Box: bx.Name,
 							Command:         bx.Agent,
+							EnvNames:        forwardedEnv(bx),
 							MaxTokens:       cfg.Budget.MaxTokensPerRun,
 							Composer:        agentBuilder.Composer,
 							Seat:            &seat.Seat{Name: bx.Seat + "-gate", Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
@@ -440,7 +442,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 		agentBuilder.Repos = repos
 		d.planners.Set(bx.Name, &acp.Planner{
 			Store: d.store, Tenant: d.tenant, Box: bx.Name,
-			Command: bx.Agent, MaxTokens: cfg.Budget.MaxTokensPerRun,
+			Command: bx.Agent, EnvNames: forwardedEnv(bx), MaxTokens: cfg.Budget.MaxTokensPerRun,
 			Composer: agentBuilder.Composer,
 			Seat:     &seat.Seat{Name: bx.Seat + "-planner", Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
 			Mirror:   d.mirror, Repos: repos,
@@ -568,6 +570,31 @@ func mcpRefs(servers []boxcfg.MCPServer) []agent.MCPRef {
 		out = append(out, agent.MCPRef{Name: m.Name, Command: m.Command, URL: m.URL, Tools: m.Tools})
 	}
 	return out
+}
+
+// forwardedEnv is the set of environment variable names an agent process
+// spawned for this box may see, on top of [acp.Runtime]'s own built-in base
+// set: the box's own harness.env, plus a confine block's env when the box
+// declares one.
+//
+// The confine case is not optional. Load renders bx.Confine into bx.Agent as
+// `docker run --env NAME ...` (see [boxcfg.Config.validate]), and docker does
+// not error when NAME is absent from ITS OWN environment — it simply starts
+// the container without it. An agent wrapped in confine and left out of this
+// join would lose its model credential silently, which is exactly the
+// "unknown reads as zero" failure this issue exists to close.
+//
+// The lander's bearer token is deliberately not in this set: ghAuthToken
+// shells out to `gh auth token` from the DAEMON's own process, and
+// git.PRLander calls the GitHub REST API directly from Go — the token never
+// crosses into an agent's environment, so there is no name here for it to
+// forward.
+func forwardedEnv(bx boxcfg.Box) []string {
+	names := append([]string{}, bx.Harness.Env...)
+	if bx.Confine != nil {
+		names = append(names, bx.Confine.Env...)
+	}
+	return names
 }
 
 // Reload re-reads the config file and swaps the daemon's shape. Identity

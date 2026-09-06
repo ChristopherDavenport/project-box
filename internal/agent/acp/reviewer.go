@@ -62,6 +62,9 @@ type Reviewer struct {
 	// Command is the agent argv; Env is appended to its environment.
 	Command []string
 	Env     []string
+	// EnvNames are additional names forwarded from the daemon's own
+	// environment — see [Runtime.EnvNames].
+	EnvNames []string
 	// MaxTokens bounds one review, as it bounds one build.
 	MaxTokens int64
 	// Composer resolves the bundle under [agent.RoleGate]: the same harness
@@ -193,7 +196,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 	explained, _ := r.Composer.Explain(ctx, bundle)
 	rec.json(ctx, "agent-prompt", bundle.Ref, promptRecord{AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained)})
 
-	rt := &Runtime{Command: r.Command, Dir: mat.Dir, ContextDir: "", Env: r.Env,
+	rt := &Runtime{Command: r.Command, Dir: mat.Dir, ContextDir: "", Env: r.Env, EnvNames: r.EnvNames,
 		MaxTokens: r.MaxTokens, Transcript: r.Transcript,
 		SkillsDir: skillsDir, LoadedSkills: "", InheritSettings: r.InheritSettings,
 		Progress: r.progress(ctx, run)}
@@ -209,7 +212,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 		rec.json(ctx, "agent-session", bundle.Ref, sessionRecord{
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
-			Credential: res.Usage.Credential(),
+			Credential: res.Usage.Credential(), Env: res.EnvNames,
 		})
 	}
 	// The unit's own run key, not a run of the reviewer's own: a unit's cost

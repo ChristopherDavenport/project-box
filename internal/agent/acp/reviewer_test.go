@@ -202,6 +202,36 @@ func TestTheGateReadsAChangeAndPasses(t *testing.T) {
 	}
 }
 
+// TestTheGateSessionRecordCarriesEnvNamesNoValues: the reviewer writes the
+// same sessionRecord shape a build does, from its own call site — a gate's
+// record must not read "unknown" just because only the builder was wired.
+// Not t.Parallel: t.Setenv forbids it.
+func TestTheGateSessionRecordCarriesEnvNamesNoValues(t *testing.T) {
+	t.Setenv("ACP_ENV_CANARY", "super-secret-value")
+	rv, cs, s, _ := reviewerRig(t, "review-pass")
+	rv.EnvNames = []string{"ACP_ENV_CANARY"}
+	ctx := context.Background()
+	if _, err := rv.Evaluate(ctx, cs); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	session := chain(t, s, cs.Run)["agent-session"]
+	if session == "" {
+		t.Fatal("no agent-session on the chain")
+	}
+	if strings.Contains(session, "super-secret-value") {
+		t.Fatalf("a credential value reached the evidence chain:\n%s", session)
+	}
+	var rec struct {
+		Env []string `json:"env"`
+	}
+	if err := json.Unmarshal([]byte(session), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(rec.Env, ","), "ACP_ENV_CANARY") {
+		t.Fatalf("the delivered name is not on the record: %v", rec.Env)
+	}
+}
+
 // TestTheGateFailsWithItsReason: a rejection travels as a rejection, with the
 // words a builder has to act on.
 func TestTheGateFailsWithItsReason(t *testing.T) {
