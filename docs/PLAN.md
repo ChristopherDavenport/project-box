@@ -1641,3 +1641,27 @@ rather than refusing `main`. The flip is three landings in order — round 9
 with #59 (the lander's title) promoted to `main`, the reviewer under the
 gate role, then the two lines in `hack/dogfood/box.yaml` and a restart —
 and until the second has landed the box keeps landing on `factory`.
+
+Round 9 (2026-09-05, #52 #56 #57 #58 #55 #59, `docs/experiments/round9-2026-09-05.md`):
+six units landed on `factory` for $30.83 and 55.2M tokens, the sixth after
+a reboot took the box down overnight with it waiting on a section. The
+lander went on for the first time and off again the same hour: it titled
+the request with the task, and GitHub refuses 256 characters (#59, fixed by
+the round's own last unit). A waiting unit holds a seat, so the cap went
+to three. The promotion was the first CI run these commits saw and it
+failed at gofmt in 47 seconds: the gate runs generate, build and test, CI
+runs more (#68).
+
+Round 10 (2026-09-06, #62 #66 #63 #64 #65 #67, `docs/experiments/round10-2026-09-06.md`):
+the planner on Opus, eight units landed on `factory` for $66.13 and 129.2M
+tokens in 3 hours 41 minutes, 84 of them the meter's — and the units were
+the loop's own missing parts: a reviewer in the gate set (#62, three
+units), `approval: {count}` wired to the approval gate (#66), a route that
+polls its forge by label (#63), a self-deploy chore (#64),
+`budget.credential` asserted per run (#65), and an environment allowlist
+(#67). Every plan was right; the Opus planner cost $1.76 to $4.05 a plan
+against Sonnet's $1.42, and assigned one builder a tier above the box's on
+its own. Found: an API server error mid-response parks the unit and its
+unmetered silence halts the hour (#69); the volume cap paced the round to
+one unit an hour; every unit named the daemon section. The flip to `main`
+with the reviewer on follows the promotion.
