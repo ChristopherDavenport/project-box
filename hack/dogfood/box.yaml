@@ -1,8 +1,14 @@
 # project-box, pointed at project-box.
 #
 # Issue #7's shape, taken literally: one repo, one seat, MaxConcurrent 1,
-# the gated lane. The factory lands on refs/heads/factory — never main,
-# never the branch a human is working on.
+# the gated lane, landing on refs/heads/factory and never main. Nine rounds
+# in, the decision of 2026-09-06 (docs/PLAN.md §6 and §10) moves the landing
+# to main: through a pull request the gate has judged and a reviewer's
+# judgement has passed, by the same fenced push of the exact built commit,
+# with a human approver a requirement of policy that this box sets to zero.
+# The flip itself is the `branch:` and `land:` lines below, and it waits on
+# two landings — #59 (the lander's title) and the reviewer under the gate
+# role. TestDogfoodBoxIsNarrow refuses main without the lander.
 #
 # Every path here is relative to the REPOSITORY ROOT, which is where
 # hack/dogfood/run.sh puts you. The state they name lives in .factory/,
@@ -49,7 +55,11 @@ budget:
   # measure them, not to fill the hour. Four starts an hour, fifteen million
   # tokens of volume, two side by side so the section leases are exercised.
   # Resize from what round 5 shows. Hot-reloadable: edit and `kill -HUP`.
-  max_concurrent: 2
+  # Three since round 9: a unit waiting on a section lease holds a seat,
+  # so with two seats one wait idles the box for every unit in another
+  # section. Three lets a runnable unit run beside a waiting one; the
+  # proper fix is a wait that holds no seat.
+  max_concurrent: 3
   # Five, not four, since round 6: the meter counts a start when the pump
   # acquires it, before the loop tries the section leases, so a unit that
   # only WAITED for a section kept its start and was charged a second one
@@ -60,11 +70,11 @@ budget:
   # wait on a section each a start under the double count above. Starts are
   # the brake on a runaway, and four deliberate submissions are not one.
   max_per_window: 20
-  # Twenty-two million since round 8: round 7 and round 8's three planners fell
+  # Twenty-five million since round 9: round 7 and round 8's three planners fell
   # in one clock hour and put it at 19.6M against fifteen, with every unit
   # refused until the hour turned. Volume is still the brake; a round is
   # not a runaway.
-  max_tokens_per_window: 22000000
+  max_tokens_per_window: 25000000
   window: 1h
   # The brake in the currency that actually bound. The account's five-hour
   # window is shared with the human on this machine and invisible to the
@@ -123,8 +133,18 @@ boxes:
     # (docs/experiments/round5-2026-09-04.md) shows output and request count
     # are the levers left — effort is the dial that moves both without
     # touching the model. Applied on the next `kill -HUP`.
+    #
+    # The planner on Opus since round 10. Rounds 5 through 9 planned on
+    # Sonnet for $1.4-2.1 a plan, a tenth of a round's bill, and every plan
+    # was one unit with the issue's body folded into its task; the plan is
+    # the one judgement every unit under it inherits, and it reads the tree
+    # once. Opus is the adapter's `opus[1m]` — the only Opus it lists — so
+    # the 200K bound Sonnet gave the builders does not apply here; the
+    # planner's context has ended under 125K every round, and
+    # max_tokens_per_run is the ceiling if that changes. Fable is the same
+    # edit (`fable[1m]`) at twice the price; measure Opus first.
     roles:
-      planner: {model: sonnet, session: {effort: high}}
+      planner: {model: "opus[1m]", session: {effort: high}}
       builder: {session: {effort: high}}
     # Every issue is planned by judgement before it is work: a graph of
     # units, each with its sections, its dependencies and its tier, recorded
@@ -177,6 +197,8 @@ boxes:
     repos:
       - name: project-box
         remote: https://github.com/ChristopherDavenport/project-box.git
+        # main once #59 and the reviewer have landed; see the header. Until
+        # then a branch of its own, promoted by hand.
         branch: factory
         role: service
         lane: gated
@@ -187,8 +209,14 @@ boxes:
         # the driving issue and lands through it, rather than a bare fenced
         # push to refs/heads/factory. The token comes from the `gh` session
         # on this machine — a stopgap ahead of the Phase 7 GitHub App.
-        land: pull_request
-        land_token: gh
+        # Off for the rest of round 9: the lander titles the pull request
+        # with the unit's task, GitHub refuses a title over 256 characters,
+        # and the first landing through it parked at the land step. Back on
+        # once the title is the summary (#59) — and on for good with
+        # `branch: main`, since main is reached through a pull request or
+        # not at all.
+        # land: pull_request
+        # land_token: gh
         # Where work is expressed. A unit names the sections its paths fall
         # in; two units in disjoint sections run at once, two in one take
         # turns, and a unit that names none is the whole repository and waits

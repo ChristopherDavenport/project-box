@@ -534,6 +534,7 @@ Recorded so they are not re-litigated. Reasoning lives in ARCHITECTURE.md.
 | Roles, sections and tiers are configuration; the planner is a decomposer with an agentref, not a coordinator | Gas City's automation model is sound and its traceability is absent, and a coordinator-shaped design keeps its judgement in a context window nobody can read back — so the judgement is one run on the origination's chain, its continuity is a seat, and every borrowed mechanism lands as a declared unit of software rather than a persona |
 | A section is a lease, and an unsectioned unit is the whole repository | the land window already serializes the branch, so two units were never going to corrupt each other — they were going to conflict, and a conflicting replay is rebuilt by an agent; a lease spends a tick to save a session, and "names none" must mean "waits for all" or a plan that forgot a section would run that unit beside everything |
 | A failed judgement parks the origination, not the tick | there is no item yet to park, and a tick error is retried next tick, so a planner out of budget re-run every fifteen seconds would be the spend loop the meter exists to prevent; the origination is the exception, in the item's shape, with the item's verbs |
+| The dogfood lands on main through a pull request, and a judgement reviews the landing before the push | a branch of its own was the fence while the fence was unproven; nine rounds in, the lease token and the expected-old-value push are what hold, and refs/heads/factory had become a queue a person drained by hand. The request is the visible record and the check run carries the gate's verdict; the fenced push of the exact built commit is still the mechanism, so approvals keep binding to the commit. Whether a PERSON must also approve is a requirement of policy, as the human-approval section already says — zero here, because this box is its own staging; a count where the boundary demands one |
 
 ## 7. Deferred decisions
 
@@ -1616,3 +1617,27 @@ gate failures went unnamed because the record keeps the check's tail (#52).
 The fence worked: a landing refused under a moved head was rebased
 mechanically and re-gated. The dogfood now lands through pull requests
 (#22) and shows a unit by its summary (#51) once restarted on the merge.
+
+Decision (2026-09-06): the dogfood lands on `main`, through pull requests,
+and not on a branch of its own. Issue #7's shape held the factory to
+`factory` so that a bare fenced push could never reach the branch a human
+works in; nine rounds later the fence, the gate and the lander are the parts
+that have held, and `factory` had become a queue a person drained by hand
+(#53 carried two rounds at once). The mechanism is #22's as it stands: a
+`box/<run>` pull request opened against `main`, the gate's verdict on it as
+a check run (#58), then the same fenced push of the exact built commit,
+which GitHub marks merged on its own — so approvals keep binding to the
+commit and `box provenance <sha>` keeps matching what landed. Before the
+push, a judgement reviews the change: the `gate` role's seat, which has had
+a name and no occupant since the roles existed, reads the diff against the
+origination and §6 and answers pass or fail with the reason on the chain,
+and absence of that judgement is not a pass. Whether a person must ALSO
+approve is a requirement of policy, exactly as ARCHITECTURE's human-approval
+section has it: zero approvers here, because this box is its own staging;
+an installation whose boundary demands one names a count in its box and the
+approval gate goes pending until distinct non-self reviews cover the commit.
+TestDogfoodBoxIsNarrow now refuses `main` WITHOUT the pull-request lander
+rather than refusing `main`. The flip is three landings in order — round 9
+with #59 (the lander's title) promoted to `main`, the reviewer under the
+gate role, then the two lines in `hack/dogfood/box.yaml` and a restart —
+and until the second has landed the box keeps landing on `factory`.
