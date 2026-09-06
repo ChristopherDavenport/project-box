@@ -6,9 +6,9 @@
 # to main: through a pull request the gate has judged and a reviewer's
 # judgement has passed, by the same fenced push of the exact built commit,
 # with a human approver a requirement of policy that this box sets to zero.
-# The flip itself is the `branch:` and `land:` lines below, and it waits on
-# two landings — #59 (the lander's title) and the reviewer under the gate
-# role. TestDogfoodBoxIsNarrow refuses main without the lander.
+# In force since round 11 (2026-09-06): `branch: main`, `land: pull_request`
+# and `review: judgement` below, both landings the flip waited on (#59 and
+# #62) being in. TestDogfoodBoxIsNarrow refuses main without both.
 #
 # Every path here is relative to the REPOSITORY ROOT, which is where
 # hack/dogfood/run.sh puts you. The state they name lives in .factory/,
@@ -153,6 +153,11 @@ boxes:
     roles:
       planner: {model: "opus[1m]", session: {effort: high}}
       builder: {session: {effort: high}}
+      # The reviewer (review: judgement on the repo below) reads one diff
+      # per unit against its origination and PLAN §6; it is the quality
+      # gate the decision of 2026-09-06 put in front of main, so it starts
+      # on the planner's tier. Round 11 measures what a review costs.
+      gate: {model: "opus[1m]", session: {effort: high}}
     # Every issue is planned by judgement before it is work: a graph of
     # units, each with its sections, its dependencies and its tier, recorded
     # on the origination's chain with the model that judged. Opt-in here and
@@ -204,9 +209,9 @@ boxes:
     repos:
       - name: project-box
         remote: https://github.com/ChristopherDavenport/project-box.git
-        # main once #59 and the reviewer have landed; see the header. Until
-        # then a branch of its own, promoted by hand.
-        branch: factory
+        # main, since round 11: both landings the header names are in.
+        # refs/heads/factory stays as the record of rounds 1 through 10.
+        branch: main
         role: service
         lane: gated
         route: issues
@@ -216,14 +221,21 @@ boxes:
         # the driving issue and lands through it, rather than a bare fenced
         # push to refs/heads/factory. The token comes from the `gh` session
         # on this machine — a stopgap ahead of the Phase 7 GitHub App.
-        # Off for the rest of round 9: the lander titles the pull request
-        # with the unit's task, GitHub refuses a title over 256 characters,
-        # and the first landing through it parked at the land step. Back on
-        # once the title is the summary (#59) — and on for good with
-        # `branch: main`, since main is reached through a pull request or
-        # not at all.
-        # land: pull_request
-        # land_token: gh
+        # Was off for the rest of round 9: the lander titled the request
+        # with the unit's task and GitHub refuses a title over 256 characters
+        # (#59, landed d9b4607). On for good with `branch: main`: main is
+        # reached through a pull request or not at all.
+        land: pull_request
+        land_token: gh
+        # The judgement before the push (#62): the gate-role reviewer reads
+        # the diff against the origination and PLAN §6 after the command
+        # gate and before the land, and posts box/review on the request. An
+        # absent judgement is not a pass. Its tier is roles.gate above.
+        review: judgement
+        # No approval: block — count zero, machine-gated, the common case.
+        # An installation whose boundary wants a person names
+        # `approval: {count: N}` here (#66) and the request waits for that
+        # many distinct, non-self reviews of the exact built head.
         # Where work is expressed. A unit names the sections its paths fall
         # in; two units in disjoint sections run at once, two in one take
         # turns, and a unit that names none is the whole repository and waits
