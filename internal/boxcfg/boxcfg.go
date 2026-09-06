@@ -543,10 +543,27 @@ type Repo struct {
 	// (internal/agent/acp.Reviewer) after the command gate, so a change
 	// also has to satisfy a reader before it reaches the branch.
 	Review string `yaml:"review"`
+	// Approval names the human sign-off a change must collect before it
+	// lands. Absent, or Count zero (the default), is today's behavior:
+	// machine-gated, no person asked — the common case.
+	Approval Approval `yaml:"approval"`
 	// Sections are this repository's named regions — see [forge.Section].
 	// A repository that declares none has one region: itself, and every
 	// unit of work in it takes turns.
 	Sections []Section `yaml:"sections"`
+}
+
+// Approval is a [Repo]'s human sign-off policy.
+type Approval struct {
+	// Count is how many distinct approvals must cover the built head before
+	// the change lands. Zero (the default) is machine-gated.
+	Count int `yaml:"count"`
+	// Sources restricts where an approval may come from. Empty means
+	// "github" — the only source known today (see the refusal in
+	// validate): nothing in this tree records a direct attestation as an
+	// approval.Approval, so naming anything else would wait forever on an
+	// approval no interface can give.
+	Sources []string `yaml:"sources"`
 }
 
 // LandPullRequest is the [Repo.Land] value that opens a pull request before
@@ -752,6 +769,20 @@ func (c *Config) validate() error {
 			}
 			if r.Review == ReviewJudgement && forge.Lane(r.Lane) == forge.LaneOptimistic {
 				return fmt.Errorf("boxcfg: box %s repo %s: review: %s with lane: %s — the optimistic lane lands first and gates afterward, so a review there would read a diff already on the branch, never a review before the push", bx.Name, r.Name, ReviewJudgement, forge.LaneOptimistic)
+			}
+			if r.Approval.Count < 0 {
+				return fmt.Errorf("boxcfg: box %s repo %s: approval.count %d — a negative count", bx.Name, r.Name, r.Approval.Count)
+			}
+			if r.Approval.Count > 0 && r.Land != LandPullRequest {
+				return fmt.Errorf("boxcfg: box %s repo %s: approval.count with land %q — a GitHub review has nowhere to be without land: %s", bx.Name, r.Name, r.Land, LandPullRequest)
+			}
+			if r.Approval.Count > 0 && forge.Lane(r.Lane) == forge.LaneOptimistic {
+				return fmt.Errorf("boxcfg: box %s repo %s: approval.count with lane: %s — the optimistic lane lands first and gates afterward, so an approver there would be asked about a change already on the branch, never before it landed", bx.Name, r.Name, forge.LaneOptimistic)
+			}
+			for _, s := range r.Approval.Sources {
+				if s != "github" {
+					return fmt.Errorf("boxcfg: box %s repo %s: approval.sources %q — only \"github\" is known today; nothing records a direct attestation as an approval yet", bx.Name, r.Name, s)
+				}
 			}
 			if err := validateSections(bx, r); err != nil {
 				return err

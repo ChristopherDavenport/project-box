@@ -1039,6 +1039,69 @@ func TestWaitingOnAPersonDoesNotRerunTheTestSuite(t *testing.T) {
 	}
 }
 
+// TestApprovalSeamAppendsAfterOtherGatesAndCarriesThem is issue #66's loop
+// wiring: the Approval seam appends a per-item gate after l.Gates(ws) rather
+// than requiring the gate set itself to know about the human, and the loop's
+// existing "wait, carry, resume at the outstanding gate" machinery works on
+// it unchanged — the same holdingGate a hand-built gate list already uses to
+// model a human, only reached here through Loop.Approval instead.
+func TestApprovalSeamAppendsAfterOtherGatesAndCarriesThem(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	suite := 0
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{countingGate{name: "build-and-test", n: &suite}}
+	}
+	e.loop.Approval = func(item queue.WorkItem) forge.Gate {
+		return holdingGate{approved: &approved}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-66"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-approve", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("pending approval should wait, got %s (%s)", item.State, item.Note)
+	}
+	if suite != 1 {
+		t.Fatalf("the command gate should have run once ahead of the human, ran %d times", suite)
+	}
+	if !slices.Contains(item.PassedGates, "build-and-test") {
+		t.Fatalf("the satisfied gate ahead of the approval was not carried: %+v", item.PassedGates)
+	}
+	built := item.Built
+	if built == "" {
+		t.Fatal("a waiting item carries no resume point: the next tick will rebuild")
+	}
+
+	// The approval arrives; the same commit lands without re-running the
+	// command gate or rebuilding.
+	approved = true
+	loaded, _ := q.Load(ctx, tn, "wi-approve")
+	if item, err = e.loop.Run(ctx, loaded); err != nil {
+		t.Fatalf("approved run: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+	if item.Head != built {
+		t.Fatalf("landed a different commit than the one the approval covered: built %s, landed %s", built, item.Head)
+	}
+	if suite != 1 || builder.n != 1 {
+		t.Fatalf("landing re-did the work: %d suite runs, %d builds", suite, builder.n)
+	}
+}
+
 // TestMovedHeadRetiresTheCarriedVerdicts: carrying a pass is sound only while
 // the content stands. Replayed onto a new base, the change is a different
 // question and every gate is asked again — otherwise the cheap path would

@@ -25,6 +25,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/agent/acp"
 	"github.com/ChristopherDavenport/project-box/internal/api"
+	"github.com/ChristopherDavenport/project-box/internal/approval"
 	"github.com/ChristopherDavenport/project-box/internal/boxcfg"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/control"
@@ -361,6 +362,29 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// without a known land_token, and "gh" is the only one today.
 				lp.PRLander = func(inner *gitforge.Lander) forge.Lander {
 					return gitforge.NewPRLander(inner, ghAuthToken)
+				}
+			}
+			if r.Approval.Count > 0 {
+				// Validated at Load: a count needs land: pull_request and a
+				// non-optimistic lane, so this is never reached without
+				// somewhere for the review to be. A count of zero leaves
+				// lp.Approval nil BY CONSTRUCTION, not by a gate that always
+				// passes — today's loop must not change shape at all when no
+				// human boundary is configured.
+				pr := gitforge.NewPRLander(gitforge.NewLander(d.mirror, d.store.Log()), ghAuthToken)
+				sources := make([]approval.Source, 0, len(r.Approval.Sources))
+				for _, s := range r.Approval.Sources {
+					sources = append(sources, approval.Source(s))
+				}
+				requirement := approval.Requirement{Count: r.Approval.Count, Sources: sources}
+				runner := d.cfgRunner()
+				lp.Approval = func(item queue.WorkItem) forge.Gate {
+					return &humanApprovalGate{
+						requirement: requirement,
+						requester:   loop.RequesterActor(runner, item),
+						ensure:      pr.EnsureRequest,
+						reviews:     pr.Reviews,
+					}
 				}
 			}
 			if agentBuilder != nil {

@@ -55,6 +55,15 @@ type Loop struct {
 	PRLander func(inner *git.Lander) forge.Lander
 	Builder  Builder
 	Gates    Gates
+	// Approval, when set, builds this run's human-approval gate — a seam
+	// rather than a widening of the Gates signature, because the requester
+	// an approval gate must disqualify is per item, not per workspace (see
+	// [Gates]). Nil leaves an item's gate set exactly l.Gates(ws), which is
+	// today's behavior with no approval boundary configured. Appended LAST
+	// by [Loop.gatesFor], behind the command gate and behind #62's reviewer:
+	// the loop's existing stop-at-first-fail means a change that failed its
+	// tests never reaches a person.
+	Approval func(item queue.WorkItem) forge.Gate
 	// Lane is the landing discipline; empty means gated. Env and infra
 	// repositories refuse the optimistic lane at Run.
 	Lane forge.Lane
@@ -183,6 +192,19 @@ func ItemFor(ing ingress.Ingress, id, task string) queue.WorkItem {
 		Prior: ing.Prior}
 }
 
+// gatesFor is this run's gate set: l.Gates(ws), with the item's approval gate
+// (see [Loop.Approval]) appended last when the seam is set.
+func (l *Loop) gatesFor(item queue.WorkItem, ws forge.Workspace) []forge.Gate {
+	base := l.Gates(ws)
+	if l.Approval == nil {
+		return base
+	}
+	out := make([]forge.Gate, len(base)+1)
+	copy(out, base)
+	out[len(base)] = l.Approval(item)
+	return out
+}
+
 // Poll asks whether a held item's outstanding gate has answered yet, and
 // writes nothing whatsoever: no claim, no lease, no evidence. It reports
 // whether anything has changed, so the pump can leave a still-waiting item
@@ -216,7 +238,7 @@ func (l *Loop) Poll(ctx context.Context, item queue.WorkItem) bool {
 		}},
 	}
 	outstanding := 0
-	for _, g := range l.Gates(ws) {
+	for _, g := range l.gatesFor(item, ws) {
 		if slices.Contains(item.PassedGates, g.Name()) {
 			continue // carried; it cannot change its mind about this head
 		}
@@ -462,7 +484,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		passedNow = nil
 		var gateInfra error
 		gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
-			for _, g := range l.Gates(ws) {
+			for _, g := range l.gatesFor(item, ws) {
 				if slices.Contains(carried, g.Name()) {
 					// No new evidence: the gate ran once on this content and its
 					// verdict is already on the chain. Recording it again would
@@ -705,7 +727,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 	var verdicts []forge.Verdict
 	var infra error
 	telemetry.Stage(ctx, "post-land-check", item, func(ctx context.Context) error {
-		for _, g := range l.Gates(ws) {
+		for _, g := range l.gatesFor(item, ws) {
 			v, err := g.Evaluate(ctx, cs)
 			if err != nil {
 				infra = fmt.Errorf("check %s could not conclude: %v", g.Name(), err)
@@ -809,7 +831,7 @@ func (l *Loop) recheck(ctx context.Context, item queue.WorkItem, ws forge.Worksp
 	var verdicts []forge.Verdict
 	var infra error
 	telemetry.Stage(ctx, "confirm-red", item, func(ctx context.Context) error {
-		for _, g := range l.Gates(ws) {
+		for _, g := range l.gatesFor(item, ws) {
 			v, err := g.Evaluate(ctx, cs)
 			if err != nil {
 				infra = fmt.Errorf("check %s could not conclude: %v", g.Name(), err)
@@ -833,6 +855,22 @@ func (l *Loop) recheck(ctx context.Context, item queue.WorkItem, ws forge.Worksp
 	return false, reasons(verdicts), nil
 }
 
+// RequesterActor is the actor a run acts as: the runner itself as an agent,
+// delegating for item.Requester when the two differ. authorize uses it to
+// check authority; internal/daemon's human-approval gate uses the SAME
+// derivation to disqualify a requester's own approval (directly, or through
+// an agent acting for them — approval.SelfApproved compares against both
+// the principal and OnBehalfOf) — one construction rather than two that
+// could drift apart.
+func RequesterActor(runner string, item queue.WorkItem) authz.Actor {
+	actor := authz.Actor{Principal: authz.Principal{Subject: runner, Kind: authz.KindAgent, Tenant: item.Tenant}}
+	if item.Requester != "" && item.Requester != runner {
+		p := authz.Principal{Subject: item.Requester, Kind: authz.KindUser, Tenant: item.Tenant}
+		actor.OnBehalfOf = &p
+	}
+	return actor
+}
+
 // authorize checks one action when enforcement is on, records the decision
 // either way, and returns the park-worthy reason on denial. The evidence
 // record carries the grant that permitted the action — why it was allowed,
@@ -841,11 +879,7 @@ func (l *Loop) authorize(ctx context.Context, item queue.WorkItem, action authz.
 	if l.Authz == nil {
 		return "", nil
 	}
-	actor := authz.Actor{Principal: authz.Principal{Subject: l.Runner, Kind: authz.KindAgent, Tenant: item.Tenant}}
-	if item.Requester != "" && item.Requester != l.Runner {
-		p := authz.Principal{Subject: item.Requester, Kind: authz.KindUser, Tenant: item.Tenant}
-		actor.OnBehalfOf = &p
-	}
+	actor := RequesterActor(l.Runner, item)
 	d, err := l.Authz.Can(ctx, actor, action, authz.Resource{
 		Tenant: item.Tenant, Box: item.Box, Repo: l.Repo.Name, RepoRole: string(l.Repo.Role),
 	})

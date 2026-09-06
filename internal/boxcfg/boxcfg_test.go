@@ -592,3 +592,160 @@ boxes:
 		t.Fatalf("self_deploy = %+v, want {From: main, Repo: api}", got)
 	}
 }
+
+// TestApprovalAbsentByDefault: a repo that says nothing about approval keeps
+// today's behavior — no human gate, machine-gated.
+func TestApprovalAbsentByDefault(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Repos[0].Approval.Count; got != 0 {
+		t.Fatalf("approval.count = %d, want 0 (machine-gated)", got)
+	}
+}
+
+// TestApprovalNegativeCountIsRefused: a negative count is not a valid
+// requirement — refused at Load rather than compared against forever.
+func TestApprovalNegativeCountIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        lane: gated
+        approval: {count: -1}
+`))
+	if err == nil || !strings.Contains(err.Error(), "approval.count -1") {
+		t.Fatalf("negative approval.count: err = %v", err)
+	}
+}
+
+// TestApprovalNeedsPullRequestLanding: a count with no pull_request landing
+// has nowhere for a GitHub review to be, named explicitly in issue #66.
+func TestApprovalNeedsPullRequestLanding(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        lane: gated
+        approval: {count: 1}
+`))
+	if err == nil || !strings.Contains(err.Error(), "approval.count with land") {
+		t.Fatalf("approval.count with no pull_request landing: err = %v", err)
+	}
+}
+
+// TestApprovalRefusesTheOptimisticLane: the optimistic lane lands first and
+// gates afterward, so an approver there would be asked about a change
+// already on the branch — the same reasoning as review: judgement's own
+// optimistic-lane refusal, applied here as a deliberate addition beyond what
+// issue #66 names explicitly. optimistic is Lane's default, so a repo that
+// names a count and says nothing about lane hits this refusal too.
+func TestApprovalRefusesTheOptimisticLane(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        approval: {count: 1}
+`))
+	if err == nil || !strings.Contains(err.Error(), "approval.count with lane: optimistic") {
+		t.Fatalf("approval.count with default (optimistic) lane: err = %v", err)
+	}
+}
+
+// TestApprovalRefusesTheOptimisticLaneExplicit: same refusal, lane named
+// explicitly rather than left to default.
+func TestApprovalRefusesTheOptimisticLaneExplicit(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        lane: optimistic
+        approval: {count: 1}
+`))
+	if err == nil || !strings.Contains(err.Error(), "approval.count with lane: optimistic") {
+		t.Fatalf("approval.count with lane: optimistic: err = %v", err)
+	}
+}
+
+// TestApprovalRefusesUnknownSource: only "github" is known today — nothing
+// in this tree records a direct attestation as an approval.Approval, so
+// accepting "direct" would wait forever on an approval no interface can
+// give.
+func TestApprovalRefusesUnknownSource(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        lane: gated
+        approval: {count: 1, sources: [direct]}
+`))
+	if err == nil || !strings.Contains(err.Error(), `approval.sources "direct"`) {
+		t.Fatalf("approval.sources: direct: err = %v", err)
+	}
+}
+
+// TestApprovalLoads: the happy path — a repo declaring a count on the gated
+// lane with pull_request landing loads cleanly, and the values survive to
+// where the daemon reads them.
+func TestApprovalLoads(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        lane: gated
+        approval: {count: 1}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Boxes[0].Repos[0]
+	if r.Approval.Count != 1 {
+		t.Fatalf("approval.count = %d, want 1", r.Approval.Count)
+	}
+	if r.Land != LandPullRequest || r.LandToken != "gh" || r.Lane != "gated" {
+		t.Fatalf("repo = %+v, want land=pull_request land_token=gh lane=gated", r)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 )
@@ -70,19 +71,18 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 	if len(cs.Members) == 0 {
 		return forge.Landing{}, errors.New("git: empty ChangeSet")
 	}
-	branch := "box/" + cs.Run
-	title, err := p.prTitle(ctx, cs)
-	if err != nil {
-		return forge.Landing{}, fmt.Errorf("git: pr: title: %w", err)
-	}
-	body := p.prBody(cs)
-
 	prURLs := make(map[string]string, len(cs.Members))
 	for _, mem := range cs.Members {
-		repo, err := p.pushRunBranch(ctx, cs, mem, branch)
-		if err != nil {
-			return forge.Landing{}, fmt.Errorf("git: pr: %w", err)
+		repo, ok := p.inner.m.Repo(mem.Repo)
+		if !ok {
+			return forge.Landing{}, fmt.Errorf("git: pr: repo %q not established by Fetch", mem.Repo)
 		}
+		prURL, err := p.EnsureRequest(ctx, cs, mem)
+		if err != nil {
+			return forge.Landing{}, fmt.Errorf("git: pr: open pr for %s: %w", mem.Repo, err)
+		}
+		prURLs[mem.Repo] = prURL
+
 		owner, name, err := parseGitHubRemote(repo.Remote)
 		if err != nil {
 			return forge.Landing{}, fmt.Errorf("git: pr: %w", err)
@@ -91,11 +91,6 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 		if err != nil {
 			return forge.Landing{}, fmt.Errorf("git: pr: token: %w", err)
 		}
-		prURL, err := p.ensurePR(ctx, tok, owner, name, branch, mem.Branch, title, body)
-		if err != nil {
-			return forge.Landing{}, fmt.Errorf("git: pr: open pr for %s: %w", mem.Repo, err)
-		}
-		prURLs[mem.Repo] = prURL
 
 		// The commit and PR now exist on GitHub, which the Checks API
 		// requires. cs.Verdicts is empty in the optimistic lane, which lands
@@ -232,6 +227,128 @@ func (p *PRLander) pushRunBranch(ctx context.Context, cs forge.ChangeSet, mem fo
 	return repo, nil
 }
 
+// runBranchAtHead reports whether the run branch's tip on the remote already
+// equals head, so [PRLander.EnsureRequest] can skip a push that would only
+// re-push content already there. Any error (branch not created yet, remote
+// unreachable) reads as "not at head" — the safe direction, since it only
+// costs one push more than strictly necessary rather than skipping a push a
+// moved head needed.
+func (p *PRLander) runBranchAtHead(ctx context.Context, repo forge.Repo, branch string, head forge.Commit) bool {
+	out, err := run(ctx, p.inner.m.mirrorDir(repo.Name), "ls-remote", repo.Remote, "refs/heads/"+branch)
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(out)
+	return len(fields) > 0 && forge.Commit(fields[0]) == head
+}
+
+// EnsureRequest makes sure a pull request exists covering mem's head onto
+// its branch — the push-and-open steps [PRLander.Land] performs before it
+// lands, extracted so a gate that only wants a request to review can call
+// this on every tick for as long as the review takes, without landing
+// anything or posting a check.
+//
+// Idempotent both ways: ensurePR already reuses an open PR for the run
+// branch rather than opening a second (forge.Gate's own idempotence
+// requirement — internal/forge/gate.go), and the run branch itself is
+// pushed only when its remote tip is not already mem.Head, so a rebuild's
+// new head reaches the branch an approver is reading and an unmoved head
+// costs no second push.
+func (p *PRLander) EnsureRequest(ctx context.Context, cs forge.ChangeSet, mem forge.Member) (string, error) {
+	branch := "box/" + cs.Run
+	repo, ok := p.inner.m.Repo(mem.Repo)
+	if !ok {
+		return "", fmt.Errorf("repo %q not established by Fetch", mem.Repo)
+	}
+	if !p.runBranchAtHead(ctx, repo, branch, mem.Head) {
+		if _, err := p.pushRunBranch(ctx, cs, mem, branch); err != nil {
+			return "", fmt.Errorf("git: ensure request: %w", err)
+		}
+	}
+	owner, name, err := parseGitHubRemote(repo.Remote)
+	if err != nil {
+		return "", fmt.Errorf("git: ensure request: %w", err)
+	}
+	tok, err := p.token(ctx)
+	if err != nil {
+		return "", fmt.Errorf("git: ensure request: token: %w", err)
+	}
+	title, err := p.prTitle(ctx, cs)
+	if err != nil {
+		return "", fmt.Errorf("git: ensure request: title: %w", err)
+	}
+	prURL, err := p.ensurePR(ctx, tok, owner, name, branch, mem.Branch, title, p.prBody(cs))
+	if err != nil {
+		return "", fmt.Errorf("git: ensure request: %w", err)
+	}
+	return prURL, nil
+}
+
+// Review is one reviewer's decision on the pull request an [EnsureRequest]
+// opened, read back from GitHub's own review state. Neutral on purpose: this
+// package must not import internal/approval (a cross-section dependency the
+// daemon is allowed to make and this package is not — see gate.go:30-32's
+// read-only List contract), so the mapping from a Review to an
+// approval.Approval, and the filter to only APPROVED ones, is the caller's
+// job.
+type Review struct {
+	Login       string
+	CommitID    string
+	State       string
+	ID          int64
+	SubmittedAt time.Time
+}
+
+// Reviews reads back every review on the open pull request for mem's run
+// branch — every state, not only APPROVED, so a caller can tell a dismissed
+// or superseded review from one that never happened; silence must never
+// read as approval, and a caller cannot honor that with a list that has
+// already thrown states away. Empty, not an error, when there is no open
+// pull request for the run branch yet.
+func (p *PRLander) Reviews(ctx context.Context, cs forge.ChangeSet, mem forge.Member) ([]Review, error) {
+	branch := "box/" + cs.Run
+	repo, ok := p.inner.m.Repo(mem.Repo)
+	if !ok {
+		return nil, fmt.Errorf("repo %q not established by Fetch", mem.Repo)
+	}
+	owner, name, err := parseGitHubRemote(repo.Remote)
+	if err != nil {
+		return nil, fmt.Errorf("git: reviews: %w", err)
+	}
+	tok, err := p.token(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("git: reviews: token: %w", err)
+	}
+	pr, err := p.findOpenPR(ctx, tok, owner, name, branch)
+	if err != nil {
+		return nil, fmt.Errorf("git: reviews: %w", err)
+	}
+	if pr.Number == 0 {
+		return nil, nil
+	}
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls/%d/reviews", p.apiBase, owner, name, pr.Number)
+	var out []struct {
+		ID   int64 `json:"id"`
+		User struct {
+			Login string `json:"login"`
+		} `json:"user"`
+		CommitID    string    `json:"commit_id"`
+		State       string    `json:"state"`
+		SubmittedAt time.Time `json:"submitted_at"`
+	}
+	if err := p.call(ctx, http.MethodGet, endpoint, tok, nil, &out); err != nil {
+		return nil, fmt.Errorf("git: reviews: list: %w", err)
+	}
+	reviews := make([]Review, 0, len(out))
+	for _, r := range out {
+		reviews = append(reviews, Review{
+			Login: r.User.Login, CommitID: r.CommitID, State: r.State,
+			ID: r.ID, SubmittedAt: r.SubmittedAt,
+		})
+	}
+	return reviews, nil
+}
+
 // parseGitHubRemote derives owner/repo from a github.com remote URL, in
 // either form git itself produces. It refuses rather than guesses: a remote
 // that is not github.com cannot be turned into a REST API call by
@@ -264,27 +381,36 @@ func (p *PRLander) ensurePR(ctx context.Context, token, owner, repo, head, base,
 	if err != nil {
 		return "", err
 	}
-	if existing != "" {
-		return existing, nil
+	if existing.URL != "" {
+		return existing.URL, nil
 	}
 	return p.createPR(ctx, token, owner, repo, head, base, title, body)
 }
 
-func (p *PRLander) findOpenPR(ctx context.Context, token, owner, repo, head string) (string, error) {
+// openPR is what findOpenPR reports for a head branch: the URL callers have
+// used since #22, and the PR number [PRLander.Reviews] needs to address the
+// reviews endpoint, which is keyed by number, not by head branch.
+type openPR struct {
+	URL    string
+	Number int
+}
+
+func (p *PRLander) findOpenPR(ctx context.Context, token, owner, repo, head string) (openPR, error) {
 	q := url.Values{}
 	q.Set("head", owner+":"+head)
 	q.Set("state", "open")
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/pulls?%s", p.apiBase, owner, repo, q.Encode())
 	var out []struct {
 		HTMLURL string `json:"html_url"`
+		Number  int    `json:"number"`
 	}
 	if err := p.call(ctx, http.MethodGet, endpoint, token, nil, &out); err != nil {
-		return "", fmt.Errorf("list open prs: %w", err)
+		return openPR{}, fmt.Errorf("list open prs: %w", err)
 	}
 	if len(out) == 0 {
-		return "", nil
+		return openPR{}, nil
 	}
-	return out[0].HTMLURL, nil
+	return openPR{URL: out[0].HTMLURL, Number: out[0].Number}, nil
 }
 
 func (p *PRLander) createPR(ctx context.Context, token, owner, repo, head, base, title, body string) (string, error) {

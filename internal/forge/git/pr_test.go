@@ -53,17 +53,44 @@ func githubRemoteNamed(t *testing.T, real, ownerRepo string) string {
 // reused rather than duplicated.
 type fakeGitHub struct {
 	*httptest.Server
-	mu      sync.Mutex
-	byHead  map[string]ghPR
-	creates int
-	next    int
-	checks  []ghCheckRun
+	mu              sync.Mutex
+	byHead          map[string]ghPR
+	creates         int
+	next            int
+	checks          []ghCheckRun
+	reviewsByNumber map[int][]ghReview
 }
 
 type ghPR struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
-	URL   string `json:"html_url"`
+	Number int    `json:"number"`
+	Title  string `json:"title"`
+	Body   string `json:"body"`
+	URL    string `json:"html_url"`
+}
+
+// ghReview is one review [fakeGitHub] reports back from the pulls/{n}/reviews
+// endpoint — enough of GitHub's own review shape for PRLander.Reviews to
+// decode: who reviewed, what they reviewed (commit_id), and what they said
+// (state).
+type ghReview struct {
+	ID   int64 `json:"id"`
+	User struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	CommitID    string    `json:"commit_id"`
+	State       string    `json:"state"`
+	SubmittedAt time.Time `json:"submitted_at"`
+}
+
+// setReviews seeds the reviews a test wants pulls/{number}/reviews to
+// report, replacing whatever was set before for that number.
+func (g *fakeGitHub) setReviews(number int, reviews []ghReview) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.reviewsByNumber == nil {
+		g.reviewsByNumber = map[int][]ghReview{}
+	}
+	g.reviewsByNumber[number] = reviews
 }
 
 // ghCheckRun is what a test reads back after PRLander posts to
@@ -93,7 +120,7 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 
 func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(parts) != 4 || parts[0] != "repos" {
+	if len(parts) < 4 || parts[0] != "repos" {
 		http.NotFound(w, r)
 		return
 	}
@@ -102,7 +129,7 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	switch {
-	case parts[3] == "pulls" && r.Method == http.MethodGet:
+	case len(parts) == 4 && parts[3] == "pulls" && r.Method == http.MethodGet:
 		head := r.URL.Query().Get("head") // "owner:branch"
 		hp := strings.SplitN(head, ":", 2)
 		key := owner + "/" + repo + "#" + hp[len(hp)-1]
@@ -111,7 +138,7 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 			out = append(out, pr)
 		}
 		json.NewEncoder(w).Encode(out)
-	case parts[3] == "pulls" && r.Method == http.MethodPost:
+	case len(parts) == 4 && parts[3] == "pulls" && r.Method == http.MethodPost:
 		var in struct{ Title, Head, Base, Body string }
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -120,11 +147,11 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		key := owner + "/" + repo + "#" + in.Head
 		g.next++
 		g.creates++
-		pr := ghPR{Title: in.Title, Body: in.Body, URL: "https://github.com/" + owner + "/" + repo + "/pull/" + strconv.Itoa(g.next)}
+		pr := ghPR{Number: g.next, Title: in.Title, Body: in.Body, URL: "https://github.com/" + owner + "/" + repo + "/pull/" + strconv.Itoa(g.next)}
 		g.byHead[key] = pr
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(pr)
-	case parts[3] == "check-runs" && r.Method == http.MethodPost:
+	case len(parts) == 4 && parts[3] == "check-runs" && r.Method == http.MethodPost:
 		var in ghCheckRun
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -134,6 +161,13 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		g.checks = append(g.checks, in)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(in)
+	case len(parts) == 6 && parts[3] == "pulls" && parts[5] == "reviews" && r.Method == http.MethodGet:
+		number, _ := strconv.Atoi(parts[4])
+		out := g.reviewsByNumber[number]
+		if out == nil {
+			out = []ghReview{}
+		}
+		json.NewEncoder(w).Encode(out)
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
@@ -803,5 +837,156 @@ func TestPRPostsFailingLandCheckOnFencingRejection(t *testing.T) {
 	}
 	if !strings.Contains(got.Output.Summary, "push refused") {
 		t.Fatalf("box/land summary = %q, want it to carry the fencing rejection's reason", got.Output.Summary)
+	}
+}
+
+// TestEnsureRequestIdempotentSecondCallOpensNoSecondPR is issue #66's gate
+// requirement: an approval gate calls EnsureRequest on every tick for as
+// long as a review takes, and that must never open a second pull request
+// for the same run — forge.Gate's own idempotence rule.
+func TestEnsureRequestIdempotentSecondCallOpensNoSecondPR(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "ask for approval",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+
+	url1, err := x.pr.EnsureRequest(ctx, cs, cs.Members[0])
+	if err != nil {
+		t.Fatalf("first ensure: %v", err)
+	}
+	url2, err := x.pr.EnsureRequest(ctx, cs, cs.Members[0])
+	if err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if x.gh.creates != 1 {
+		t.Fatalf("want exactly one PR created across two ensure calls, got %d", x.gh.creates)
+	}
+	if url1 != url2 {
+		t.Fatalf("ensure returned different URLs for the same run: %q vs %q", url1, url2)
+	}
+}
+
+// TestEnsureRequestRePushesOnMovedHead: a rebuild moves the member's head,
+// and the run branch an approver is reading must move with it — the same
+// open pull request, a new tip.
+func TestEnsureRequestRePushesOnMovedHead(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head1 := buildOn(t, ws, "feature")
+	cs1 := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "ask for approval",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head1, Lease: lease}},
+	}
+	if _, err := x.pr.EnsureRequest(ctx, cs1, cs1.Members[0]); err != nil {
+		t.Fatalf("first ensure: %v", err)
+	}
+	if got := strings.TrimSpace(mustGit(t, x.f.remote, "rev-parse", "refs/heads/box/run-1")); got != string(head1) {
+		t.Fatalf("run branch = %s, want first head %s", got, head1)
+	}
+
+	head2 := buildOn(t, ws, "feature, revised")
+	cs2 := cs1
+	cs2.Members = []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head2, Lease: lease}}
+	if _, err := x.pr.EnsureRequest(ctx, cs2, cs2.Members[0]); err != nil {
+		t.Fatalf("second ensure: %v", err)
+	}
+	if x.gh.creates != 1 {
+		t.Fatalf("a moved head must reuse the open PR, not open a second: want 1 create, got %d", x.gh.creates)
+	}
+	if got := strings.TrimSpace(mustGit(t, x.f.remote, "rev-parse", "refs/heads/box/run-1")); got != string(head2) {
+		t.Fatalf("run branch = %s, want the rebuild's new head %s", got, head2)
+	}
+}
+
+// TestReviewsDecodeAndOnlyApprovedCount: Reviews reports every review GitHub
+// has on record — APPROVED, COMMENTED, DISMISSED alike, each with its
+// commit_id — because silence must never read as approval and a caller
+// cannot honor that with a list that already threw states away. Filtering
+// to only APPROVED, which is the daemon's job, is exercised here as a plain
+// predicate over what Reviews returned.
+func TestReviewsDecodeAndOnlyApprovedCount(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "ask for approval",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	if _, err := x.pr.EnsureRequest(ctx, cs, cs.Members[0]); err != nil {
+		t.Fatalf("ensure: %v", err)
+	}
+	number := x.gh.byHead["acme/app#box/run-1"].Number
+	if number == 0 {
+		t.Fatal("fake github never recorded a PR number for the run branch")
+	}
+	submitted := time.Date(2026, 9, 1, 12, 0, 0, 0, time.UTC)
+	x.gh.setReviews(number, []ghReview{
+		{ID: 1, User: struct {
+			Login string `json:"login"`
+		}{Login: "alice"}, CommitID: string(head), State: "APPROVED", SubmittedAt: submitted},
+		{ID: 2, User: struct {
+			Login string `json:"login"`
+		}{Login: "bob"}, CommitID: string(head), State: "DISMISSED", SubmittedAt: submitted},
+		{ID: 3, User: struct {
+			Login string `json:"login"`
+		}{Login: "carol"}, CommitID: string(head), State: "COMMENTED", SubmittedAt: submitted},
+	})
+
+	reviews, err := x.pr.Reviews(ctx, cs, cs.Members[0])
+	if err != nil {
+		t.Fatalf("reviews: %v", err)
+	}
+	if len(reviews) != 3 {
+		t.Fatalf("reviews = %d, want all 3 states reported, not just approvals: %+v", len(reviews), reviews)
+	}
+	for _, r := range reviews {
+		if r.CommitID != string(head) {
+			t.Fatalf("review %+v: commit_id = %q, want %q", r, r.CommitID, head)
+		}
+		if !r.SubmittedAt.Equal(submitted) {
+			t.Fatalf("review %+v: submitted_at = %v, want %v", r, r.SubmittedAt, submitted)
+		}
+	}
+	var approved int
+	for _, r := range reviews {
+		if r.State == "APPROVED" {
+			approved++
+		}
+	}
+	if approved != 1 {
+		t.Fatalf("approved reviews = %d, want 1 — a dismissed or commenting review is not an approval", approved)
 	}
 }
