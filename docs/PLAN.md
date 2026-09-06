@@ -1663,5 +1663,7 @@ polls its forge by label (#63), a self-deploy chore (#64),
 against Sonnet's $1.42, and assigned one builder a tier above the box's on
 its own. Found: an API server error mid-response parks the unit and its
 unmetered silence halts the hour (#69); the volume cap paced the round to
-one unit an hour; every unit named the daemon section. The flip to `main`
-with the reviewer on follows the promotion.
+one unit an hour; every unit named the daemon section; and a builder
+whose workspace sits inside the checkout read and wrote the checkout by
+absolute path (#73) — the tool policy judges names, not paths. The flip
+to `main` with the reviewer on follows the promotion.
