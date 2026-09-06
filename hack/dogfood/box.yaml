@@ -51,6 +51,13 @@ budget:
   # the meter refuses new starts until the window resets. Half is Chris's.
   # `hack/dogfood/window.py` asks the same question before a round starts.
   window_reserve: 0.5
+  # This factory runs on the subscription on this machine, which is why
+  # window_reserve above is the brake that binds and max_cost_per_window is
+  # unset: a subscription prices nothing for a cost ceiling to enforce.
+  # Naming it also means a key that turns up in the daemon's environment —
+  # by accident, by a shell profile, by anything — stops the box instead of
+  # quietly moving every run onto an invoice nobody is watching.
+  credential: plan
   # The runaway bound, which the window cannot express: the window gates
   # starts, so its real ceiling is "the limit, plus one whole run". That is
   # how 6M became 25,419,130 in round 3.

@@ -209,6 +209,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 		rec.json(ctx, "agent-session", bundle.Ref, sessionRecord{
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
+			Credential: res.Usage.Credential(),
 		})
 	}
 	// The unit's own run key, not a run of the reviewer's own: a unit's cost

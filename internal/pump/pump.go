@@ -291,11 +291,15 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		}
 		release, err := p.Meter.Acquire(ctx, item.ID)
 		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrBusy) ||
-			errors.Is(err, capacity.ErrUnmetered) {
+			errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrCredential) {
 			// Pacing, not failure: the rest waits for the next tick. An
 			// unmetered window is pacing too — the meter has lost track of
 			// spend, and the factory holds until the window turns over
-			// rather than running on an account it cannot read.
+			// rather than running on an account it cannot read. A credential
+			// mismatch or an unnamed one under a brake is the same shape: a
+			// factory that has stopped on purpose because it no longer knows
+			// — or was never told — which account it is spending, not a
+			// tick that failed.
 			break
 		}
 		if err != nil {

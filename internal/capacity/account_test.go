@@ -14,7 +14,7 @@ import (
 // and above the reserve the meter refuses new starts until it resets.
 func TestTheAccountsWindowBrakes(t *testing.T) {
 	ctx := context.Background()
-	m, now := meter(t, Budget{MaxConcurrent: 2, Window: time.Hour, WindowReserve: 0.6})
+	m, now := meter(t, Budget{MaxConcurrent: 2, Window: time.Hour, WindowReserve: 0.6, Credential: CredentialPlan})
 	resets := now.Add(90 * time.Minute)
 	m.Charge(ctx, "run-1", Spend{Total: 1_000_000, Reported: true,
 		Limit: &Limit{Status: "allowed_warning", Window: "five_hour", Utilization: 0.82, ResetsAt: resets.Unix()}})
@@ -56,7 +56,7 @@ func TestTheAccountsWindowBrakes(t *testing.T) {
 // account's window is nobody's concern.
 func TestBelowTheReserveIsNotABrake(t *testing.T) {
 	ctx := context.Background()
-	m, now := meter(t, Budget{MaxConcurrent: 2, Window: time.Hour, WindowReserve: 0.6})
+	m, now := meter(t, Budget{MaxConcurrent: 2, Window: time.Hour, WindowReserve: 0.6, Credential: CredentialPlan})
 	m.Charge(ctx, "run-1", Spend{Total: 10, Reported: true,
 		Limit: &Limit{Status: "allowed", Window: "five_hour", Utilization: 0.3, ResetsAt: now.Add(time.Hour).Unix()}})
 	if err := take(ctx, m, "run-2"); err != nil {
@@ -86,7 +86,7 @@ func TestARejectedAccountRefusesWithoutAReserve(t *testing.T) {
 // because it forgot — even when the meter's own window has since rolled.
 func TestTheAccountsWindowSurvivesARestart(t *testing.T) {
 	ctx := context.Background()
-	m, now := meter(t, Budget{MaxConcurrent: 2, Window: time.Hour, WindowReserve: 0.6})
+	m, now := meter(t, Budget{MaxConcurrent: 2, Window: time.Hour, WindowReserve: 0.6, Credential: CredentialPlan})
 	resets := now.Add(4 * time.Hour)
 	m.Charge(ctx, "run-1", Spend{Total: 10, Reported: true,
 		Limit: &Limit{Status: "allowed_warning", Window: "five_hour", Utilization: 0.9, ResetsAt: resets.Unix()}})

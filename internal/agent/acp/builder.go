@@ -331,6 +331,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		b.recordJSON(ctx, ws.Run, "agent-session", bundle.Ref, sessionRecord{
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
+			Credential: res.Usage.Credential(),
 		})
 	}
 	// Cost is charged even when the run failed. A session that errored
@@ -688,6 +689,11 @@ type sessionRecord struct {
 	Modes    ModeState      `json:"modes"`
 	Config   []ConfigOption `json:"config"`
 	Commands []string       `json:"commands"`
+	// Credential is which account this run spent against, as derived from
+	// its own usage report — plan, key, or absent when neither was said.
+	// Never a credential VALUE, only its kind: see capacity.ErrCredential
+	// for why that distinction is the whole point.
+	Credential Credential `json:"credential,omitempty"`
 }
 
 // recordJSON writes a narrative record whose body is a marshalled value —

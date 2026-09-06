@@ -192,6 +192,7 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 		rec.json(ctx, "agent-session", bundle.Ref, sessionRecord{
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
+			Credential: res.Usage.Credential(),
 		})
 	}
 	if p.Spend != nil && res.Prompted {

@@ -55,6 +55,9 @@ func TestDogfoodBoxIsNarrow(t *testing.T) {
 	if c.Budget.WindowReserve <= 0 {
 		t.Error("no window_reserve: the account's window is the brake that actually bound in round 4")
 	}
+	if c.Budget.Credential != "plan" {
+		t.Errorf("budget.credential = %q, want %q: this factory runs on the subscription on this machine, and window_reserve only means what it claims when the box says so", c.Budget.Credential, "plan")
+	}
 	if forge.Lane(r.Lane) != forge.LaneGated {
 		t.Errorf("lane = %q, want %q — gates then land, until the optimistic lane is rehearsed on a scratch mirror",
 			r.Lane, forge.LaneGated)

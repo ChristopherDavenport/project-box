@@ -184,6 +184,34 @@ type Usage struct {
 	RateLimit *RateLimit
 }
 
+// Credential is which account this usage says a run spent against: [CredentialPlan]
+// for a subscription, [CredentialKey] for a metered API key, or "" when
+// neither was said.
+//
+// A reported account window wins over a reported price, the same order
+// capacity.Spend.Credential applies to the meter's own charge — duplicated
+// rather than imported, because this package deliberately knows nothing
+// about budgets (see daemon.SpendOf); internal/daemon, which imports both,
+// carries a test asserting the two derivations agree.
+type Credential string
+
+const (
+	CredentialPlan Credential = "plan"
+	CredentialKey  Credential = "key"
+)
+
+// Credential derives which account this usage spent against.
+func (u Usage) Credential() Credential {
+	switch {
+	case u.RateLimit != nil:
+		return CredentialPlan
+	case u.CostUSD > 0:
+		return CredentialKey
+	default:
+		return ""
+	}
+}
+
 // RateLimit is the account's rate-limit state as the agent reported it. The
 // adapter forwards it under _meta on usage_update; the protocol reserves
 // _meta for exactly this kind of agent-specific fact.

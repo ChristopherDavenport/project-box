@@ -167,6 +167,79 @@ boxes:
 	}
 }
 
+// TestCredentialRefusesUnknownSpellings: budget.credential offers exactly
+// plan or key, absent included; anything else is refused naming what it
+// offers.
+func TestCredentialRefusesUnknownSpellings(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+budget:
+  credential: subscription
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err == nil || !strings.Contains(err.Error(), "plan") || !strings.Contains(err.Error(), "key") {
+		t.Fatalf("budget.credential: subscription: err = %v, want a refusal naming plan and key", err)
+	}
+}
+
+// TestABrakeWithNoCredentialIsRefused: window_reserve or max_cost_per_window
+// binds an account, and an operator who set the brake without naming which
+// account it is should be told at load — the same call the config already
+// makes about half a retention policy — rather than discover it the day a
+// key in the daemon's environment moves every run onto an invoice the box
+// thought was a subscription's.
+func TestABrakeWithNoCredentialIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, brake string
+	}{
+		{"window_reserve", "window_reserve: 0.5"},
+		{"max_cost_per_window", "max_cost_per_window: 25.00"},
+	} {
+		_, err := Load(writeCfg(t, `
+tenant: acme
+budget:
+  `+tc.brake+`
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+		if err == nil || !strings.Contains(err.Error(), "credential") {
+			t.Errorf("%s with no credential: err = %v, want a refusal naming credential", tc.name, err)
+		}
+	}
+}
+
+// TestACredentialWithNoBrakeLoads: an unbraked box that never asked to
+// budget is not refused for staying silent about which account it runs on —
+// only a brake makes the question load-bearing.
+func TestACredentialWithNoBrakeLoads(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+budget:
+  max_concurrent: 2
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatalf("an unbraked box with no credential named was refused: %v", err)
+	}
+	if c.Budget.Credential != "" {
+		t.Fatalf("credential = %q, want absent", c.Budget.Credential)
+	}
+}
+
 // TestModelAndSessionLoad: the box names the model by the value the agent
 // lists, and the rest of the session by option id.
 func TestModelAndSessionLoad(t *testing.T) {

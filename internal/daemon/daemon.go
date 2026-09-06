@@ -216,7 +216,8 @@ func New(path string) (*Daemon, error) {
 		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   cfg.MaxCostMicros(),
 		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration(),
-		WindowReserve: cfg.Budget.WindowReserve})
+		WindowReserve: cfg.Budget.WindowReserve,
+		Credential:    capacity.CredentialKind(cfg.Budget.Credential)})
 	// The window's account outlives the process that spent it. Without this a
 	// restart is a fresh budget, so the brake is only ever as strong as the
 	// daemon's uptime.
@@ -603,7 +604,8 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   ncfg.MaxCostMicros(),
 		AllowUnmetered:     ncfg.Budget.AllowUnmetered, Window: ncfg.WindowDuration(),
-		WindowReserve: ncfg.Budget.WindowReserve})
+		WindowReserve: ncfg.Budget.WindowReserve,
+		Credential:    capacity.CredentialKind(ncfg.Budget.Credential)})
 	d.poller.Actor = ncfg.Runner
 	d.mu.Lock()
 	d.cfg = ncfg

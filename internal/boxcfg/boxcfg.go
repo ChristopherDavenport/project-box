@@ -168,6 +168,17 @@ type Budget struct {
 	// stops the factory at half. Zero means only a rejected status refuses.
 	// See capacity.Budget.WindowReserve for what it can and cannot see.
 	WindowReserve float64 `yaml:"window_reserve"`
+	// Credential names which account this box runs on: `plan` for a
+	// subscription, whose brake is WindowReserve, or `key` for a metered API
+	// key, whose brake is MaxCostPerWindow. Absent is refused the moment
+	// either brake is set — see validate — because a brake that does not say
+	// which account it is protecting protects nothing: a key left in the
+	// daemon's environment on a box that believes it is on a subscription
+	// would move every run onto the invoice with WindowReserve refusing
+	// nothing, and a subscription run under a cost ceiling prices nothing
+	// for it to enforce. A run that reports the OTHER kind than the one
+	// named here stops the box; see capacity.ErrCredential.
+	Credential string `yaml:"credential"`
 }
 
 // Argv is a command, written in YAML either as one string for the common
@@ -710,6 +721,20 @@ func (c *Config) validate() error {
 	}
 	if r := c.Budget.WindowReserve; r < 0 || r > 1 {
 		return fmt.Errorf("boxcfg: budget.window_reserve %v — a share of the account's window, 0 to 1", r)
+	}
+	switch c.Budget.Credential {
+	case "", "plan", "key":
+	default:
+		return fmt.Errorf("boxcfg: budget.credential %q — this box offers plan (a subscription) or key (a metered API key)", c.Budget.Credential)
+	}
+	// A brake with nobody saying which account it binds is a brake that does
+	// not know what it is protecting: the same call the config already makes
+	// about half a retention policy, an operator who set a brake and got
+	// silence should be told at load, not discover it the day a key in the
+	// daemon's environment moves every run onto an invoice the box thought
+	// it was on a subscription.
+	if c.Budget.Credential == "" && (c.Budget.WindowReserve > 0 || c.Budget.MaxCostPerWindow > 0) {
+		return fmt.Errorf("boxcfg: budget.window_reserve or budget.max_cost_per_window is set with no budget.credential — name plan or key, or neither brake means what it claims")
 	}
 	if c.Retention.KeepFor != "" {
 		if _, err := time.ParseDuration(c.Retention.KeepFor); err != nil {
