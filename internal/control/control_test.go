@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -279,5 +280,58 @@ func TestQueueShowsStageAndWhatBlocks(t *testing.T) {
 		if e.ID == "wi-dependent" && len(e.BlockedBy) != 0 {
 			t.Fatalf("a settled dependency still reads as blocking: %v", e.BlockedBy)
 		}
+	}
+}
+
+// TestQueueRowCarriesSummaryAndClipsTask: the row a listing shows must carry
+// the planner's summary when the item has one, and must never let a task
+// with no newline — a single paragraph — through unbounded (issue #74).
+func TestQueueRowCarriesSummaryAndClipsTask(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	if _, err := q.Submit(ctx, queue.WorkItem{
+		ID: "wi-summary", Tenant: tn, Box: "shop", Ingress: "ing-1",
+		Task: "t", Summary: "teach the pump to breathe",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	long := strings.Repeat("a", 250)
+	if _, err := q.Submit(ctx, queue.WorkItem{
+		ID: "wi-long", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: long,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Submit(ctx, queue.WorkItem{
+		ID: "wi-presummary", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: "no summary here",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := r.Queue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[string]QueueEntry{}
+	for _, e := range entries {
+		byID[e.ID] = e
+	}
+
+	if got := byID["wi-summary"].Summary; got != "teach the pump to breathe" {
+		t.Fatalf("summary not carried onto the row: %q", got)
+	}
+
+	wantClipped := long[:199] + "…"
+	if got := byID["wi-long"].Task; got != wantClipped {
+		t.Fatalf("task not clipped: got %q", got)
+	}
+
+	// An item queued before queue.Item.Summary existed has none — no
+	// server-side guess fills it in.
+	if got := byID["wi-presummary"].Summary; got != "" {
+		t.Fatalf("summary should stay absent when the item never had one: %q", got)
+	}
+	if got := byID["wi-presummary"].Task; got != "no summary here" {
+		t.Fatalf("task line: %q", got)
 	}
 }

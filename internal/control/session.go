@@ -161,7 +161,8 @@ func (r *Room) judgement(ctx context.Context, id string) (Session, bool, error) 
 	}
 	e := QueueEntry{
 		ID: id, Box: ing.Box, Repo: ing.Repo, Ingress: id,
-		Task: firstLine(plan.TaskOf(ing)), Seat: ran.Seat, AgentRef: ran.AgentRef,
+		Task: clip(firstLine(plan.TaskOf(ing)), 200), Summary: ing.Title,
+		Seat: ran.Seat, AgentRef: ran.AgentRef,
 		Opened: ing.Opened,
 	}
 	return Session{

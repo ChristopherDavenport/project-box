@@ -223,7 +223,7 @@ func TestAJudgementIsASessionUntilItSettles(t *testing.T) {
 
 	ing := ingress.Ingress{
 		ID: "ing-judge", Tenant: tn, Box: "shop", Repo: "app",
-		Requester: "chris", Note: "decompose this",
+		Requester: "chris", Note: "decompose this", Title: "the checkout flow is broken",
 	}
 	body, err := json.Marshal(ing)
 	if err != nil {
@@ -268,6 +268,9 @@ func TestAJudgementIsASessionUntilItSettles(t *testing.T) {
 	}
 	if s.Task != "decompose this" {
 		t.Errorf("task = %q", s.Task)
+	}
+	if s.Summary != ing.Title {
+		t.Errorf("summary = %q, want the ingress title %q", s.Summary, ing.Title)
 	}
 	if s.Seat != "planner" || s.AgentRef != "sha256:cafef00d" {
 		t.Errorf("seat=%q agentref=%q — the planner's own agent-run record carried both", s.Seat, s.AgentRef)

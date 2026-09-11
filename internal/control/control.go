@@ -269,8 +269,13 @@ type QueueEntry struct {
 	Kind string `json:"kind,omitempty"`
 	Plan string `json:"plan,omitempty"`
 	Node string `json:"node,omitempty"`
-	// Task is the instruction's first line: enough to recognise the unit,
-	// never the whole prompt.
+	// Summary is the planner's one line for the unit, copied verbatim from
+	// the item. Empty on items queued before queue.Item.Summary existed —
+	// the web's title() falls back to Task client-side, and nothing here
+	// derives a summary from the task server-side.
+	Summary string `json:"summary,omitempty"`
+	// Task is the instruction's first line, clipped: enough to recognise
+	// the unit, never the whole prompt.
 	Task string `json:"task"`
 	// Note is why the item is in this state — "branch main is leased", a
 	// gate's reasons, a park cause. The queue has always written it and
@@ -562,8 +567,8 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 	}
 	e := QueueEntry{
 		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,
-		Kind: w.Kind, Plan: w.Plan, Node: w.Node,
-		Task: firstLine(w.Task), Note: w.Note, Severity: w.Severity,
+		Kind: w.Kind, Plan: w.Plan, Node: w.Node, Summary: w.Summary,
+		Task: clip(firstLine(w.Task), 200), Note: w.Note, Severity: w.Severity,
 		Head: w.Head, Built: w.Built, Seat: ran.Seat, AgentRef: ran.AgentRef,
 		Stage: stage, DependsOn: w.DependsOn,
 		Opened: opened, Changed: changed,
@@ -653,6 +658,17 @@ func stageOf(kind string) string {
 func firstLine(s string) string {
 	head, _, _ := strings.Cut(s, "\n")
 	return head
+}
+
+// clip bounds s to at most n runes, trading the tail for a trailing ellipsis
+// when it would otherwise run longer — mirrors web/src/format.js's
+// clip(s, n=200), so a paragraph with no newline still makes a short row.
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n-1]) + "…"
 }
 
 // Sample picks n settled items for human review, deterministically from the
