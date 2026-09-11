@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/forge"
 )
 
 // park drives an item to the exception queue the way a run does.
@@ -310,6 +313,23 @@ func TestSettlingDropsTheUnfinishedMark(t *testing.T) {
 	}
 }
 
+// gateRecord appends a "gate" record to w's chain the way the loop does: a
+// forge.Verdict, marshalled with its own default field names, subject to the
+// head sha it judged.
+func gateRecord(t *testing.T, qu *Queue, w WorkItem, sha string, v forge.Verdict) {
+	t.Helper()
+	body, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := qu.Store.Log().Append(context.Background(), evidence.Record{
+		Tenant: w.Tenant, Scope: scope(w.ID), Kind: "gate", Subject: sha,
+		Actor: "runner-1", Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestARebuildIsWokenKnowingWhatRefusedTheLastAttempt. The reviewer's first
 // refusal on the dogfood named the line and the fix; the rebuild that
 // followed ran on the same task, blind, and made the same mistake. A retry
@@ -318,7 +338,30 @@ func TestSettlingDropsTheUnfinishedMark(t *testing.T) {
 // a layer at wake time, so the rebuilt run's agentref says what it was told.
 func TestARebuildIsWokenKnowingWhatRefusedTheLastAttempt(t *testing.T) {
 	qu, ctx := q(t), context.Background()
-	parkKeeping(t, qu, "wi-1", "review: fail (the regex cannot match the list-item form)")
+	w := submit(t, qu, "wi-1")
+	w, lease, err := qu.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two attempts: the first attempt's commit, then the current one — with
+	// a free recheck on the current commit that failed again, to prove a
+	// same-sha second refusal dedupes to its latest rather than doubling up.
+	gateRecord(t, qu, w, "sha-attempt-1", forge.Verdict{
+		Gate: "review", Decision: forge.DecisionFail,
+		Reason: "the regex cannot match\nthe list-item form",
+	})
+	gateRecord(t, qu, w, "sha-built", forge.Verdict{
+		Gate: "review", Decision: forge.DecisionFail,
+		Reason: "still cannot match\nthe nested list case",
+	})
+	gateRecord(t, qu, w, "sha-built", forge.Verdict{
+		Gate: "review", Decision: forge.DecisionFail,
+		Reason: "recheck: still cannot match\nthe nested list case",
+	})
+	w.KeepCandidate("sha-built", "sha-base", []string{})
+	if _, err := qu.ParkKeeping(ctx, w, lease, SeverityMedium, "review: fail (the regex cannot match the list-item form)"); err != nil {
+		t.Fatal(err)
+	}
 
 	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "rebuild: admit the list-item form")
 	if err != nil {
@@ -330,10 +373,18 @@ func TestARebuildIsWokenKnowingWhatRefusedTheLastAttempt(t *testing.T) {
 	if got.Prior.Run != "wi-1" || got.Prior.Sha != "sha-built" {
 		t.Fatalf("prior = %+v, want the abandoned attempt's run and commit", *got.Prior)
 	}
-	for _, want := range []string{"review: fail", "list-item form", "chris", "admit the list-item form"} {
-		if !strings.Contains(got.Prior.Reason, want) {
-			t.Fatalf("prior reason %q does not carry %q", got.Prior.Reason, want)
-		}
+	if got.Prior.RetriedBy != "chris" || got.Prior.RetryNote != "rebuild: admit the list-item form" {
+		t.Fatalf("the operator's note must be held on its own attributed fields: %+v", *got.Prior)
+	}
+	if len(got.Prior.Verdicts) != 2 {
+		t.Fatalf("want one entry per refused attempt (a same-sha recheck should dedupe), got %+v", got.Prior.Verdicts)
+	}
+	first, second := got.Prior.Verdicts[0], got.Prior.Verdicts[1]
+	if first.Attempt != 1 || first.Reason != "the regex cannot match\nthe list-item form" {
+		t.Fatalf("first verdict = %+v, want attempt 1 with its reason intact", first)
+	}
+	if second.Attempt != 2 || second.Reason != "recheck: still cannot match\nthe nested list case" {
+		t.Fatalf("second verdict = %+v, want attempt 2 deduped to its LATEST refusal", second)
 	}
 	if _, ok := got.Prior.Layer(); !ok {
 		t.Fatal("the carried attempt does not resolve into a layer, so the builder would be woken knowing nothing")

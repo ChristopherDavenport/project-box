@@ -372,6 +372,69 @@ type Queue struct {
 
 func scope(id string) string { return "workitem/" + id }
 
+// gateVerdict is a [forge.Verdict] read back off the chain. Unmarshalled by
+// field name rather than by importing internal/forge: a gate record's body
+// is that type's own default JSON encoding (internal/forge/gate.go), and
+// this package already reads other records' bodies the same way rather than
+// pull in the gate package for a shape it only needs to read.
+type gateVerdict struct {
+	Gate     string
+	Decision string
+	Reason   string
+}
+
+// priorVerdicts reads item id's gate records back off its chain and returns
+// one [agent.PriorVerdict] per refused attempt, oldest first. Attempts are
+// numbered by first appearance of the record's Subject — the head sha each
+// verdict judged — and a sha that later carries a non-fail verdict (a free
+// recheck that passed) is dropped: it stopped being a refusal. A sha that
+// fails more than once keeps only its latest refusal, since a recheck on an
+// unchanged commit is one attempt, not two.
+func priorVerdicts(ctx context.Context, log evidence.Log, t tenant.ID, id string) ([]agent.PriorVerdict, error) {
+	attemptOf := map[string]int{}
+	latest := map[string]struct {
+		attempt int
+		body    gateVerdict
+	}{}
+	var order []string
+	next := 0
+	for r, err := range log.Since(ctx, t, scope(id), 0) {
+		if err != nil {
+			return nil, err
+		}
+		if r.Kind != "gate" {
+			continue
+		}
+		sha := r.Subject
+		n, ok := attemptOf[sha]
+		if !ok {
+			next++
+			n = next
+			attemptOf[sha] = n
+			order = append(order, sha)
+		}
+		var body gateVerdict
+		if err := json.Unmarshal(r.Body, &body); err != nil {
+			return nil, fmt.Errorf("gate record %s: %w", r.ID, err)
+		}
+		latest[sha] = struct {
+			attempt int
+			body    gateVerdict
+		}{attempt: n, body: body}
+	}
+	var out []agent.PriorVerdict
+	for _, sha := range order {
+		v := latest[sha]
+		if v.body.Decision != "fail" {
+			continue // a pass or a still-pending verdict is not a refusal
+		}
+		out = append(out, agent.PriorVerdict{
+			Gate: v.body.Gate, Decision: v.body.Decision, Reason: v.body.Reason, Attempt: v.attempt,
+		})
+	}
+	return out, nil
+}
+
 // ClaimRepo is the pseudo-repository a claim is leased under. A claim IS a
 // lease, and a lease names a (repo, ref) pair; no git repository is involved.
 const ClaimRepo = "_queue"
@@ -732,8 +795,18 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 		// mistake — a refusal that never reaches the hands is a judgement
 		// nobody acts on. It resolves into a layer at wake time, so the
 		// rebuilt run's agentref records what it was told.
+		//
+		// Read from the chain rather than from the park note: the note kept
+		// only the first line of the latest refusal, and this is exactly
+		// the account a rebuild must not be handed. Unknown never reads as
+		// zero, so a chain that cannot be read fails the retry rather than
+		// persisting a verdict-less Prior.
+		verdicts, verr := priorVerdicts(ctx, q.Store.Log(), w.Tenant, w.ID)
+		if verr != nil {
+			return WorkItem{}, fmt.Errorf("queue: reopen: reading %s's prior verdicts: %w", id, verr)
+		}
 		w.Prior = &agent.Prior{Run: w.ID, Repo: w.Repo, Sha: w.Built,
-			Reason: strings.TrimSpace(w.Note + " — retried by " + actor + ": " + note)}
+			Verdicts: verdicts, RetriedBy: actor, RetryNote: note}
 	}
 	w.State, w.Note = to, note
 	// Resolve is final and always drops it — closing an exception says there

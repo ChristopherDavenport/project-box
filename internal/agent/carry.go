@@ -5,6 +5,29 @@ import (
 	"strings"
 )
 
+// PriorVerdict is one gate's judgement on one refused attempt of this unit's
+// prior life — the FULL reason, not the first line a park note kept. A park
+// note is a summary for a person; a rebuild woken on the summary reads a
+// stripped account of exactly the mistake it is meant to avoid repeating.
+type PriorVerdict struct {
+	// Gate is which gate answered, Decision what it decided (a fail, since
+	// only refusals are carried), and Reason its judgement whole.
+	Gate     string `json:"gate,omitempty"`
+	Decision string `json:"decision,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+	// Attempt is this unit's attempt number this verdict judged, oldest
+	// first across the slice it appears in.
+	Attempt int `json:"attempt,omitempty"`
+}
+
+// maxVerdictReasonBytes bounds a carried verdict's reason. Unlike Reason
+// below — already trimmed by whoever set it — a PriorVerdict's Reason is a
+// gate's own text verbatim, and a reviewer's can run to pages. Mirrors the
+// reviewer's own diff bound (acp/reviewer.go's maxDiffBytes): cut at a line
+// boundary, and the layer says so rather than silently handing over less
+// than it claims to.
+const maxVerdictReasonBytes = 8 << 10
+
 // Prior is the attempt that came before this run.
 //
 // Work the factory opens for itself — repair for a red landing most of all —
@@ -37,15 +60,29 @@ type Prior struct {
 	// place to start.
 	Checks []string `json:"checks,omitempty"`
 	Reason string   `json:"reason,omitempty"`
+	// Verdicts is every refused attempt's gate judgement from this unit's
+	// prior life, oldest first, one entry per refused attempt — read back
+	// from the chain rather than summarized, so a builder on a rebuild is
+	// told what each gate actually said instead of a park note's first line
+	// of its latest one.
+	Verdicts []PriorVerdict `json:"verdicts,omitempty"`
 	// Notes are the predecessor's handoff, resolved at wake time from the
 	// seat that wrote them and never authored here.
 	Notes []string `json:"notes,omitempty"`
+	// RetriedBy and RetryNote are an operator's own words on a manual retry,
+	// attributed and rendered on their own line — never folded into a
+	// verdict's words, because a rebuild reopened over a judgement it
+	// disputes must not have that dispute read back as part of the judgement
+	// itself.
+	RetriedBy string `json:"retriedBy,omitempty"`
+	RetryNote string `json:"retryNote,omitempty"`
 }
 
 // Empty reports whether there is nothing here worth carrying. A repo and a
 // branch alone say only where work happens, which the agent knows already.
 func (p Prior) Empty() bool {
-	return p.Run == "" && p.Sha == "" && p.Reason == "" && len(p.Checks) == 0 && len(p.Notes) == 0
+	return p.Run == "" && p.Sha == "" && p.Reason == "" && len(p.Checks) == 0 &&
+		len(p.Notes) == 0 && len(p.Verdicts) == 0 && p.RetryNote == ""
 }
 
 // Layer renders the carried attempt as a resolved inline layer, reporting
@@ -80,6 +117,30 @@ func (p Prior) Layer() (Layer, bool) {
 	if p.Reason != "" {
 		fmt.Fprintf(&b, "- what the checks said: %s\n", p.Reason)
 	}
+	if len(p.Verdicts) > 0 {
+		n := len(p.Verdicts) + 1
+		fmt.Fprintf(&b, "- attempt %d of %d\n", n, n)
+		for _, gate := range verdictGates(p.Verdicts) {
+			fmt.Fprintf(&b, "- the %s gate refused:\n", gate)
+			for _, v := range p.Verdicts {
+				if v.Gate != gate {
+					continue
+				}
+				reason, cut := boundReason(v.Reason, maxVerdictReasonBytes)
+				fmt.Fprintf(&b, "  - attempt %d said:\n\n%s\n", v.Attempt, reason)
+				if cut {
+					fmt.Fprintf(&b, "\n  (cut at %d bytes — the gate's reason ran longer than that)\n", maxVerdictReasonBytes)
+				}
+			}
+		}
+	}
+	if p.RetryNote != "" {
+		by := p.RetriedBy
+		if by == "" {
+			by = "an operator"
+		}
+		fmt.Fprintf(&b, "- retried by %s: %s\n", by, p.RetryNote)
+	}
 	if len(p.Notes) > 0 {
 		b.WriteString("\nIts handoff, oldest first:\n")
 		for _, n := range p.Notes {
@@ -101,4 +162,33 @@ func (p Prior) where() string {
 		return p.Repo + "@" + p.Sha
 	}
 	return p.Sha
+}
+
+// verdictGates names the gates that appear in vs, in first-appearance order —
+// almost always one gate refusing across several attempts, but a rendering
+// that assumed so would silently drop a different gate's refusal.
+func verdictGates(vs []PriorVerdict) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, v := range vs {
+		if !seen[v.Gate] {
+			seen[v.Gate] = true
+			out = append(out, v.Gate)
+		}
+	}
+	return out
+}
+
+// boundReason caps s at max bytes on a line boundary, exactly as the
+// reviewer's own capPatch does for a diff — the last line shown is whole
+// rather than half of one — and reports whether it cut anything.
+func boundReason(s string, max int) (string, bool) {
+	if len(s) <= max {
+		return s, false
+	}
+	cut := s[:max]
+	if i := strings.LastIndexByte(cut, '\n'); i > 0 {
+		cut = cut[:i]
+	}
+	return cut, true
 }

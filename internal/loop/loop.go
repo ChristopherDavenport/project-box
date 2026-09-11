@@ -868,6 +868,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 			prior := agent.Prior{
 				Run: item.ID, Repo: l.Repo.Name, Branch: l.Branch, Sha: string(head),
 				Checks: failing(verdicts), Reason: priorReason,
+				Verdicts: asPriorVerdicts(verdicts, 1),
 			}
 			repair, rerr := l.Red(ctx, item, prior)
 			if rerr != nil {
@@ -1105,6 +1106,20 @@ func failing(vs []forge.Verdict) []string {
 	for _, v := range vs {
 		if v.Decision != forge.DecisionPass {
 			out = append(out, v.Gate)
+		}
+	}
+	return out
+}
+
+// asPriorVerdicts renders a batch of in-hand verdicts as [agent.PriorVerdict]
+// entries at a single attempt number, for a Prior built while the verdicts
+// that produced it are still in scope — a fail is a refusal worth carrying;
+// a pass or a pending answer is not.
+func asPriorVerdicts(vs []forge.Verdict, attempt int) []agent.PriorVerdict {
+	var out []agent.PriorVerdict
+	for _, v := range vs {
+		if v.Decision == forge.DecisionFail {
+			out = append(out, agent.PriorVerdict{Gate: v.Gate, Decision: string(v.Decision), Reason: v.Reason, Attempt: attempt})
 		}
 	}
 	return out
