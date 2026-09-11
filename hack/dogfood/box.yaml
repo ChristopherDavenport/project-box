@@ -59,7 +59,14 @@ budget:
   # so with two seats one wait idles the box for every unit in another
   # section. Three lets a runnable unit run beside a waiting one; the
   # proper fix is a wait that holds no seat.
-  max_concurrent: 3
+  # Four since round 11 (2026-09-10): the point of the per-cycle brakes was
+  # to measure a round, not to keep the seats busy, and the measurements
+  # are in. Round 10 landed nine units for $66 and spent 84 minutes of the
+  # round paused at the hourly cap. The overall spend is bounded by
+  # `window_reserve` below — the account's own window, the brake that has
+  # ever actually bound — so the brakes above it are set to let a round
+  # run, and only the runaway ceiling stays near its old size.
+  max_concurrent: 4
   # Five, not four, since round 6: the meter counts a start when the pump
   # acquires it, before the loop tries the section leases, so a unit that
   # only WAITED for a section kept its start and was charged a second one
@@ -69,12 +76,16 @@ budget:
   # Twenty since round 8: four issues at once, ten units, a retry and every
   # wait on a section each a start under the double count above. Starts are
   # the brake on a runaway, and four deliberate submissions are not one.
-  max_per_window: 20
+  # Forty since round 11: see max_concurrent.
+  max_per_window: 40
   # Twenty-five million since round 9: round 7 and round 8's three planners fell
   # in one clock hour and put it at 19.6M against fifteen, with every unit
   # refused until the hour turned. Volume is still the brake; a round is
   # not a runaway.
-  max_tokens_per_window: 25000000
+  # A hundred million since round 11: round 10 read 129M across a round,
+  # most of it cache reads, and paused for 84 minutes of hourly cap at 25M.
+  # The window reserve below is the spend brake; this one is volume.
+  max_tokens_per_window: 100000000
   window: 1h
   # The brake in the currency that actually bound. The account's five-hour
   # window is shared with the human on this machine and invisible to the
@@ -102,7 +113,9 @@ budget:
   # Twenty million since round 8: round 7's one unit for two sections read
   # 11.24M against twelve, and a run killed at the ceiling spends it all and
   # lands nothing. Above the most expensive legitimate run, as the note says.
-  max_tokens_per_run: 20000000
+  # Fifty million since round 11: the planner is on a million-token window
+  # now, and a run killed at the ceiling lands nothing.
+  max_tokens_per_run: 50000000
   # Deliberately absent: allow_unmetered. A run that will not say what it
   # cost should stop the factory — that is the whole finding from round 1.
 
@@ -150,8 +163,14 @@ boxes:
     # planner's context has ended under 125K every round, and
     # max_tokens_per_run is the ceiling if that changes. Fable is the same
     # edit (`fable[1m]`) at twice the price; measure Opus first.
+    #
+    # Measured: six Opus plans in round 10 cost $1.76-4.05 each and every
+    # one was right. The planner moves to Fable 5.1 for round 11
+    # (2026-09-10) at effort high — the plan is the one judgement every
+    # unit inherits, and a wrong one costs every unit under it, so it gets
+    # the strongest tier; the builders stay where they are.
     roles:
-      planner: {model: "opus[1m]", session: {effort: high}}
+      planner: {model: "fable[1m]", session: {effort: high}}
       builder: {session: {effort: high}}
       # The reviewer (review: judgement on the repo below) reads one diff
       # per unit against its origination and PLAN §6; it is the quality

@@ -56,9 +56,11 @@ func TestDogfoodBoxIsNarrow(t *testing.T) {
 	// that two units in disjoint regions run side by side, and one seat
 	// cannot show that. Three since round 9: a unit waiting on a section
 	// lease holds its seat, so with two seats one wait idled every unit in
-	// another section. Still bounded small — the spend is real.
-	if c.Budget.MaxConcurrent < 1 || c.Budget.MaxConcurrent > 3 {
-		t.Errorf("max_concurrent = %d, want 1 to 3", c.Budget.MaxConcurrent)
+	// another section. Four since round 11: the account's window is the
+	// spend brake, and the seats are set to let a round run. Still bounded
+	// small — the spend is real.
+	if c.Budget.MaxConcurrent < 1 || c.Budget.MaxConcurrent > 4 {
+		t.Errorf("max_concurrent = %d, want 1 to 4", c.Budget.MaxConcurrent)
 	}
 	if c.Budget.WindowReserve <= 0 {
 		t.Error("no window_reserve: the account's window is the brake that actually bound in round 4")
