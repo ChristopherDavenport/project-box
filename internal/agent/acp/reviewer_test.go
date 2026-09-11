@@ -12,6 +12,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/seat"
@@ -448,4 +449,96 @@ func between(t *testing.T, text, open, close string) string {
 		t.Fatalf("no %q in:\n%s", close, text)
 	}
 	return body
+}
+
+// skillRepo is a skill repository with one pinned skill, for a reviewer to
+// be granted: the shape box.yaml's `harness.skills` names.
+func skillRepo(t *testing.T) (remote, commit string) {
+	t.Helper()
+	remote = t.TempDir()
+	mustSh(t, remote, "git", "init", "-q", "-b", "main")
+	mustSh(t, remote, "git", "config", "user.email", "skills@example.com")
+	mustSh(t, remote, "git", "config", "user.name", "Skills")
+	os.MkdirAll(filepath.Join(remote, "skills", "go"), 0o755)
+	os.WriteFile(filepath.Join(remote, "skills", "go", "SKILL.md"), []byte("---\nname: go\n---\nwrap with %w\n"), 0o644)
+	mustSh(t, remote, "git", "add", "-A")
+	mustSh(t, remote, "git", "commit", "-qm", "the go skill")
+	return remote, strings.TrimSpace(mustSh(t, remote, "git", "rev-parse", "HEAD"))
+}
+
+// TestTheGateIsHandedTheSkillsItWasGranted: the box grants its skills to
+// every role, and the reviewer was the one role with no mirror to lay them
+// out from — the first landing through it on the dogfood found the refusal
+// and nothing behind it. A granted skill now reaches the wire the way a
+// build's does: as the plugin session/new is told to load, at the skills
+// directory beside the reading material. Asserted from what the agent was
+// actually sent, which the harness scenario echoes back as its answer.
+func TestTheGateIsHandedTheSkillsItWasGranted(t *testing.T) {
+	ctx := context.Background()
+	remote, commit := skillRepo(t)
+	m, err := gitforge.NewMirror(t.TempDir(), btn, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs, err := m.ResolveSkills(ctx, []agent.SkillRef{{Name: "go", Source: agent.Source{
+		Kind: agent.SourceGit, Repo: remote, Commit: commit, Path: "skills/go"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rv, cs, s, _ := reviewerRig(t, "harness")
+	rv.Mirror = m
+	layers := gateLayers()
+	layers[0].Skills = refs
+	rv.Composer = &agent.Composer{Source: layers}
+	// The harness scenario answers with session/new's _meta rather than a
+	// judgement, so Evaluate cannot conclude; what was delivered is on the
+	// chain regardless, and that is the fact under test.
+	if _, err := rv.Evaluate(ctx, cs); err == nil {
+		t.Fatal("the harness scenario gave no judgement and the gate concluded anyway")
+	}
+	var meta struct {
+		ClaudeCode struct {
+			Options struct {
+				Plugins []struct {
+					Type string `json:"type"`
+					Path string `json:"path"`
+				} `json:"plugins"`
+			} `json:"options"`
+		} `json:"claudeCode"`
+	}
+	text := agentText(t, s, cs.Run)
+	if err := json.Unmarshal([]byte(text), &meta); err != nil {
+		t.Fatalf("session/new carried no readable _meta (%q): %v", text, err)
+	}
+	// Under this run's directory and beside the material, never inside the
+	// tree under review: the skills directory is a sibling of the agent's
+	// cwd, as forge.SkillsDir names it.
+	under := filepath.Join(rv.Root, cs.Run) + string(filepath.Separator)
+	var paths []string
+	for _, p := range meta.ClaudeCode.Options.Plugins {
+		paths = append(paths, p.Path)
+		if p.Type == "local" && strings.HasPrefix(p.Path, under) && strings.HasSuffix(p.Path, ".skills") {
+			return
+		}
+	}
+	t.Fatalf("the granted skill reached the agent nowhere: plugins %v, want a .skills directory under %s", paths, under)
+}
+
+// TestTheGateWithNoMirrorRefusesGrantedSkills: the refusal the dogfood hit
+// stays for a reviewer assembled without a mirror. Running without the
+// skills would be the silent divergence the agentref exists to prevent, so
+// nothing is judged and nothing is spent.
+func TestTheGateWithNoMirrorRefusesGrantedSkills(t *testing.T) {
+	rv, cs, s, _ := reviewerRig(t, "review-pass")
+	layers := gateLayers()
+	layers[0].Skills = []agent.SkillRef{{Name: "go", Source: agent.Source{
+		Kind: agent.SourceGit, Repo: "https://example/skills.git", Commit: "0123456789abcdef", Path: "skills/go", Digest: "tree-1"}}}
+	rv.Composer = &agent.Composer{Source: layers}
+	_, err := rv.Evaluate(context.Background(), cs)
+	if err == nil || !strings.Contains(err.Error(), "no mirror") {
+		t.Fatalf("err = %v, want the missing-mirror refusal", err)
+	}
+	if got := chain(t, s, cs.Run)["agent-result"]; got != "" {
+		t.Fatalf("an agent ran without the skills it was granted:\n%s", got)
+	}
 }

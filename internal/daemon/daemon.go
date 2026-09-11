@@ -372,6 +372,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 							EnvNames:        forwardedEnv(bx),
 							MaxTokens:       cfg.Budget.MaxTokensPerRun,
 							Composer:        agentBuilder.Composer,
+							Mirror:          d.mirror,
 							Seat:            &seat.Seat{Name: bx.Seat + "-gate", Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
 							Repo:            repo,
 							Workspace:       ws,
