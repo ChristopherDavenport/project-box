@@ -601,7 +601,7 @@ type Repo struct {
 	Lane   string `yaml:"lane"`
 	// Route is the ingress route that targets this repo; defaults to
 	// "<box>-<name>" with polling off. See [Route].
-	Route Route `yaml:"route"`
+	Route Route  `yaml:"route"`
 	Build string `yaml:"build"`
 	Check string `yaml:"check"`
 	// Land selects how a build reaches the base branch. "" (the default)
