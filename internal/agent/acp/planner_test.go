@@ -249,6 +249,22 @@ func TestAPlanCarriesPerUnitSummaries(t *testing.T) {
 	}
 }
 
+// TestAUnitWithNoSummaryIsRefused: a unit missing "summary" is refused by
+// name, the same way a unit missing "task" is — an absent title must not
+// read as an empty one and reach the room.
+func TestAUnitWithNoSummaryIsRefused(t *testing.T) {
+	repo := forge.Repo{Name: "app", Sections: []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
+	}}
+	text := "```json\n" +
+		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","sections":["api"],"depends_on":[]}],"why":"one unit, no summary"}` +
+		"\n```"
+	_, err := parsePlan(text, repo)
+	if err == nil || !strings.Contains(err.Error(), "api-endpoint") || !strings.Contains(err.Error(), "no summary") {
+		t.Fatalf("a unit with no summary was not refused by id: %v", err)
+	}
+}
+
 // TestAPlanCarriesPerUnitAttempts: a planner answer naming "attempts" on a
 // unit becomes a plan.Node with that attempt budget, mirroring how a
 // per-unit model tier carries through; a unit that omits it must read as 0,
@@ -259,8 +275,8 @@ func TestAPlanCarriesPerUnitAttempts(t *testing.T) {
 		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
 	}}
 	text := "```json\n" +
-		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","sections":["api"],"depends_on":[],"attempts":3},` +
-		`{"id":"room-view","task":"Render widgets","sections":["api"],"depends_on":["api-endpoint"]}],"why":"two units"}` +
+		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","summary":"Widgets endpoint","sections":["api"],"depends_on":[],"attempts":3},` +
+		`{"id":"room-view","task":"Render widgets","summary":"Widgets view","sections":["api"],"depends_on":["api-endpoint"]}],"why":"two units"}` +
 		"\n```"
 	nodes, err := parsePlan(text, repo)
 	if err != nil {

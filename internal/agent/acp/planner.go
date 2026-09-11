@@ -409,6 +409,8 @@ func parsePlan(text string, repo forge.Repo) ([]plan.Node, error) {
 			return nil, fmt.Errorf("unit id %q is not a plain token", u.ID)
 		case strings.TrimSpace(u.Task) == "":
 			return nil, fmt.Errorf("unit %s has no task", u.ID)
+		case strings.TrimSpace(u.Summary) == "":
+			return nil, fmt.Errorf("unit %s has no summary — the one line the room shows; a plan without one is incomplete", u.ID)
 		}
 		for _, s := range u.Sections {
 			if _, ok := repo.Section(s); !ok {
