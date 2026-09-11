@@ -77,6 +77,11 @@ type Reviewer struct {
 	WakeNotes int
 	// Repo is the repository under review, for its sections and its remote.
 	Repo forge.Repo
+	// Mirror materializes the bundle's skills beside the reading material,
+	// as the Builder's and the Planner's do. Nil refuses a bundle that grants
+	// any: the daemon always supplies one, and a reviewer assembled without
+	// it must not run as if the skills had been offered.
+	Mirror *gitforge.Mirror
 	// Workspace is the BUILT tree — a clone holding both the base and the
 	// head — and is the only place the diff can come from: the mirror was
 	// never pushed the head, so `git archive` there cannot see it. It is the
@@ -186,10 +191,24 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 	// A bundle that names skills and an agent that never received them is the
 	// silent-divergence case the agentref exists to make impossible, and from
 	// outside it looks exactly like a reviewer that chose not to use them.
-	// The reviewer holds no mirror to materialize from, so it refuses rather
-	// than proceeding with a promise it cannot keep.
+	// So the skills are laid out beside the material, exactly as a build's
+	// are, and a reviewer with no mirror to lay them out from refuses rather
+	// than proceeding with a promise it cannot keep. The first landing
+	// through this gate on the dogfood found the refusal and nothing behind
+	// it: the box grants two skills to every role, and only this role had
+	// no way to materialize them.
+	loaded := "" // handed to the harness only when something is actually there
 	if len(bundle.Skills) > 0 {
-		return forge.Verdict{}, fmt.Errorf("acp: reviewer: bundle grants %d skills and the reviewer has no mirror to materialize them", len(bundle.Skills))
+		if r.Mirror == nil {
+			return forge.Verdict{}, fmt.Errorf("acp: reviewer: bundle grants %d skills and the reviewer has no mirror to materialize them", len(bundle.Skills))
+		}
+		wrote, err := r.Mirror.MaterializeSkills(ctx, skillsDir, bundle.Skills)
+		if err != nil {
+			return forge.Verdict{}, fmt.Errorf("acp: reviewer: %w", err)
+		}
+		if wrote {
+			loaded = skillsDir
+		}
 	}
 
 	sent := reviewerPrompt(bundle, cs.Intent, mat)
@@ -198,7 +217,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 
 	rt := &Runtime{Command: r.Command, Dir: mat.Dir, ContextDir: "", Env: r.Env, EnvNames: r.EnvNames,
 		MaxTokens: r.MaxTokens, Transcript: r.Transcript,
-		SkillsDir: skillsDir, LoadedSkills: "", InheritSettings: r.InheritSettings,
+		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: r.InheritSettings,
 		Progress: r.progress(ctx, run)}
 	if r.Progress != nil {
 		r.Progress(ctx, run, Update{Kind: UpdateStarted, Text: bundle.Ref})
