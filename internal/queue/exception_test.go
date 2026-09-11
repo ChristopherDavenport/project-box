@@ -2,6 +2,7 @@ package queue
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
@@ -306,5 +307,75 @@ func TestSettlingDropsTheUnfinishedMark(t *testing.T) {
 	}
 	if got.Unfinished || got.Built != "" {
 		t.Fatalf("a settled item kept its unfinished resume point: %+v", got)
+	}
+}
+
+// TestARebuildIsWokenKnowingWhatRefusedTheLastAttempt. The reviewer's first
+// refusal on the dogfood named the line and the fix; the rebuild that
+// followed ran on the same task, blind, and made the same mistake. A retry
+// that drops the commit now carries the attempt it abandons — the commit,
+// the gate's words, the operator's — as the prior the builder resolves into
+// a layer at wake time, so the rebuilt run's agentref says what it was told.
+func TestARebuildIsWokenKnowingWhatRefusedTheLastAttempt(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	parkKeeping(t, qu, "wi-1", "review: fail (the regex cannot match the list-item form)")
+
+	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "rebuild: admit the list-item form")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Prior == nil {
+		t.Fatal("a rebuild carried nothing of the attempt it abandoned")
+	}
+	if got.Prior.Run != "wi-1" || got.Prior.Sha != "sha-built" {
+		t.Fatalf("prior = %+v, want the abandoned attempt's run and commit", *got.Prior)
+	}
+	for _, want := range []string{"review: fail", "list-item form", "chris", "admit the list-item form"} {
+		if !strings.Contains(got.Prior.Reason, want) {
+			t.Fatalf("prior reason %q does not carry %q", got.Prior.Reason, want)
+		}
+	}
+	if _, ok := got.Prior.Layer(); !ok {
+		t.Fatal("the carried attempt does not resolve into a layer, so the builder would be woken knowing nothing")
+	}
+	// And the record of the retry carries it: what the next run is told is
+	// on the chain before that run exists.
+	var recorded WorkItem
+	for rec, err := range qu.Store.Log().Since(ctx, tn, scope("wi-1"), 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Kind == "retried" {
+			if err := json.Unmarshal(rec.Body, &recorded); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if recorded.Prior == nil || recorded.Prior.Sha != "sha-built" {
+		t.Fatalf("the retried record does not carry the prior: %+v", recorded.Prior)
+	}
+	// The builder reads the item back from the store when it wakes, so
+	// what the retry set has to be what Load folds.
+	loaded, err := qu.Load(ctx, tn, "wi-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Prior == nil || loaded.Prior.Sha != "sha-built" {
+		t.Fatalf("Load after the retry does not carry the prior: %+v", loaded.Prior)
+	}
+}
+
+// TestARetryThatKeepsTheCommitCarriesNoPrior. Resuming at the gate runs no
+// builder, and a prior that nobody reads would still change nothing — but
+// it would be a claim on the record that a run was told something.
+func TestARetryThatKeepsTheCommitCarriesNoPrior(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	parkKeeping(t, qu, "wi-1", "gate refused")
+	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "the gate was flaky; try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Prior != nil {
+		t.Fatalf("a resumed retry carried a prior: %+v", *got.Prior)
 	}
 }

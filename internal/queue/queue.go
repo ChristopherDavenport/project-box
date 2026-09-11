@@ -682,11 +682,24 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 	if w.State != StateParked {
 		return w, fmt.Errorf("queue: item %s is %s, not parked — only an exception can be %s", id, w.State, kind)
 	}
+	rebuild := kind == "retried" && strings.Contains(strings.ToLower(note), "rebuild")
+	if rebuild {
+		// The attempt being abandoned is what the next one is woken
+		// knowing: the commit it produced and what refused it, with the
+		// operator's words beside the gate's. The reviewer's first refusal
+		// on the dogfood named the line and the fix, and the rebuild that
+		// followed was made blind on the same task and made the same
+		// mistake — a refusal that never reaches the hands is a judgement
+		// nobody acts on. It resolves into a layer at wake time, so the
+		// rebuilt run's agentref records what it was told.
+		w.Prior = &agent.Prior{Run: w.ID, Repo: w.Repo, Sha: w.Built,
+			Reason: strings.TrimSpace(w.Note + " — retried by " + actor + ": " + note)}
+	}
 	w.State, w.Note = to, note
 	// Resolve is final and always drops it — closing an exception says there
 	// is nothing left to build. Retry keeps it unless the note itself says
 	// the commit is the problem, not the gate.
-	if kind != "retried" || strings.Contains(strings.ToLower(note), "rebuild") {
+	if kind != "retried" || rebuild {
 		w.dropResume()
 	}
 	// Off the exception queue is off it. Leaving the severity behind would
