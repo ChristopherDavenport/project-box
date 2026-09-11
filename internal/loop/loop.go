@@ -594,7 +594,15 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		}
 		return err
 	}); lerr != nil {
-		return q.Park(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
+		// Keeping the commit: a landing the remote refused says nothing
+		// about the change — every verdict on it stands — so a retry
+		// resumes here, at the landing, and rebuilds nothing. The first
+		// landing through the reviewer onto main was refused twice at
+		// this step (a token scope, then a check run only an App may
+		// post), and each retry built, checked and reviewed the same
+		// change again.
+		item.KeepCandidate(head, base, passedNow)
+		return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
 	}
 	// Green by construction: the gates passed before the land. Recorded all
 	// the same, because the promotion predicate reads only the check chain.
@@ -720,8 +728,11 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		return err
 	}); lerr != nil {
 		// The landing itself was refused — a superseded token or a moved
-		// branch. Nothing reached main, so there is nothing to repair.
-		return q.Park(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
+		// branch. Nothing reached main, so there is nothing to repair, and
+		// the commit is kept for the retry to land as it is; no gate has
+		// run on this lane yet, so none is carried.
+		item.KeepCandidate(head, base, nil)
+		return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
 	}
 
 	var verdicts []forge.Verdict

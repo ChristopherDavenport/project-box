@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -313,5 +314,83 @@ func TestRepairReasonCarriesThePRURL(t *testing.T) {
 	}
 	if !strings.Contains((*priors)[0].Reason, stub.prURL) {
 		t.Fatalf("repair reason should carry the PR it repairs: %q", (*priors)[0].Reason)
+	}
+}
+
+// prRefuseOnce is a PRLander whose first landing the remote refuses — the
+// shape of a 403 on the check run, or a scope the token lacks — and whose
+// second goes through the real inner Lander untouched.
+type prRefuseOnce struct {
+	inner   *git.Lander
+	refused int
+}
+
+func (s *prRefuseOnce) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing, error) {
+	if s.refused == 0 {
+		s.refused++
+		return forge.Landing{}, errors.New("github: POST /repos/o/r/check-runs: 403 Forbidden: You must authenticate via a GitHub App.")
+	}
+	return s.inner.Land(ctx, cs)
+}
+
+// TestALandingTheRemoteRefusedKeepsTheCommitForTheRetry. The first landing
+// through the reviewer onto main was refused at the push twice — a token
+// scope, then a check run only an App may post — and each retry built,
+// checked and reviewed the same change again, because the land step parked
+// without its resume point. A landing the remote refused says nothing about
+// the change: the park keeps the commit and its verdicts, and the retry
+// resumes at the landing with no builder and no gate run.
+func TestALandingTheRemoteRefusedKeepsTheCommitForTheRetry(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	gateRuns := 0
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{failNTimesGate{name: "build-and-test", n: &gateRuns, failFor: 0}}
+	}
+	stub := &prRefuseOnce{}
+	e.loop.PRLander = func(inner *git.Lander) forge.Lander {
+		stub.inner = inner
+		return stub
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-84"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-land-refused", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked || !strings.HasPrefix(item.Note, "land: ") {
+		t.Fatalf("a refused landing should park at the land step, got %s (%s)", item.State, item.Note)
+	}
+	if item.Built == "" {
+		t.Fatal("a land-step park dropped the commit the remote refused")
+	}
+	if builder.n != 1 || gateRuns != 1 {
+		t.Fatalf("before the retry: %d builds, %d gate runs", builder.n, gateRuns)
+	}
+
+	retried, err := q.Retry(ctx, tn, "wi-land-refused", "chris", "the token has the scope now; land it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = e.loop.Run(ctx, retried)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("the retry should land the kept commit, got %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 1 {
+		t.Fatalf("the retry rebuilt: %d builds", builder.n)
+	}
+	if gateRuns != 1 {
+		t.Fatalf("the retry re-ran the gate on a commit it had already passed: %d gate runs", gateRuns)
 	}
 }
