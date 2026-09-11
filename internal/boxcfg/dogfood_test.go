@@ -1,6 +1,8 @@
 package boxcfg
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -54,22 +56,93 @@ func TestDogfoodBoxIsNarrow(t *testing.T) {
 	// that two units in disjoint regions run side by side, and one seat
 	// cannot show that. Three since round 9: a unit waiting on a section
 	// lease holds its seat, so with two seats one wait idled every unit in
-	// another section. Still bounded small — the spend is real.
-	if c.Budget.MaxConcurrent < 1 || c.Budget.MaxConcurrent > 3 {
-		t.Errorf("max_concurrent = %d, want 1 to 3", c.Budget.MaxConcurrent)
+	// another section. Four since round 11: the account's window is the
+	// spend brake, and the seats are set to let a round run. Still bounded
+	// small — the spend is real.
+	if c.Budget.MaxConcurrent < 1 || c.Budget.MaxConcurrent > 4 {
+		t.Errorf("max_concurrent = %d, want 1 to 4", c.Budget.MaxConcurrent)
 	}
 	if c.Budget.WindowReserve <= 0 {
 		t.Error("no window_reserve: the account's window is the brake that actually bound in round 4")
+	}
+	if c.Budget.Credential != "plan" {
+		t.Errorf("budget.credential = %q, want %q: this factory runs on the subscription on this machine, and window_reserve only means what it claims when the box says so", c.Budget.Credential, "plan")
 	}
 	if forge.Lane(r.Lane) != forge.LaneGated {
 		t.Errorf("lane = %q, want %q — gates then land, until the optimistic lane is rehearsed on a scratch mirror",
 			r.Lane, forge.LaneGated)
 	}
-	if r.Branch == "main" && r.Land != LandPullRequest {
-		t.Error("branch = main without land: pull_request — main is reached through a pull request the gate has judged, never by a bare fenced push")
+	if reason := narrowForMain(r); reason != "" {
+		t.Error(reason)
 	}
 	if !strings.HasSuffix(r.Remote, "project-box.git") {
 		t.Errorf("remote = %q — the point of the dogfood is that it is pointed at THIS repository", r.Remote)
+	}
+}
+
+// narrowForMain is the posture's branch half, since 2026-09-06 (PLAN §6): the
+// factory is meant to reach `main`, but only through a pull request a
+// judgement has reviewed, never by a bare fenced push. A repo not naming
+// `main` is unaffected — it says nothing about how main is reached.
+func narrowForMain(r Repo) string {
+	if r.Branch != "main" {
+		return ""
+	}
+	if r.Land != LandPullRequest || r.Review != ReviewJudgement {
+		return "branch = main without land: pull_request and review: judgement — main is reached through a pull request a judgement has reviewed, never by a bare fenced push"
+	}
+	return ""
+}
+
+// TestMainWithoutTheLanderOrTheReviewIsNotNarrow proves narrowForMain actually
+// fires: the committed dogfood still says `branch: factory` (the flip to
+// `main` is a later, separate step per docs/PLAN.md §10), so
+// TestDogfoodBoxIsNarrow's use of it above never exercises the main-branch
+// case against real data. This constructs its own configs instead of editing
+// hack/dogfood/box.yaml.
+func TestMainWithoutTheLanderOrTheReviewIsNotNarrow(t *testing.T) {
+	base := `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        branch: main
+        lane: gated
+`
+	for _, tc := range []struct{ name, extra string }{
+		{"missing both", ""},
+		{"missing review", "        land: pull_request\n        land_token: gh\n"},
+		{"missing lander", "        review: judgement\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "box.yaml")
+			if err := os.WriteFile(p, []byte(base+tc.extra), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			c, err := Load(p)
+			if err != nil {
+				t.Fatalf("load: %v", err)
+			}
+			if reason := narrowForMain(c.Boxes[0].Repos[0]); reason == "" {
+				t.Fatal("branch: main missing the lander or the review should not read as narrow")
+			}
+		})
+	}
+
+	p := filepath.Join(t.TempDir(), "box.yaml")
+	full := base + "        land: pull_request\n        land_token: gh\n        review: judgement\n"
+	if err := os.WriteFile(p, []byte(full), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c, err := Load(p)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if reason := narrowForMain(c.Boxes[0].Repos[0]); reason != "" {
+		t.Fatalf("both halves present should read as narrow: %s", reason)
 	}
 }
 

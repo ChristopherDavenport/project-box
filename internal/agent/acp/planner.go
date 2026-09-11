@@ -59,6 +59,9 @@ type Planner struct {
 	// Command is the agent argv; Env is appended to its environment.
 	Command []string
 	Env     []string
+	// EnvNames are additional names forwarded from the daemon's own
+	// environment — see [Runtime.EnvNames].
+	EnvNames []string
 	// MaxTokens bounds one planning run, as it bounds one build.
 	MaxTokens int64
 	// Composer resolves the bundle under [agent.RolePlanner]: the same
@@ -178,7 +181,7 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 	explained, _ := p.Composer.Explain(ctx, bundle)
 	rec.json(ctx, "agent-prompt", bundle.Ref, promptRecord{AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained)})
 
-	rt := &Runtime{Command: p.Command, Dir: tree, ContextDir: "", Env: p.Env,
+	rt := &Runtime{Command: p.Command, Dir: tree, ContextDir: "", Env: p.Env, EnvNames: p.EnvNames,
 		MaxTokens: p.MaxTokens, Transcript: p.Transcript,
 		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: p.InheritSettings,
 		Progress: p.progress(ctx, run)}
@@ -192,6 +195,7 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 		rec.json(ctx, "agent-session", bundle.Ref, sessionRecord{
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
+			Credential: res.Usage.Credential(), Env: res.EnvNames,
 		})
 	}
 	if p.Spend != nil && res.Prompted {

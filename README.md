@@ -61,6 +61,7 @@ budget:
   max_concurrent: 3
   max_tokens_per_window: 2000000   # the volume brake, in tokens
   max_cost_per_window: 25.00       # the money brake, in dollars — what bills
+  credential: key                  # this box runs on an API key, not a subscription
   window: 1h
 retention:                         # absent, nothing is ever compacted
   keep: 5000                       # newest records kept hot, per standing scope
@@ -128,6 +129,17 @@ starts until it resets, so the factory yields to the human on the same
 account instead of finishing their window. It reads the last report, so it
 binds only as tightly as runs report. `hack/dogfood/window.py` asks the
 harness the same question for a few hundred tokens, before a round starts.
+
+`credential` names which account this box is on: `plan` for a subscription,
+whose brake is `window_reserve`, or `key` for a metered API key, whose brake
+is `max_cost_per_window`. It is required the moment either brake is set —
+absent, the box has not said which account it is braking, so neither brake
+means what it claims, and the config refuses to load rather than guess. A
+run that reports the OTHER kind than the one named — a key turning up in the
+daemon's environment on a box that named `plan`, or a subscription run on a
+box that named `key` — is charged (spend is spend) and then stops the box:
+the record it writes carries the kind named and the kind reported, never a
+credential value.
 
 `build_timeout` bounds one build (default 30m; a negative duration means no
 bound). Nothing else does: the lease TTL is renewed while a run holds it, so

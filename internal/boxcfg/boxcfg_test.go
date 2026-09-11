@@ -167,6 +167,79 @@ boxes:
 	}
 }
 
+// TestCredentialRefusesUnknownSpellings: budget.credential offers exactly
+// plan or key, absent included; anything else is refused naming what it
+// offers.
+func TestCredentialRefusesUnknownSpellings(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+budget:
+  credential: subscription
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err == nil || !strings.Contains(err.Error(), "plan") || !strings.Contains(err.Error(), "key") {
+		t.Fatalf("budget.credential: subscription: err = %v, want a refusal naming plan and key", err)
+	}
+}
+
+// TestABrakeWithNoCredentialIsRefused: window_reserve or max_cost_per_window
+// binds an account, and an operator who set the brake without naming which
+// account it is should be told at load — the same call the config already
+// makes about half a retention policy — rather than discover it the day a
+// key in the daemon's environment moves every run onto an invoice the box
+// thought was a subscription's.
+func TestABrakeWithNoCredentialIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, brake string
+	}{
+		{"window_reserve", "window_reserve: 0.5"},
+		{"max_cost_per_window", "max_cost_per_window: 25.00"},
+	} {
+		_, err := Load(writeCfg(t, `
+tenant: acme
+budget:
+  `+tc.brake+`
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+		if err == nil || !strings.Contains(err.Error(), "credential") {
+			t.Errorf("%s with no credential: err = %v, want a refusal naming credential", tc.name, err)
+		}
+	}
+}
+
+// TestACredentialWithNoBrakeLoads: an unbraked box that never asked to
+// budget is not refused for staying silent about which account it runs on —
+// only a brake makes the question load-bearing.
+func TestACredentialWithNoBrakeLoads(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+budget:
+  max_concurrent: 2
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatalf("an unbraked box with no credential named was refused: %v", err)
+	}
+	if c.Budget.Credential != "" {
+		t.Fatalf("credential = %q, want absent", c.Budget.Credential)
+	}
+}
+
 // TestModelAndSessionLoad: the box names the model by the value the agent
 // lists, and the rest of the session by option id.
 func TestModelAndSessionLoad(t *testing.T) {
@@ -341,5 +414,411 @@ boxes:
 	}
 	if got := c.Boxes[0].Repos[0].Land; got != "" {
 		t.Fatalf("repo land = %q, want empty", got)
+	}
+}
+
+// TestReviewDefaultsToCommandGateAlone: a repo that says nothing about review
+// keeps today's behavior — no reviewer in the gate set.
+func TestReviewDefaultsToCommandGateAlone(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Repos[0].Review; got != "" {
+		t.Fatalf("repo review = %q, want empty", got)
+	}
+}
+
+// TestReviewUnknownValueIsRefused: "review" only knows one spelling for
+// putting a judgement in front of a landing; anything else is a typo the
+// operator should hear about at load.
+func TestReviewUnknownValueIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        review: careful
+`))
+	if err == nil || !strings.Contains(err.Error(), `review "careful"`) {
+		t.Fatalf("unknown review value: err = %v", err)
+	}
+}
+
+// TestReviewJudgementNeedsAnAgent: a build command cannot judge a diff, so a
+// box with no agent asking for review: judgement is refused at Load rather
+// than failing every change it admits.
+func TestReviewJudgementNeedsAnAgent(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: go build ./...
+        review: judgement
+`))
+	if err == nil || !strings.Contains(err.Error(), "review: judgement with no agent") {
+		t.Fatalf("review: judgement with no agent: err = %v", err)
+	}
+}
+
+// TestReviewJudgementRefusesTheOptimisticLane: the optimistic lane lands
+// first and gates afterward, so a reviewer there would read a diff already
+// on the branch — not a review before the push, which is the whole point.
+func TestReviewJudgementRefusesTheOptimisticLane(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        lane: optimistic
+        review: judgement
+`))
+	if err == nil || !strings.Contains(err.Error(), "review: judgement with lane: optimistic") {
+		t.Fatalf("review: judgement with lane: optimistic: err = %v", err)
+	}
+}
+
+// TestReviewJudgementLoads: the happy path — a repo declaring review:
+// judgement on the (default) gated lane, with an agent, loads cleanly.
+func TestReviewJudgementLoads(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        lane: gated
+        review: judgement
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Repos[0].Review; got != ReviewJudgement {
+		t.Fatalf("repo review = %q, want %q", got, ReviewJudgement)
+	}
+}
+
+// TestSelfDeployAbsentByDefault: no self_deploy: block is the every-existing-
+// config case, and it must stay exactly today's behavior — no chore, ever.
+func TestSelfDeployAbsentByDefault(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Boxes[0].SelfDeploy != nil {
+		t.Fatalf("self_deploy = %+v, want nil (absent means never)", c.Boxes[0].SelfDeploy)
+	}
+}
+
+// TestSelfDeployNeedsFrom: the branch to follow is not optional.
+func TestSelfDeployNeedsFrom(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {repo: app}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err == nil || !strings.Contains(err.Error(), "self_deploy needs from") {
+		t.Fatalf("self_deploy with no from: err = %v", err)
+	}
+}
+
+// TestSelfDeployDefaultsRepoWhenThereIsOnlyOne: naming the repo is optional
+// when there is nothing to disambiguate.
+func TestSelfDeployDefaultsRepoWhenThereIsOnlyOne(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].SelfDeploy.Repo; got != "app" {
+		t.Fatalf("self_deploy.repo = %q, want the box's sole repo %q", got, "app")
+	}
+}
+
+// TestSelfDeployRefusesAmbiguityAcrossSeveralRepos: picking one implicitly
+// would be exactly the derived value this system refuses everywhere else.
+func TestSelfDeployRefusesAmbiguityAcrossSeveralRepos(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main}
+    repos:
+      - name: api
+        remote: /tmp/api.git
+        build: 'true'
+        check: 'go test ./...'
+      - name: web
+        remote: /tmp/web.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err == nil || !strings.Contains(err.Error(), "self_deploy has no repo") {
+		t.Fatalf("self_deploy with two repos and no repo named: err = %v", err)
+	}
+}
+
+// TestSelfDeployRefusesAnUnknownRepo: a self_deploy.repo that names nothing
+// in the box is a config the operator should be told about at load.
+func TestSelfDeployRefusesAnUnknownRepo(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main, repo: nope}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err == nil || !strings.Contains(err.Error(), `self_deploy.repo "nope" is not one of this box's repositories`) {
+		t.Fatalf("self_deploy.repo naming an unknown repo: err = %v", err)
+	}
+}
+
+// TestSelfDeployRefusesARepoWithNoCheck: a self-deploy target with no check
+// cannot be judged, and a commit that cannot be judged must not be deployed —
+// this must be caught even though an absent check: elsewhere defaults to
+// "true" and would otherwise look like a check that always passes.
+func TestSelfDeployRefusesARepoWithNoCheck(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+`))
+	if err == nil || !strings.Contains(err.Error(), "self_deploy.repo app has no check") {
+		t.Fatalf("self_deploy.repo with no check: err = %v", err)
+	}
+}
+
+// TestSelfDeployLoadsWithAnExplicitRepo: the happy path with several repos
+// and the ambiguity resolved by naming one.
+func TestSelfDeployLoadsWithAnExplicitRepo(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main, repo: api}
+    repos:
+      - name: api
+        remote: /tmp/api.git
+        build: 'true'
+        check: 'go test ./...'
+      - name: web
+        remote: /tmp/web.git
+        build: 'true'
+        check: 'go test ./...'
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].SelfDeploy; got == nil || got.From != "main" || got.Repo != "api" {
+		t.Fatalf("self_deploy = %+v, want {From: main, Repo: api}", got)
+	}
+}
+
+// TestApprovalAbsentByDefault: a repo that says nothing about approval keeps
+// today's behavior — no human gate, machine-gated.
+func TestApprovalAbsentByDefault(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Repos[0].Approval.Count; got != 0 {
+		t.Fatalf("approval.count = %d, want 0 (machine-gated)", got)
+	}
+}
+
+// TestApprovalNegativeCountIsRefused: a negative count is not a valid
+// requirement — refused at Load rather than compared against forever.
+func TestApprovalNegativeCountIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        lane: gated
+        approval: {count: -1}
+`))
+	if err == nil || !strings.Contains(err.Error(), "approval.count -1") {
+		t.Fatalf("negative approval.count: err = %v", err)
+	}
+}
+
+// TestApprovalNeedsPullRequestLanding: a count with no pull_request landing
+// has nowhere for a GitHub review to be, named explicitly in issue #66.
+func TestApprovalNeedsPullRequestLanding(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        lane: gated
+        approval: {count: 1}
+`))
+	if err == nil || !strings.Contains(err.Error(), "approval.count with land") {
+		t.Fatalf("approval.count with no pull_request landing: err = %v", err)
+	}
+}
+
+// TestApprovalRefusesTheOptimisticLane: the optimistic lane lands first and
+// gates afterward, so an approver there would be asked about a change
+// already on the branch — the same reasoning as review: judgement's own
+// optimistic-lane refusal, applied here as a deliberate addition beyond what
+// issue #66 names explicitly. optimistic is Lane's default, so a repo that
+// names a count and says nothing about lane hits this refusal too.
+func TestApprovalRefusesTheOptimisticLane(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        approval: {count: 1}
+`))
+	if err == nil || !strings.Contains(err.Error(), "approval.count with lane: optimistic") {
+		t.Fatalf("approval.count with default (optimistic) lane: err = %v", err)
+	}
+}
+
+// TestApprovalRefusesTheOptimisticLaneExplicit: same refusal, lane named
+// explicitly rather than left to default.
+func TestApprovalRefusesTheOptimisticLaneExplicit(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        lane: optimistic
+        approval: {count: 1}
+`))
+	if err == nil || !strings.Contains(err.Error(), "approval.count with lane: optimistic") {
+		t.Fatalf("approval.count with lane: optimistic: err = %v", err)
+	}
+}
+
+// TestApprovalRefusesUnknownSource: only "github" is known today — nothing
+// in this tree records a direct attestation as an approval.Approval, so
+// accepting "direct" would wait forever on an approval no interface can
+// give.
+func TestApprovalRefusesUnknownSource(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        lane: gated
+        approval: {count: 1, sources: [direct]}
+`))
+	if err == nil || !strings.Contains(err.Error(), `approval.sources "direct"`) {
+		t.Fatalf("approval.sources: direct: err = %v", err)
+	}
+}
+
+// TestApprovalLoads: the happy path — a repo declaring a count on the gated
+// lane with pull_request landing loads cleanly, and the values survive to
+// where the daemon reads them.
+func TestApprovalLoads(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        land: pull_request
+        land_token: gh
+        lane: gated
+        approval: {count: 1}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Boxes[0].Repos[0]
+	if r.Approval.Count != 1 {
+		t.Fatalf("approval.count = %d, want 1", r.Approval.Count)
+	}
+	if r.Land != LandPullRequest || r.LandToken != "gh" || r.Lane != "gated" {
+		t.Fatalf("repo = %+v, want land=pull_request land_token=gh lane=gated", r)
 	}
 }

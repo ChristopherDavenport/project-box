@@ -6,9 +6,9 @@
 # to main: through a pull request the gate has judged and a reviewer's
 # judgement has passed, by the same fenced push of the exact built commit,
 # with a human approver a requirement of policy that this box sets to zero.
-# The flip itself is the `branch:` and `land:` lines below, and it waits on
-# two landings — #59 (the lander's title) and the reviewer under the gate
-# role. TestDogfoodBoxIsNarrow refuses main without the lander.
+# In force since round 11 (2026-09-06): `branch: main`, `land: pull_request`
+# and `review: judgement` below, both landings the flip waited on (#59 and
+# #62) being in. TestDogfoodBoxIsNarrow refuses main without both.
 #
 # Every path here is relative to the REPOSITORY ROOT, which is where
 # hack/dogfood/run.sh puts you. The state they name lives in .factory/,
@@ -59,7 +59,14 @@ budget:
   # so with two seats one wait idles the box for every unit in another
   # section. Three lets a runnable unit run beside a waiting one; the
   # proper fix is a wait that holds no seat.
-  max_concurrent: 3
+  # Four since round 11 (2026-09-10): the point of the per-cycle brakes was
+  # to measure a round, not to keep the seats busy, and the measurements
+  # are in. Round 10 landed nine units for $66 and spent 84 minutes of the
+  # round paused at the hourly cap. The overall spend is bounded by
+  # `window_reserve` below — the account's own window, the brake that has
+  # ever actually bound — so the brakes above it are set to let a round
+  # run, and only the runaway ceiling stays near its old size.
+  max_concurrent: 4
   # Five, not four, since round 6: the meter counts a start when the pump
   # acquires it, before the loop tries the section leases, so a unit that
   # only WAITED for a section kept its start and was charged a second one
@@ -69,12 +76,16 @@ budget:
   # Twenty since round 8: four issues at once, ten units, a retry and every
   # wait on a section each a start under the double count above. Starts are
   # the brake on a runaway, and four deliberate submissions are not one.
-  max_per_window: 20
+  # Forty since round 11: see max_concurrent.
+  max_per_window: 40
   # Twenty-five million since round 9: round 7 and round 8's three planners fell
   # in one clock hour and put it at 19.6M against fifteen, with every unit
   # refused until the hour turned. Volume is still the brake; a round is
   # not a runaway.
-  max_tokens_per_window: 25000000
+  # A hundred million since round 11: round 10 read 129M across a round,
+  # most of it cache reads, and paused for 84 minutes of hourly cap at 25M.
+  # The window reserve below is the spend brake; this one is volume.
+  max_tokens_per_window: 100000000
   window: 1h
   # The brake in the currency that actually bound. The account's five-hour
   # window is shared with the human on this machine and invisible to the
@@ -82,6 +93,13 @@ budget:
   # the meter refuses new starts until the window resets. Half is Chris's.
   # `hack/dogfood/window.py` asks the same question before a round starts.
   window_reserve: 0.5
+  # This factory runs on the subscription on this machine, which is why
+  # window_reserve above is the brake that binds and max_cost_per_window is
+  # unset: a subscription prices nothing for a cost ceiling to enforce.
+  # Naming it also means a key that turns up in the daemon's environment —
+  # by accident, by a shell profile, by anything — stops the box instead of
+  # quietly moving every run onto an invoice nobody is watching.
+  credential: plan
   # The runaway bound, which the window cannot express: the window gates
   # starts, so its real ceiling is "the limit, plus one whole run". That is
   # how 6M became 25,419,130 in round 3.
@@ -95,7 +113,9 @@ budget:
   # Twenty million since round 8: round 7's one unit for two sections read
   # 11.24M against twelve, and a run killed at the ceiling spends it all and
   # lands nothing. Above the most expensive legitimate run, as the note says.
-  max_tokens_per_run: 20000000
+  # Fifty million since round 11: the planner is on a million-token window
+  # now, and a run killed at the ceiling lands nothing.
+  max_tokens_per_run: 50000000
   # Deliberately absent: allow_unmetered. A run that will not say what it
   # cost should stop the factory — that is the whole finding from round 1.
 
@@ -143,9 +163,20 @@ boxes:
     # planner's context has ended under 125K every round, and
     # max_tokens_per_run is the ceiling if that changes. Fable is the same
     # edit (`fable[1m]`) at twice the price; measure Opus first.
+    #
+    # Measured: six Opus plans in round 10 cost $1.76-4.05 each and every
+    # one was right. The planner moves to Fable 5.1 for round 11
+    # (2026-09-10) at effort high — the plan is the one judgement every
+    # unit inherits, and a wrong one costs every unit under it, so it gets
+    # the strongest tier; the builders stay where they are.
     roles:
-      planner: {model: "opus[1m]", session: {effort: high}}
+      planner: {model: "fable[1m]", session: {effort: high}}
       builder: {session: {effort: high}}
+      # The reviewer (review: judgement on the repo below) reads one diff
+      # per unit against its origination and PLAN §6; it is the quality
+      # gate the decision of 2026-09-06 put in front of main, so it starts
+      # on the planner's tier. Round 11 measures what a review costs.
+      gate: {model: "opus[1m]", session: {effort: high}}
     # Every issue is planned by judgement before it is work: a graph of
     # units, each with its sections, its dependencies and its tier, recorded
     # on the origination's chain with the model that judged. Opt-in here and
@@ -197,9 +228,9 @@ boxes:
     repos:
       - name: project-box
         remote: https://github.com/ChristopherDavenport/project-box.git
-        # main once #59 and the reviewer have landed; see the header. Until
-        # then a branch of its own, promoted by hand.
-        branch: factory
+        # main, since round 11: both landings the header names are in.
+        # refs/heads/factory stays as the record of rounds 1 through 10.
+        branch: main
         role: service
         lane: gated
         route: issues
@@ -209,14 +240,21 @@ boxes:
         # the driving issue and lands through it, rather than a bare fenced
         # push to refs/heads/factory. The token comes from the `gh` session
         # on this machine — a stopgap ahead of the Phase 7 GitHub App.
-        # Off for the rest of round 9: the lander titles the pull request
-        # with the unit's task, GitHub refuses a title over 256 characters,
-        # and the first landing through it parked at the land step. Back on
-        # once the title is the summary (#59) — and on for good with
-        # `branch: main`, since main is reached through a pull request or
-        # not at all.
-        # land: pull_request
-        # land_token: gh
+        # Was off for the rest of round 9: the lander titled the request
+        # with the unit's task and GitHub refuses a title over 256 characters
+        # (#59, landed d9b4607). On for good with `branch: main`: main is
+        # reached through a pull request or not at all.
+        land: pull_request
+        land_token: gh
+        # The judgement before the push (#62): the gate-role reviewer reads
+        # the diff against the origination and PLAN §6 after the command
+        # gate and before the land, and posts box/review on the request. An
+        # absent judgement is not a pass. Its tier is roles.gate above.
+        review: judgement
+        # No approval: block — count zero, machine-gated, the common case.
+        # An installation whose boundary wants a person names
+        # `approval: {count: N}` here (#66) and the request waits for that
+        # many distinct, non-self reviews of the exact built head.
         # Where work is expressed. A unit names the sections its paths fall
         # in; two units in disjoint sections run at once, two in one take
         # turns, and a unit that names none is the whole repository and waits

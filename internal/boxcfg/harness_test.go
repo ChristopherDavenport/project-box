@@ -174,3 +174,41 @@ func TestHarnessRejectsAmbiguousGrants(t *testing.T) {
 		})
 	}
 }
+
+// TestHarnessEnvIsNamesOnly matches the refusal [confine.Profile.Wrap] already
+// makes for a confine block's own env: a name, never an assignment, because a
+// value here would put a credential in the config file rather than in the
+// daemon's own environment where it belongs.
+func TestHarnessEnvIsNamesOnly(t *testing.T) {
+	for _, tc := range []struct{ name, env, want string }{
+		{"assignment instead of a name", `    harness:
+      env: ["OPENAI_API_KEY=sk-live-whatever"]`, "not an assignment"},
+		{"empty entry", `    harness:
+      env: [""]`, "not an assignment"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := harnessCfg(t, tc.env)
+			if err == nil {
+				t.Fatal("accepted harness.env carrying a value")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error does not say what is wrong (%q, wanted %q)", err, tc.want)
+			}
+		})
+	}
+}
+
+// TestHarnessEnvNamesLoad: a well-formed list of names loads and is kept
+// whole — the daemon's assemble step is what turns these into the agent's
+// actual environment, and it can only forward what Load kept.
+func TestHarnessEnvNamesLoad(t *testing.T) {
+	c, err := harnessCfg(t, `    harness:
+      env: [OPENAI_API_KEY, DATADOG_API_KEY]`)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	h := c.Boxes[0].Harness
+	if len(h.Env) != 2 || h.Env[0] != "OPENAI_API_KEY" || h.Env[1] != "DATADOG_API_KEY" {
+		t.Errorf("harness.env lost a name: %v", h.Env)
+	}
+}

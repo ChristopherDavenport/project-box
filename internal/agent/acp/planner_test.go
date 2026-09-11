@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -101,6 +102,44 @@ func TestThePlannerAnswersInUnits(t *testing.T) {
 	wake, ok, err := st.WakeLayer(ctx, 5)
 	if err != nil || !ok || !strings.Contains(wake.Instructions, "widgets live under internal/api") {
 		t.Fatalf("the planner's handoff did not reach its seat: ok=%v err=%v %q", ok, err, wake.Instructions)
+	}
+}
+
+// TestThePlannerSessionRecordCarriesEnvNamesNoValues: the planner writes the
+// same sessionRecord shape a build does, from a separate call site — a field
+// set for the builder alone would make a planner's record read "unknown".
+// Not t.Parallel: t.Setenv forbids it.
+func TestThePlannerSessionRecordCarriesEnvNamesNoValues(t *testing.T) {
+	t.Setenv("ACP_ENV_CANARY", "super-secret-value")
+	p, ing, _ := plannerRig(t, "planner")
+	p.EnvNames = []string{"ACP_ENV_CANARY"}
+	ctx := context.Background()
+	if _, err := p.Decompose(ctx, ing, plannerDecl()); err != nil {
+		t.Fatalf("decompose: %v", err)
+	}
+	var session string
+	for r, err := range p.Store.Log().Since(ctx, btn, ingress.Scope(ing.ID), 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "agent-session" {
+			session = string(r.Body)
+		}
+	}
+	if session == "" {
+		t.Fatal("no agent-session on the chain")
+	}
+	if strings.Contains(session, "super-secret-value") {
+		t.Fatalf("a credential value reached the evidence chain:\n%s", session)
+	}
+	var rec struct {
+		Env []string `json:"env"`
+	}
+	if err := json.Unmarshal([]byte(session), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(rec.Env, ","), "ACP_ENV_CANARY") {
+		t.Fatalf("the delivered name is not on the record: %v", rec.Env)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -42,7 +43,24 @@ func runConfigured(path string) error {
 		}
 	}()
 
+	// Only this package knows argv and owns the syscall; the daemon just
+	// knows it needs to happen, once Run has returned and its own shutdown
+	// (the API server, the deferred store close below) has had its turn.
+	d.Exec = func() error {
+		argv0, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		return syscall.Exec(argv0, os.Args, os.Environ())
+	}
+
 	err = d.Run(ctx)
+	if errors.Is(err, daemon.ErrSelfDeployed) {
+		if rerr := d.Reexec(); rerr != nil {
+			slog.Error("self-deploy re-exec failed", "err", rerr)
+		}
+		return nil
+	}
 	slog.Info("boxd down", "reason", err)
 	return nil
 }

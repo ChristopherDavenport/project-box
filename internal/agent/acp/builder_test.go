@@ -513,6 +513,46 @@ func TestTheSessionIsOnTheRecord(t *testing.T) {
 	}
 }
 
+// TestTheSessionRecordCarriesEnvNamesNoValues: the names a run's child
+// process was actually given ride the agent-session record, and never a
+// value — an evidence chain that carried the value would be a credential
+// store with extra steps. Not t.Parallel: t.Setenv forbids it.
+func TestTheSessionRecordCarriesEnvNamesNoValues(t *testing.T) {
+	t.Setenv("ACP_ENV_CANARY", "super-secret-value")
+	s, lp, router, _, _ := rig(t, "worker")
+	b := lp.Builder.(*Builder)
+	b.EnvNames = []string{"ACP_ENV_CANARY"}
+	ctx := context.Background()
+	item := runItem(t, s, lp, router, "issue-envrecord", "add the widget package")
+	if item.State != queue.StateDone {
+		t.Fatalf("item: %+v", item)
+	}
+	var session string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-issue-envrecord", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "agent-session" {
+			session = string(r.Body)
+		}
+	}
+	if session == "" {
+		t.Fatal("no agent-session on the chain")
+	}
+	if strings.Contains(session, "super-secret-value") {
+		t.Fatalf("a credential value reached the evidence chain:\n%s", session)
+	}
+	var rec struct {
+		Env []string `json:"env"`
+	}
+	if err := json.Unmarshal([]byte(session), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(rec.Env, ","), "ACP_ENV_CANARY") {
+		t.Fatalf("the delivered name is not on the record: %v", rec.Env)
+	}
+}
+
 // TestTheSectionReachesThePromptAndTheRef. A section is a layer: the agent is
 // told where it works and what to run while there, the layer is on the run
 // record, and a plan's tier for the unit reaches the session and the result.

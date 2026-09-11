@@ -108,7 +108,7 @@ func TestACostCeilingBrakesWhatATokenCeilingCannot(t *testing.T) {
 	ctx := context.Background()
 	// $10 an hour, and a token ceiling far too loose to be what is braking.
 	budget := Budget{MaxConcurrent: 1, MaxTokensPerWindow: 100_000_000,
-		MaxCostPerWindow: Micros(10.00), Window: time.Hour}
+		MaxCostPerWindow: Micros(10.00), Window: time.Hour, Credential: CredentialKey}
 
 	cheap, _ := meter(t, budget)
 	// A million tokens that are almost all cache reads: about $1.65.
@@ -149,7 +149,7 @@ func TestACostCeilingBrakesWhatATokenCeilingCannot(t *testing.T) {
 func TestAnUnpricedRunClosesACostWindow(t *testing.T) {
 	ctx := context.Background()
 
-	priced, _ := meter(t, Budget{MaxConcurrent: 1, MaxCostPerWindow: Micros(10.00), Window: time.Hour})
+	priced, _ := meter(t, Budget{MaxConcurrent: 1, MaxCostPerWindow: Micros(10.00), Window: time.Hour, Credential: CredentialKey})
 	priced.Charge(ctx, "wi-1", Spend{Input: 1_000, Output: 500, Reported: true})
 	if err := take(ctx, priced, "wi-2"); !errors.Is(err, ErrUnpriced) {
 		t.Fatalf("want ErrUnpriced under a cost budget, got %v", err)
@@ -214,7 +214,7 @@ func TestALongRunIsChargedToTheWindowItReportedIn(t *testing.T) {
 func TestTheSplitSurvivesARestart(t *testing.T) {
 	now := time.Date(2026, 9, 1, 14, 20, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
-	budget := Budget{MaxConcurrent: 1, MaxCostPerWindow: Micros(10.00), Window: time.Hour}
+	budget := Budget{MaxConcurrent: 1, MaxCostPerWindow: Micros(10.00), Window: time.Hour, Credential: CredentialKey}
 	m, reopen := meters(t, budget, clock)
 	ctx := context.Background()
 

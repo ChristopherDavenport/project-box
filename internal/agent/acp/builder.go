@@ -42,6 +42,9 @@ type Builder struct {
 	// Command is the agent argv — claude-agent-acp, or the test binary.
 	Command []string
 	Env     []string
+	// EnvNames are additional names forwarded from the daemon's own
+	// environment — see [Runtime.EnvNames].
+	EnvNames []string
 	// MaxTokens bounds what one run may spend; zero means unbounded. The
 	// window budget gates starts and cannot bound a run already going, so
 	// without this the effective ceiling is the window plus one whole
@@ -312,7 +315,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained),
 	})
 
-	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: contextDir, Env: b.Env,
+	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: contextDir, Env: b.Env, EnvNames: b.EnvNames,
 		MaxTokens: b.MaxTokens, Transcript: b.Transcript, Progress: b.progress(ctx, ws.Run),
 		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: b.InheritSettings}
 	started := time.Now()
@@ -331,6 +334,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		b.recordJSON(ctx, ws.Run, "agent-session", bundle.Ref, sessionRecord{
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
+			Credential: res.Usage.Credential(), Env: res.EnvNames,
 		})
 	}
 	// Cost is charged even when the run failed. A session that errored
@@ -688,6 +692,16 @@ type sessionRecord struct {
 	Modes    ModeState      `json:"modes"`
 	Config   []ConfigOption `json:"config"`
 	Commands []string       `json:"commands"`
+	// Credential is which account this run spent against, as derived from
+	// its own usage report — plan, key, or absent when neither was said.
+	// Never a credential VALUE, only its kind: see capacity.ErrCredential
+	// for why that distinction is the whole point.
+	Credential Credential `json:"credential,omitempty"`
+	// Env is exactly the environment variable NAMES the child process was
+	// given, sorted and deduped — see [Result.EnvNames]. Never a value: an
+	// evidence chain that carried them would be a credential store with
+	// extra steps.
+	Env []string `json:"env,omitempty"`
 }
 
 // recordJSON writes a narrative record whose body is a marshalled value —

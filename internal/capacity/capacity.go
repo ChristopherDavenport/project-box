@@ -46,6 +46,25 @@ var ErrUnmetered = errors.New("capacity: a run reported no cost — claims stopp
 // not looks metered from every angle except the one that bills.
 var ErrUnpriced = errors.New("capacity: a run reported tokens but no cost, under a cost budget — claims stopped until the window turns (set allow_unmetered to proceed blind)")
 
+// ErrCredential reports one of two things, both about which account a box
+// runs on rather than how much it spent: a run whose reported credential
+// does not match the one [Budget.Credential] names, or a budget with a brake
+// set ([Budget.WindowReserve] or [Budget.MaxCostPerWindow]) that never named
+// one at all.
+//
+// The same rule as [ErrUnmetered] and [ErrUnpriced] wearing a different
+// coat: which account a run spent against is not allowed to read as
+// whichever one is convenient. A key left in the daemon's environment while
+// the box believes it is on a subscription would silently move every run
+// onto the invoice a plan brake never watches; a subscription run under a
+// cost ceiling that thinks it is metering a key prices nothing it should be
+// pricing. An unnamed credential with a brake set is the same failure before
+// the first mismatched run: a brake that does not say which account it
+// binds does not bind anything. Claims stop until an operator names the
+// credential, or — for a mismatch — until the window turns and the
+// offending run has rolled out of it.
+var ErrCredential = errors.New("capacity: a run's credential does not match the one this box named, or a brake is set with none named — claims stopped")
+
 // Spend is what one run cost, in both currencies it is billed in.
 //
 // Tokens are not fungible. A cached read is roughly a tenth the price of a
@@ -121,6 +140,45 @@ func (s Spend) Tokens() int64 {
 // the currency a cost ceiling is written in.
 func (s Spend) Priced() bool { return s.CostMicros > 0 }
 
+// CredentialKind names which account a run spent against: a subscription
+// whose window this meter cannot produce on its own, or a metered API key
+// billed by the token. The empty value means neither was said, which is a
+// third state and not a synonym for either — a box that has not yet heard
+// from a run, and a box a mismatch has already closed, both read as this
+// same absence rather than defaulting to whichever kind happens to be
+// convenient to assume.
+type CredentialKind string
+
+const (
+	// CredentialPlan is a subscription: the run reported the account's own
+	// rate-limit window.
+	CredentialPlan CredentialKind = "plan"
+	// CredentialKey is a metered API key: the run reported cost with no
+	// account window behind it.
+	CredentialKey CredentialKind = "key"
+	// CredentialUnknown is neither — nothing on the run said. The zero
+	// value, so an absent field decodes to this rather than to a kind.
+	CredentialUnknown CredentialKind = ""
+)
+
+// Credential derives which account this spend was made against.
+//
+// A reported account window wins over a reported price: the issue that
+// motivated this method measured a subscription run that also carried a
+// nonzero cost estimate, and the window is the fact a key can never produce,
+// so it is the stronger claim. Neither present is [CredentialUnknown] — not
+// guessed as whichever kind the budget happens to name.
+func (s Spend) Credential() CredentialKind {
+	switch {
+	case s.Limit != nil:
+		return CredentialPlan
+	case s.Priced():
+		return CredentialKey
+	default:
+		return CredentialUnknown
+	}
+}
+
 // USD renders micro-dollars as dollars, for display only — never for
 // accumulation.
 func USD(micros int64) float64 { return float64(micros) / 1e6 }
@@ -189,6 +247,16 @@ type Budget struct {
 	// It reads the last report, so it binds only as tightly as runs report:
 	// the human's own use between runs is invisible until the next run says.
 	WindowReserve float64
+	// Credential names which account this box runs on: [CredentialPlan] for
+	// a subscription, [CredentialKey] for a metered API key.
+	// [CredentialUnknown] (the zero value) means the box has not said, which
+	// is refused rather than assumed the moment WindowReserve or
+	// MaxCostPerWindow asks a brake to bind — an unnamed credential is a
+	// brake that does not know what it is protecting, the same rule
+	// AllowUnmetered's default states for spend it cannot see at all. A run
+	// that reports the OTHER kind than the one named here also refuses,
+	// once its own spend is charged: see [ErrCredential].
+	Credential CredentialKind
 }
 
 // Meter enforces a budget and records what it does.
@@ -210,10 +278,20 @@ type Meter struct {
 	split       Spend // the same tokens, by kind — what makes the total priceable
 	unmetered   int   // runs this window that finished without saying what they cost
 	unpriced    int   // runs this window that reported tokens and no money
+	// mismatch is the kind a charge reported THIS window when it was a real
+	// kind and not the one Budget.Credential names; CredentialUnknown means
+	// no mismatch yet. Window-scoped like unmetered and unpriced, so a
+	// mismatching run closes only the window it happened in — the next
+	// window is a clean read on whether the box is still misconfigured.
+	mismatch CredentialKind
 	// limit is the account's window as the last run reported it. Not reset
 	// with the meter's window: the account's clock is its own, and the report
 	// says when it turns.
 	limit *Limit
+	// lastCredential is the kind the last charge reported, kept across
+	// window resets the same way limit is: it is the account's own identity,
+	// not a per-window tally.
+	lastCredential CredentialKind
 }
 
 // SetBudget swaps the budget (config reload). The window's spend is NOT
@@ -252,11 +330,19 @@ func (m *Meter) Restore(ctx context.Context) error {
 		}
 		if rec.At.Before(start) {
 			// Outside the meter's window, but the account's window is its
-			// own clock: the last report still says whether it has reset.
+			// own clock: the last report still says whether it has reset —
+			// and so does the credential it spent against, which is why
+			// lastCredential is read here too rather than only from charges
+			// inside the window.
 			if rec.Kind == "charge" {
 				var s Spend
-				if json.Unmarshal(rec.Body, &s) == nil && s.Limit != nil {
-					m.limit = s.Limit
+				if json.Unmarshal(rec.Body, &s) == nil {
+					if s.Limit != nil {
+						m.limit = s.Limit
+					}
+					if k := s.Credential(); k != CredentialUnknown {
+						m.lastCredential = k
+					}
 				}
 			}
 			continue
@@ -359,6 +445,33 @@ func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 				fmt.Sprintf(`{"reason":"unpriced","unpriced_runs":%d,"window":%q}`, unpriced, m.Budget.Window))
 		}
 		return nil, ErrUnpriced
+	}
+	// Credential mismatch: a charge this window reported the OTHER real kind
+	// than the one this box named. Spend was already accrued in accrue —
+	// spend is spend — so only new starts refuse here.
+	if m.mismatch != CredentialUnknown {
+		first := !m.refused
+		m.refused = true
+		named, reported := m.Budget.Credential, m.mismatch
+		m.mu.Unlock()
+		if first {
+			m.record(ctx, "budget-refused", what,
+				fmt.Sprintf(`{"reason":"credential","named":%q,"reported":%q}`, named, reported))
+		}
+		return nil, ErrCredential
+	}
+	// A brake denominated in an account only means something if the box says
+	// which account: WindowReserve is the subscription's window and
+	// MaxCostPerWindow is the key's invoice, and neither is meaningful
+	// pointed at nothing.
+	if m.Budget.Credential == CredentialUnknown && (m.Budget.WindowReserve > 0 || m.Budget.MaxCostPerWindow > 0) {
+		first := !m.refused
+		m.refused = true
+		m.mu.Unlock()
+		if first {
+			m.record(ctx, "budget-refused", what, `{"reason":"credential-unsaid"}`)
+		}
+		return nil, ErrCredential
 	}
 	if m.limit.Spent(m.now(), m.Budget.WindowReserve) {
 		first := !m.refused
@@ -493,6 +606,12 @@ func (m *Meter) accrue(s Spend) {
 		// the account's limit is exactly the run whose report matters most.
 		m.limit = s.Limit
 	}
+	if k := s.Credential(); k != CredentialUnknown {
+		m.lastCredential = k
+		if m.Budget.Credential != CredentialUnknown && k != m.Budget.Credential {
+			m.mismatch = k
+		}
+	}
 	if !s.Reported {
 		m.unmetered++
 		return
@@ -546,6 +665,16 @@ type Report struct {
 	// and AccountReserve the utilization above which the meter refuses.
 	AccountWindow  *Limit  `json:"account_window,omitempty"`
 	AccountReserve float64 `json:"account_reserve,omitempty"`
+	// Credential is the account this box NAMED, and LastCredential the kind
+	// the last charged run actually REPORTED. Kept apart on purpose: a box
+	// that names plan and receives a key run is the exact mismatch
+	// [ErrCredential] exists to catch, and folding the two into one field
+	// would erase the evidence that a mismatch happened at all. Either is
+	// omitted, never rendered as a zero-ish value, when nothing has said —
+	// an absent credential must not read as "key" or "plan" to a later
+	// reader any more than an absent Spend reads as free.
+	Credential     CredentialKind `json:"credential,omitempty"`
+	LastCredential CredentialKind `json:"last_credential,omitempty"`
 }
 
 // Report snapshots the window.
@@ -574,6 +703,7 @@ func (m *Meter) Report() Report {
 		Window: m.Budget.Window, WindowSec: int64(m.Budget.Window.Seconds()),
 		Refusing:      m.wouldRefuse(),
 		AccountWindow: m.limit, AccountReserve: m.Budget.WindowReserve,
+		Credential: m.Budget.Credential, LastCredential: m.lastCredential,
 	}
 }
 
@@ -594,6 +724,10 @@ func (m *Meter) wouldRefuse() bool {
 		return true
 	case m.unpriced > 0 && !m.Budget.AllowUnmetered:
 		return true
+	case m.mismatch != CredentialUnknown:
+		return true
+	case m.Budget.Credential == CredentialUnknown && (m.Budget.WindowReserve > 0 || m.Budget.MaxCostPerWindow > 0):
+		return true
 	case m.limit.Spent(m.now(), m.Budget.WindowReserve):
 		return true
 	case m.Budget.MaxTokensPerWindow > 0 && m.spent >= m.Budget.MaxTokensPerWindow:
@@ -610,6 +744,7 @@ func (m *Meter) resetWindow(start time.Time) {
 	m.windowStart, m.started, m.refused = start, 0, false
 	m.spent, m.cost, m.split = 0, 0, Spend{}
 	m.unmetered, m.unpriced = 0, 0
+	m.mismatch = CredentialUnknown
 }
 
 func (m *Meter) record(ctx context.Context, kind, subject, body string) {

@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/agent/acp"
 	"github.com/ChristopherDavenport/project-box/internal/api"
+	"github.com/ChristopherDavenport/project-box/internal/approval"
 	"github.com/ChristopherDavenport/project-box/internal/boxcfg"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/control"
@@ -43,6 +45,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/seat"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
+	"github.com/ChristopherDavenport/project-box/internal/version"
 	"github.com/ChristopherDavenport/project-box/web"
 
 	"gopkg.in/yaml.v3"
@@ -115,6 +118,44 @@ type Daemon struct {
 	// refused at load.
 	planners *acp.Planners
 	plans    *plan.Store
+	// router is the one StoreRouter every ingress-opening path shares — the
+	// API's hand-run submit and the standing poller alike — so redelivery
+	// keys the same way whichever door work came through.
+	router *ingress.StoreRouter
+	// poller reads a route's forge for its polled issues; its Lister is the
+	// daemon's own GitHub reader, swappable in a test.
+	poller *ingress.Poller
+	// routes and remotes are swapped together at every assemble (New and
+	// Reload), guarded by mu below. remotes carries the repo remote a
+	// route's poll targets — ingress.Route itself does not, since a route
+	// is forge-agnostic and a remote is not.
+	routes  map[string]ingress.Route
+	remotes map[string]string
+	// lastPoll is the last time each named route was polled, so a route's
+	// own Poll interval — not the daemon's tick — paces the reader. It
+	// survives a reload: a route that keeps its name keeps its schedule.
+	// Guarded by mu, same as routes and remotes above.
+	lastPoll map[string]time.Time
+	// selfDeploy remembers commits the standing self-deploy chore has already
+	// refused, so a bad commit is not re-attempted every housekeeping pass —
+	// the refusal itself is already on the chain.
+	selfDeploy *selfDeployState
+	// Exec re-execs the process on the same argv and environment, completing
+	// a self-deploy once Run has returned [ErrSelfDeployed] and the caller
+	// has done its own shutdown (closing the store, letting the API finish
+	// draining). Nil is a no-op: only cmd/boxd, which owns argv and the
+	// syscall, ever sets it — a Daemon nobody wired for self-deploy has
+	// nothing to call.
+	Exec func() error
+	// exePath resolves the running binary's own path — os.Executable in
+	// production. A test substitutes a path of its own so a self-deploy run
+	// never renames over the test binary.
+	exePath func() (string, error)
+	// build reports this binary's own build fact — version.ThisBuild in
+	// production. `go test` does not stamp VCS info the way `go build` does,
+	// so a test substitutes a fixed fact rather than depending on how the
+	// test binary itself happened to be built.
+	build func() version.Build
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -137,13 +178,23 @@ func New(path string) (*Daemon, error) {
 		s.Close()
 		return nil, err
 	}
+	router := &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner}
 	d := &Daemon{
 		ConfigPath: path, store: s, tenant: t, mirror: m,
-		queue:    &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
-		meter:    &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
-		live:     &control.Live{},
-		planners: &acp.Planners{},
-		plans:    &plan.Store{Log: s.Log(), Actor: cfg.Runner},
+		queue:      &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
+		meter:      &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
+		live:       &control.Live{},
+		planners:   &acp.Planners{},
+		plans:      &plan.Store{Log: s.Log(), Actor: cfg.Runner},
+		selfDeploy: &selfDeployState{},
+		exePath:    os.Executable,
+		build:      version.ThisBuild,
+		router:     router,
+		poller: &ingress.Poller{
+			Lister: newGHIssueLister(ghAuthToken), Router: router, Log: s.Log(),
+			Tenant: t, Actor: cfg.Runner,
+		},
+		lastPoll: map[string]time.Time{},
 		cfg:      cfg, every: cfg.EveryDuration(),
 	}
 	// The deterministic, agent-free set, plus the one judgement this daemon
@@ -155,7 +206,7 @@ func New(path string) (*Daemon, error) {
 		s.Close()
 		return nil, err
 	}
-	loops, routes, kinds, err := d.assemble(context.Background(), cfg)
+	loops, routes, remotes, kinds, err := d.assemble(context.Background(), cfg)
 	if err != nil {
 		s.Close()
 		return nil, err
@@ -165,7 +216,8 @@ func New(path string) (*Daemon, error) {
 		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   cfg.MaxCostMicros(),
 		AllowUnmetered:     cfg.Budget.AllowUnmetered, Window: cfg.WindowDuration(),
-		WindowReserve: cfg.Budget.WindowReserve})
+		WindowReserve: cfg.Budget.WindowReserve,
+		Credential:    capacity.CredentialKind(cfg.Budget.Credential)})
 	// The window's account outlives the process that spent it. Without this a
 	// restart is a fresh budget, so the brake is only ever as strong as the
 	// daemon's uptime.
@@ -178,6 +230,8 @@ func New(path string) (*Daemon, error) {
 		Decomposers: decomposers,
 		Plans:       d.plans,
 	}
+	d.routes = routes
+	d.remotes = remotes
 	// The exception queue ages whether or not anybody is looking, so the
 	// sweep is what makes "nobody is looking" audible. The log is the weakest
 	// sink there is and the only one that needs no configuration; a real
@@ -202,7 +256,7 @@ func New(path string) (*Daemon, error) {
 	}
 	d.API = &api.Server{
 		Store: s, Tenant: t, Routes: routes,
-		Router: &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner},
+		Router: router,
 		Queue:  d.queue, Meter: d.meter, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
 		Plans:   d.plans,
 		Live:    d.live,
@@ -220,14 +274,15 @@ func (d *Daemon) Close() error { return d.store.Close() }
 
 // assemble builds the executor, route and declaration tables from a config —
 // used at New and again at every Reload.
-func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*loop.Loop, map[string]ingress.Route, kind.Sets, error) {
+func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*loop.Loop, map[string]ingress.Route, map[string]string, kind.Sets, error) {
 	loops := map[string]*loop.Loop{}
 	routes := map[string]ingress.Route{}
+	remotes := map[string]string{}
 	kinds := kind.Sets{}
 	for _, bx := range cfg.Boxes {
 		set, err := d.declarations(ctx, bx)
 		if err != nil {
-			return nil, nil, nil, err
+			return nil, nil, nil, nil, err
 		}
 		kinds[bx.Name] = set
 		if len(bx.Agent) == 0 {
@@ -236,7 +291,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			// at a time. Refused here, where the operator can see it coming.
 			for _, name := range set.Names() {
 				if decl, err := set.Lookup(name); err == nil && decl.Decomposer() == acp.PlannerName {
-					return nil, nil, nil, fmt.Errorf("daemon: box %s kind %s names the planner decomposer and the box has no agent — a build command cannot judge", bx.Name, name)
+					return nil, nil, nil, nil, fmt.Errorf("daemon: box %s kind %s names the planner decomposer and the box has no agent — a build command cannot judge", bx.Name, name)
 				}
 			}
 		}
@@ -245,6 +300,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			agentBuilder = &acp.Builder{
 				Store: d.store, Tenant: d.tenant, Box: bx.Name,
 				Command:   bx.Agent,
+				EnvNames:  forwardedEnv(bx),
 				MaxTokens: cfg.Budget.MaxTokensPerRun,
 				Composer: &agent.Composer{Source: &harness.Source{
 					Base: []agent.Layer{{
@@ -287,15 +343,47 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			repo := r.ForgeRepo()
 			repos = append(repos, repo)
 			if err := d.mirror.Fetch(ctx, repo); err != nil {
-				return nil, nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
+				return nil, nil, nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
 			}
 			check := r.Check
+			if r.Review == boxcfg.ReviewJudgement && agentBuilder == nil {
+				// Refused at Load (boxcfg.validate): review: judgement with no
+				// agent never reaches here. A nil agentBuilder in this branch
+				// is this assembly disagreeing with that refusal, not a
+				// config an operator could have written.
+				return nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: review: judgement with no agent builder — should have been refused at Load", bx.Name, r.Name)
+			}
+			reviews := r.Review == boxcfg.ReviewJudgement
 			lp := &loop.Loop{
 				Store: d.store, Runner: d.cfgRunner(), Mirror: d.mirror, Repo: repo, Branch: r.Branch,
 				Lane: forge.Lane(r.Lane), Meter: d.meter,
 				Gates: func(ws forge.Workspace) []forge.Gate {
-					return []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
+					gates := []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
 						Commands: [][]string{{"sh", "-c", check}}}}
+					if reviews {
+						// After the command gate: paying for an agent to read
+						// a diff that did not build is what the loop's
+						// stop-at-first-fail exists to avoid, but the gate
+						// SET still names the reviewer second so the order is
+						// on the record rather than incidental.
+						gates = append(gates, &acp.Reviewer{
+							Store: d.store, Tenant: d.tenant, Box: bx.Name,
+							Command:         bx.Agent,
+							EnvNames:        forwardedEnv(bx),
+							MaxTokens:       cfg.Budget.MaxTokensPerRun,
+							Composer:        agentBuilder.Composer,
+							Seat:            &seat.Seat{Name: bx.Seat + "-gate", Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
+							Repo:            repo,
+							Workspace:       ws,
+							Root:            filepath.Join(cfg.Root, "reviews"),
+							InheritSettings: bx.Harness.Plugins == boxcfg.PluginsInherit,
+							Spend: func(ctx context.Context, run string, u acp.Usage) {
+								d.meter.Charge(ctx, run, SpendOf(u))
+							},
+							Progress: d.progress,
+						})
+					}
+					return gates
 				},
 				TTL:          30 * time.Minute,
 				BuildTimeout: cfg.BuildTimeoutDuration(),
@@ -307,16 +395,41 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					return gitforge.NewPRLander(inner, ghAuthToken)
 				}
 			}
+			if r.Approval.Count > 0 {
+				// Validated at Load: a count needs land: pull_request and a
+				// non-optimistic lane, so this is never reached without
+				// somewhere for the review to be. A count of zero leaves
+				// lp.Approval nil BY CONSTRUCTION, not by a gate that always
+				// passes — today's loop must not change shape at all when no
+				// human boundary is configured.
+				pr := gitforge.NewPRLander(gitforge.NewLander(d.mirror, d.store.Log()), ghAuthToken)
+				sources := make([]approval.Source, 0, len(r.Approval.Sources))
+				for _, s := range r.Approval.Sources {
+					sources = append(sources, approval.Source(s))
+				}
+				requirement := approval.Requirement{Count: r.Approval.Count, Sources: sources}
+				runner := d.cfgRunner()
+				lp.Approval = func(item queue.WorkItem) forge.Gate {
+					return &humanApprovalGate{
+						requirement: requirement,
+						requester:   loop.RequesterActor(runner, item),
+						ensure:      pr.EnsureRequest,
+						reviews:     pr.Reviews,
+					}
+				}
+			}
 			if agentBuilder != nil {
 				lp.Builder, lp.Handoff = agentBuilder, agentBuilder.Handoff
 			} else {
 				lp.Builder = ShellBuilder{Cmd: r.Build}
 			}
 			loops[bx.Name+"/"+r.Name] = lp
-			routes[r.Route] = ingress.Route{
-				Name: r.Route, Kind: ingress.RouteIssue, Opens: kind.SeedIssue,
+			routes[r.Route.Name] = ingress.Route{
+				Name: r.Route.Name, Kind: ingress.RouteIssue, Opens: kind.SeedIssue,
 				Box: bx.Name, Repo: r.Name, Requester: cfg.Runner,
+				Poll: r.Route.PollDuration(), Label: r.Route.Label, Contract: r.Route.Contract,
 			}
+			remotes[r.Route.Name] = r.Remote
 		}
 		if agentBuilder == nil {
 			d.planners.Delete(bx.Name)
@@ -329,7 +442,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 		agentBuilder.Repos = repos
 		d.planners.Set(bx.Name, &acp.Planner{
 			Store: d.store, Tenant: d.tenant, Box: bx.Name,
-			Command: bx.Agent, MaxTokens: cfg.Budget.MaxTokensPerRun,
+			Command: bx.Agent, EnvNames: forwardedEnv(bx), MaxTokens: cfg.Budget.MaxTokensPerRun,
 			Composer: agentBuilder.Composer,
 			Seat:     &seat.Seat{Name: bx.Seat + "-planner", Base: &knowledge.Base{Store: d.store, Tenant: d.tenant}},
 			Mirror:   d.mirror, Repos: repos,
@@ -341,7 +454,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			Progress: d.progress,
 		})
 	}
-	return loops, routes, kinds, nil
+	return loops, routes, remotes, kinds, nil
 }
 
 // declarations resolves one box's kind declarations: the seeds, then the
@@ -459,6 +572,31 @@ func mcpRefs(servers []boxcfg.MCPServer) []agent.MCPRef {
 	return out
 }
 
+// forwardedEnv is the set of environment variable names an agent process
+// spawned for this box may see, on top of [acp.Runtime]'s own built-in base
+// set: the box's own harness.env, plus a confine block's env when the box
+// declares one.
+//
+// The confine case is not optional. Load renders bx.Confine into bx.Agent as
+// `docker run --env NAME ...` (see [boxcfg.Config.validate]), and docker does
+// not error when NAME is absent from ITS OWN environment — it simply starts
+// the container without it. An agent wrapped in confine and left out of this
+// join would lose its model credential silently, which is exactly the
+// "unknown reads as zero" failure this issue exists to close.
+//
+// The lander's bearer token is deliberately not in this set: ghAuthToken
+// shells out to `gh auth token` from the DAEMON's own process, and
+// git.PRLander calls the GitHub REST API directly from Go — the token never
+// crosses into an agent's environment, so there is no name here for it to
+// forward.
+func forwardedEnv(bx boxcfg.Box) []string {
+	names := append([]string{}, bx.Harness.Env...)
+	if bx.Confine != nil {
+		names = append(names, bx.Confine.Env...)
+	}
+	return names
+}
+
 // Reload re-reads the config file and swaps the daemon's shape. Identity
 // fields must not change; on any error the old configuration keeps running.
 func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
@@ -479,7 +617,7 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 			return "", fmt.Errorf("daemon: %s is the daemon's identity, not its configuration — changing it (%q -> %q) needs a restart; reload refused, old config still running", f.name, f.was, f.now)
 		}
 	}
-	loops, routes, kinds, err := d.assemble(ctx, ncfg)
+	loops, routes, remotes, kinds, err := d.assemble(ctx, ncfg)
 	if err != nil {
 		return "", fmt.Errorf("daemon: reload refused, old config still running: %w", err)
 	}
@@ -493,10 +631,14 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   ncfg.MaxCostMicros(),
 		AllowUnmetered:     ncfg.Budget.AllowUnmetered, Window: ncfg.WindowDuration(),
-		WindowReserve: ncfg.Budget.WindowReserve})
+		WindowReserve: ncfg.Budget.WindowReserve,
+		Credential:    capacity.CredentialKind(ncfg.Budget.Credential)})
+	d.poller.Actor = ncfg.Runner
 	d.mu.Lock()
 	d.cfg = ncfg
 	d.every = ncfg.EveryDuration()
+	d.routes = routes
+	d.remotes = remotes
 	d.mu.Unlock()
 
 	summary := fmt.Sprintf("boxes=%d executors=%d routes=%d every=%s", len(ncfg.Boxes), len(loops), len(routes), ncfg.Every)
@@ -594,6 +736,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			return ctx.Err()
 		case <-time.After(d.Every()):
+			d.PollRoutes(workCtx, time.Now())
 			if _, err := d.Tick(workCtx); err != nil {
 				slog.Error("tick", "err", err)
 			}
@@ -617,7 +760,58 @@ func (d *Daemon) Run(ctx context.Context) error {
 						slog.Info("run log pruned", "frames", n, "older_than", keep)
 					}
 				}
+				// Last: a successful pass returns ErrSelfDeployed, ending
+				// this Run so the deferred httpSrv.Shutdown above still
+				// fires. Ordered last so every other standing chore gets its
+				// turn on this tick before the process hands off.
+				if err := d.selfDeployChore(workCtx); err != nil {
+					slog.Info("self-deploy: re-exec required", "err", err)
+					return err
+				}
 			}
+		}
+	}
+}
+
+// pollDue is one route whose poll interval has elapsed, paired with the
+// remote its Lister reads.
+type pollDue struct {
+	route  ingress.Route
+	target string
+}
+
+// duePolls reports every route whose Poll interval has elapsed as of now,
+// and stamps now as that route's last poll so the same window is not
+// double-counted by two close ticks. Under mu because the route table is
+// swapped on reload (assemble, New and Reload) and lastPoll is read and
+// written from here on every tick.
+func (d *Daemon) duePolls(now time.Time) []pollDue {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var due []pollDue
+	for name, r := range d.routes {
+		if r.Poll <= 0 {
+			continue
+		}
+		if last, polled := d.lastPoll[name]; polled && now.Sub(last) < r.Poll {
+			continue
+		}
+		d.lastPoll[name] = now
+		due = append(due, pollDue{route: r, target: d.remotes[name]})
+	}
+	return due
+}
+
+// PollRoutes polls every route due as of now, logging (never panicking on) a
+// failure the way the other standing chores in Run do — a route with
+// polling off is never in the due list, so this is a no-op for every config
+// that does not ask for it. Its own method, rather than reachable only
+// through Run's select, so a test can call it directly with a fake Lister
+// behind d.poller.
+func (d *Daemon) PollRoutes(ctx context.Context, now time.Time) {
+	for _, due := range d.duePolls(now) {
+		if err := d.poller.Poll(ctx, due.route, due.target, now); err != nil {
+			slog.Warn("route poll", "route", due.route.Name, "err", err)
 		}
 	}
 }
@@ -645,6 +839,7 @@ var StandingScopes = []string{
 	"control/config",
 	"control/escalations",
 	"control/review",
+	"control/self-deploy",
 	"index/ingress",
 	"index/pending",
 }

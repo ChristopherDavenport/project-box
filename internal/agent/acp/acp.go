@@ -184,6 +184,34 @@ type Usage struct {
 	RateLimit *RateLimit
 }
 
+// Credential is which account this usage says a run spent against: [CredentialPlan]
+// for a subscription, [CredentialKey] for a metered API key, or "" when
+// neither was said.
+//
+// A reported account window wins over a reported price, the same order
+// capacity.Spend.Credential applies to the meter's own charge — duplicated
+// rather than imported, because this package deliberately knows nothing
+// about budgets (see daemon.SpendOf); internal/daemon, which imports both,
+// carries a test asserting the two derivations agree.
+type Credential string
+
+const (
+	CredentialPlan Credential = "plan"
+	CredentialKey  Credential = "key"
+)
+
+// Credential derives which account this usage spent against.
+func (u Usage) Credential() Credential {
+	switch {
+	case u.RateLimit != nil:
+		return CredentialPlan
+	case u.CostUSD > 0:
+		return CredentialKey
+	default:
+		return ""
+	}
+}
+
 // RateLimit is the account's rate-limit state as the agent reported it. The
 // adapter forwards it under _meta on usage_update; the protocol reserves
 // _meta for exactly this kind of agent-specific fact.
@@ -323,8 +351,20 @@ type Runtime struct {
 	// names the placeholder; [confine.Substitute] refuses the other case
 	// rather than mounting nothing under a name that promised something.
 	ContextDir string
-	// Env is appended to the inherited environment.
+	// Env carries this runtime's own explicit name=value assignments — the
+	// test rig sets ACP_FAKE this way — and it always wins, even over a name
+	// [Runtime.EnvNames] also lists: a value stated here is the caller
+	// choosing exactly what the child sees for that name, and the allowlist
+	// below exists to admit names the caller did NOT have to state one by
+	// one.
 	Env []string
+	// EnvNames are additional names to forward from the daemon's own
+	// environment, ON TOP of the built-in base set [buildEnv] always
+	// includes — a box's harness.env, a confine block's env, and any lander
+	// credential names the daemon decides an agent needs. Names only, never
+	// name=value: the same refusal [confine.Profile.Env] makes, because a
+	// value here would be a credential sitting in a struct literal.
+	EnvNames []string
 	// MaxTokens bounds what ONE run may spend before the session is killed;
 	// zero means unbounded. See [ErrTokenCeiling] for why the window budget
 	// cannot express this.
@@ -442,6 +482,91 @@ type Result struct {
 	// record while it is still cheap to notice, rather than inferred later
 	// from a metric that quietly read zero.
 	UnknownUpdates []string
+	// EnvNames is exactly the environment variable names the child process
+	// was started with, sorted and deduped — never their values, so the
+	// agent-session record this rides to can carry what a run could see
+	// without carrying what it could use. See [Runtime.buildEnv].
+	EnvNames []string
+}
+
+// baseEnvNames is forwarded to every agent process regardless of what the box
+// or the daemon add — the floor an agent needs to run at all, stated once so
+// the reasoning for each name lives in one place rather than in whichever
+// caller happened to need it first.
+var baseEnvNames = []string{
+	// PATH resolves the agent binary's own subprocesses — git, language
+	// toolchains, the shell a Bash tool call runs under — and an agent that
+	// cannot find them fails on its first tool call, not on anything
+	// policy-shaped.
+	"PATH",
+	// HOME is where the pinned harness keeps its model credential and
+	// settings when CLAUDE_CONFIG_DIR does not override it — see
+	// CLAUDE_CONFIG_DIR below for the case it does.
+	"HOME",
+	// CLAUDE_CONFIG_DIR is the harness config directory override;
+	// [harness.ConfigDir] resolves it the same way the daemon does to
+	// discover plugins, and its own doc comment says why: "a daemon and the
+	// agents it spawns never disagree about which machine state is in play".
+	// An agent that cannot see it reads a different ~/.claude than the one
+	// the daemon just discovered plugins from.
+	"CLAUDE_CONFIG_DIR",
+	// LANG and TERM are what a subprocess needs to format output for the
+	// locale and terminal it believes it is running in, rather than
+	// guessing "C" and "dumb". LC_* is the same family and is handled below
+	// by prefix, since its members are not a fixed set of names.
+	"LANG", "TERM",
+	// TMPDIR is where a build tool stages files outside the workspace; an
+	// agent that cannot see it falls back to a hardcoded /tmp that may not
+	// be writable, or may be the wrong one on a machine with several.
+	"TMPDIR",
+}
+
+// buildEnv is the child's exact environment: the base set above (plus the
+// daemon's own LC_* locale overrides, a family rather than a fixed name),
+// [Runtime.EnvNames]' names, and finally [Runtime.Env]'s own explicit
+// assignments, which always win.
+//
+// A name is included only when the daemon's own environment actually carries
+// it. NAME=empty is never written for a name that is simply absent — that
+// would tell the child "set this to nothing" where the truth is "nobody had
+// an opinion", and the two are not the same instruction.
+//
+// The second return is the delivered names, sorted and deduped, for the
+// agent-session record: it is the SAME computation that built the
+// environment, not a second one that could drift from it.
+func (rt *Runtime) buildEnv() ([]string, []string) {
+	daemon := map[string]string{}
+	for _, kv := range os.Environ() {
+		name, value, _ := strings.Cut(kv, "=")
+		daemon[name] = value
+	}
+	out := map[string]string{}
+	take := func(name string) {
+		if v, ok := daemon[name]; ok {
+			out[name] = v
+		}
+	}
+	for _, name := range baseEnvNames {
+		take(name)
+	}
+	for name := range daemon {
+		if strings.HasPrefix(name, "LC_") {
+			out[name] = daemon[name]
+		}
+	}
+	for _, name := range rt.EnvNames {
+		take(name)
+	}
+	for _, kv := range rt.Env {
+		name, value, _ := strings.Cut(kv, "=")
+		out[name] = value
+	}
+	names := slices.Sorted(maps.Keys(out))
+	env := make([]string, 0, len(out))
+	for _, name := range names {
+		env = append(env, name+"="+out[name])
+	}
+	return env, names
 }
 
 // Run executes one prompt under a bundle's policy and blocks until the agent
@@ -459,7 +584,8 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	}
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 	cmd.Dir = rt.Dir
-	cmd.Env = append(os.Environ(), rt.Env...)
+	env, envNames := rt.buildEnv()
+	cmd.Env = env
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return Result{}, err
@@ -478,7 +604,7 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 
 	var (
 		mu        sync.Mutex
-		res       Result
+		res       = Result{EnvNames: envNames}
 		violated  error
 		overspent error
 		// streamed accumulates per-update usage. The prompt result wins when

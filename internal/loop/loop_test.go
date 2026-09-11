@@ -1039,6 +1039,69 @@ func TestWaitingOnAPersonDoesNotRerunTheTestSuite(t *testing.T) {
 	}
 }
 
+// TestApprovalSeamAppendsAfterOtherGatesAndCarriesThem is issue #66's loop
+// wiring: the Approval seam appends a per-item gate after l.Gates(ws) rather
+// than requiring the gate set itself to know about the human, and the loop's
+// existing "wait, carry, resume at the outstanding gate" machinery works on
+// it unchanged — the same holdingGate a hand-built gate list already uses to
+// model a human, only reached here through Loop.Approval instead.
+func TestApprovalSeamAppendsAfterOtherGatesAndCarriesThem(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	suite := 0
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{countingGate{name: "build-and-test", n: &suite}}
+	}
+	e.loop.Approval = func(item queue.WorkItem) forge.Gate {
+		return holdingGate{approved: &approved}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-66"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-approve", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("pending approval should wait, got %s (%s)", item.State, item.Note)
+	}
+	if suite != 1 {
+		t.Fatalf("the command gate should have run once ahead of the human, ran %d times", suite)
+	}
+	if !slices.Contains(item.PassedGates, "build-and-test") {
+		t.Fatalf("the satisfied gate ahead of the approval was not carried: %+v", item.PassedGates)
+	}
+	built := item.Built
+	if built == "" {
+		t.Fatal("a waiting item carries no resume point: the next tick will rebuild")
+	}
+
+	// The approval arrives; the same commit lands without re-running the
+	// command gate or rebuilding.
+	approved = true
+	loaded, _ := q.Load(ctx, tn, "wi-approve")
+	if item, err = e.loop.Run(ctx, loaded); err != nil {
+		t.Fatalf("approved run: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+	if item.Head != built {
+		t.Fatalf("landed a different commit than the one the approval covered: built %s, landed %s", built, item.Head)
+	}
+	if suite != 1 || builder.n != 1 {
+		t.Fatalf("landing re-did the work: %d suite runs, %d builds", suite, builder.n)
+	}
+}
+
 // TestMovedHeadRetiresTheCarriedVerdicts: carrying a pass is sound only while
 // the content stands. Replayed onto a new base, the change is a different
 // question and every gate is asked again — otherwise the cheap path would
@@ -1460,5 +1523,99 @@ func TestNegativeBuildTimeoutMeansNoBound(t *testing.T) {
 	}
 	if d := (&Loop{}).buildTimeout(); d != DefaultBuildTimeout {
 		t.Fatalf("an unset timeout should default, got %v", d)
+	}
+}
+
+// failingGate always fails, with a fixed reason — the command gate on a
+// build whose tests are red.
+type failingGate struct{ name, reason string }
+
+func (g failingGate) Name() string { return g.name }
+
+func (g failingGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	return forge.Verdict{Gate: g.name, Decision: forge.DecisionFail, Reason: g.reason}, nil
+}
+
+// TestFailingGateShortCircuitsLaterGates: with a reviewer wired in after the
+// command gate (internal/daemon.assemble, review: judgement), a failing build
+// must not also pay for an agent run to read a diff that did not build.
+// forge.Resolve's own doc comment already says a failure outranks a pending
+// verdict for exactly this reason; the gate loop has to stop asking before
+// forge.Resolve ever sees the second verdict, not merely discard it after.
+func TestFailingGateShortCircuitsLaterGates(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	asked := 0
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{
+			failingGate{name: "build-and-test", reason: "tests are red"},
+			countingGate{name: "review", n: &asked},
+		}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-shortcircuit"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-shortcircuit", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("a failing first gate should park, got %s (%s)", item.State, item.Note)
+	}
+	if !strings.Contains(item.Note, "tests are red") {
+		t.Fatalf("parked reason should carry the first gate's verdict: %q", item.Note)
+	}
+	if asked != 0 {
+		t.Fatalf("the second gate should never have been asked once the first failed: asked %d times", asked)
+	}
+}
+
+// erroringGate never concludes — the shape of infrastructure trouble a real
+// reviewer can hit (an answer that did not parse, a workspace that would not
+// produce a diff): [forge.Gate]'s hardest rule is that this is never recorded
+// as a rejected change.
+type erroringGate struct{ name string }
+
+func (g erroringGate) Name() string { return g.name }
+
+func (g erroringGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	return forge.Verdict{}, fmt.Errorf("%s: the answer did not parse", g.name)
+}
+
+// TestErroringGateFailsTheItemNeverParksIt: a gate that could not conclude —
+// infrastructure trouble, not a verdict — must settle the item as
+// [queue.StateFailed], never [queue.StateParked]: parking records a
+// judgement, and an error is the one case where nobody made one.
+func TestErroringGateFailsTheItemNeverParksIt(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{erroringGate{name: "review"}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-gateerror"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-gateerror", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateFailed {
+		t.Fatalf("a gate that could not conclude should fail the item, got %s (%s)", item.State, item.Note)
+	}
+	if item.State == queue.StateParked {
+		t.Fatal("infrastructure trouble must never be recorded as a rejected change")
+	}
+	if !strings.Contains(item.Note, "review") || !strings.Contains(item.Note, "did not parse") {
+		t.Fatalf("the failure note should name the gate and the trouble: %q", item.Note)
 	}
 }

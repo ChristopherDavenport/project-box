@@ -251,6 +251,103 @@ func TestProtocolDialectIsAsserted(t *testing.T) {
 	}
 }
 
+// TestUnnamedEnvDoesNotReachTheAgent: the daemon's whole environment used to
+// reach every agent by nothing more than starting a subprocess in it (issue
+// #67). A canary the box never named must not survive that anymore. Not
+// t.Parallel: t.Setenv forbids it.
+func TestUnnamedEnvDoesNotReachTheAgent(t *testing.T) {
+	t.Setenv("ACP_ENV_CANARY", "leaked-secret-value")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "envecho").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if contains(res.Text, "ACP_ENV_CANARY") {
+		t.Fatalf("a variable the box never named reached the agent:\n%s", res.Text)
+	}
+	if contains(res.Text, "leaked-secret-value") {
+		t.Fatalf("the canary's value reached the agent:\n%s", res.Text)
+	}
+}
+
+// TestNamedEnvReachesTheAgent: a name the box DOES ask for, via EnvNames,
+// reaches the agent with its value intact.
+func TestNamedEnvReachesTheAgent(t *testing.T) {
+	t.Setenv("ACP_ENV_NAMED", "the-value")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rt := runtimeFor(t, "envecho")
+	rt.EnvNames = []string{"ACP_ENV_NAMED"}
+	res, err := rt.Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !contains(res.Text, "ACP_ENV_NAMED=the-value") {
+		t.Fatalf("a name the box asked for did not reach the agent:\n%s", res.Text)
+	}
+	if !slices.Contains(res.EnvNames, "ACP_ENV_NAMED") {
+		t.Fatalf("the delivered name is not on the result: %v", res.EnvNames)
+	}
+}
+
+// TestBaseEnvReachesTheAgent: PATH and HOME reach the agent with no box
+// naming either — the dogfood box runs claude-agent-acp with no confine
+// block, and HOME and PATH are what keep it able to find the binary and its
+// own model credential.
+func TestBaseEnvReachesTheAgent(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "envecho").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for _, name := range []string{"PATH=" + os.Getenv("PATH"), "HOME=" + os.Getenv("HOME")} {
+		if !contains(res.Text, name) {
+			t.Fatalf("base env %q did not reach the agent:\n%s", name, res.Text)
+		}
+	}
+}
+
+// TestConfigDirReachesTheAgent: CLAUDE_CONFIG_DIR, when the daemon's own
+// environment carries it, reaches the agent — the harness config dir
+// resolver's own doc comment says why: a daemon and the agents it spawns must
+// never disagree about which machine state is in play.
+func TestConfigDirReachesTheAgent(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "/tmp/some-claude-config-dir")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "envecho").Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !contains(res.Text, "CLAUDE_CONFIG_DIR=/tmp/some-claude-config-dir") {
+		t.Fatalf("CLAUDE_CONFIG_DIR did not reach the agent:\n%s", res.Text)
+	}
+}
+
+// TestExplicitEnvAlwaysWinsOverEnvNames: Env's own assignment for a name also
+// listed in EnvNames must win — the two are different things, and the test
+// rig's own ACP_FAKE would silently break if Env stopped winning.
+func TestExplicitEnvAlwaysWinsOverEnvNames(t *testing.T) {
+	t.Setenv("ACP_ENV_NAMED", "from-the-daemon")
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rt := runtimeFor(t, "envecho")
+	rt.EnvNames = []string{"ACP_ENV_NAMED"}
+	rt.Env = append(rt.Env, "ACP_ENV_NAMED=from-the-runtime")
+	res, err := rt.Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !contains(res.Text, "ACP_ENV_NAMED=from-the-runtime") {
+		t.Fatalf("Env's explicit assignment did not win:\n%s", res.Text)
+	}
+	if contains(res.Text, "from-the-daemon") {
+		t.Fatalf("the daemon's value leaked despite an explicit override:\n%s", res.Text)
+	}
+}
+
 func contains(haystack, needle string) bool {
 	return len(haystack) >= len(needle) && (haystack == needle || len(haystack) > 0 && (func() bool {
 		for i := 0; i+len(needle) <= len(haystack); i++ {
@@ -412,6 +509,17 @@ func fakeAgent(scenario string) {
 					"sessionId": sessionID,
 					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
 						"content": map[string]any{"type": "text", "text": newMeta}},
+				})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "envecho":
+				// Reports the FAKE AGENT'S OWN environment back over the wire —
+				// this is the real subprocess's os.Environ(), not a mock, so
+				// asserting on it is a subprocess-level check of what buildEnv
+				// actually constructed for cmd.Env.
+				f.notify("session/update", map[string]any{
+					"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": strings.Join(os.Environ(), "\n")}},
 				})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "polite":
@@ -584,6 +692,36 @@ func fakeAgent(scenario string) {
 			case "planner-escalate":
 				f.request("_box/escalate", map[string]any{"reason": "this origination is a question, not a change"})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "review-pass", "review-fail", "review-silent", "review-neither":
+				// The gate role's occupant. Every scenario first reports what
+				// it was actually handed — where it is standing, whether that
+				// place will take a write, and the patch it was given — so a
+				// test can assert the material from the agent's side of the
+				// wire rather than from the directory the test laid out.
+				cwd, _ := os.Getwd()
+				writable := "no"
+				if err := os.WriteFile("probe.txt", []byte("x"), 0o644); err == nil {
+					writable = "yes"
+					os.Remove("probe.txt")
+				}
+				patch, _ := os.ReadFile("diff.patch")
+				answer := fmt.Sprintf("cwd:%s writable:%s\n--- diff.patch ---\n%s--- end of diff.patch ---\n", cwd, writable, patch)
+				switch scenario {
+				case "review-pass":
+					answer += "\n```json\n" + `{"verdict":"pass","reason":"does what the origination asked, inside the section it declared"}` +
+						"\n```\nHANDOFF: the widget package is reviewed and its default is blue\n"
+				case "review-fail":
+					answer += "\n```json\n" + `{"verdict":"fail","reason":"the change edits db/schema.sql, which the unit never declared"}` + "\n```\n"
+				case "review-silent":
+					answer += "\nLooks fine to me, I suppose.\n"
+				case "review-neither":
+					answer += "\n```json\n" + `{"verdict":"maybe","reason":"I could not make up my mind"}` + "\n```\n"
+				}
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": answer}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn",
+					"usage": map[string]any{"inputTokens": 4200, "outputTokens": 90}}})
 			case "metered":
 				// The real dialect, copied from claude-agent-acp's
 				// sessionUsage() and turnOutcome(): usage on the prompt

@@ -226,6 +226,19 @@ type Route struct {
 	// with no principal behind it can open nothing — autonomous work still has
 	// to be authorized by someone.
 	Requester string
+	// Poll is how often this route's forge is checked for new issues
+	// carrying Label; zero means this route only opens what a hand-run
+	// delivery gives it, today's whole behavior. See [Poller].
+	Poll time.Duration
+	// Label is the forge label a polling route only opens issues carrying —
+	// a person's decision about what the box takes. Required whenever Poll
+	// is set.
+	Label string
+	// Contract is appended to a polled issue's task text after a "---"
+	// separator; empty appends nothing. Text, not a path — a path is
+	// resolved once at boxcfg.Load, so the route carries the working
+	// contract itself rather than a place to find it.
+	Contract string
 }
 
 // Delivery is one firing of a route.

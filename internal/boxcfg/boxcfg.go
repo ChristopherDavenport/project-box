@@ -168,6 +168,17 @@ type Budget struct {
 	// stops the factory at half. Zero means only a rejected status refuses.
 	// See capacity.Budget.WindowReserve for what it can and cannot see.
 	WindowReserve float64 `yaml:"window_reserve"`
+	// Credential names which account this box runs on: `plan` for a
+	// subscription, whose brake is WindowReserve, or `key` for a metered API
+	// key, whose brake is MaxCostPerWindow. Absent is refused the moment
+	// either brake is set — see validate — because a brake that does not say
+	// which account it is protecting protects nothing: a key left in the
+	// daemon's environment on a box that believes it is on a subscription
+	// would move every run onto the invoice with WindowReserve refusing
+	// nothing, and a subscription run under a cost ceiling prices nothing
+	// for it to enforce. A run that reports the OTHER kind than the one
+	// named here stops the box; see capacity.ErrCredential.
+	Credential string `yaml:"credential"`
 }
 
 // Argv is a command, written in YAML either as one string for the common
@@ -202,6 +213,67 @@ func (a *Argv) UnmarshalYAML(n *yaml.Node) error {
 	}
 	*a = xs
 	return nil
+}
+
+// Route is a repo's ingress route: a scalar name keeps today's whole
+// meaning — polling off, every delivery by hand — or a mapping names a poll
+// interval alongside the label a polled issue must carry and the working
+// contract appended to its task text:
+//
+//	route: issues
+//	route: {name: issues, poll: 5m, label: box, contract: hack/dogfood/contract.md}
+//
+// See [Route.UnmarshalYAML].
+type Route struct {
+	Name string `yaml:"name"`
+	// Poll is how often this route's forge is checked for new issues
+	// carrying Label; empty means polling is off, today's whole behavior.
+	// Parsed the way Config's Every and Drain are — see [Route.PollDuration].
+	Poll string `yaml:"poll"`
+	// Label is the forge label a polling route only opens issues carrying.
+	// Required whenever Poll is set: the label is a person's decision about
+	// what the box takes, and an absent label is not "every open issue" —
+	// unknown never reads as zero.
+	Label string `yaml:"label"`
+	// Contract is the working contract appended to a polled issue's task
+	// text after a "---" separator, in the shape hack/dogfood/submit.py's
+	// CONTRACT constant carried by hand. It is text, or a path to a file
+	// holding it, read once at Load relative to the process's working
+	// directory — see [loadContract].
+	Contract string `yaml:"contract"`
+}
+
+// UnmarshalYAML accepts a scalar (a bare route name, polling off — today's
+// entire meaning) or a mapping naming poll/label/contract alongside it,
+// modeled on [Argv.UnmarshalYAML]'s scalar-or-sequence precedent.
+func (r *Route) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		var s string
+		if err := n.Decode(&s); err != nil {
+			return err
+		}
+		*r = Route{Name: s}
+		return nil
+	}
+	type plain Route
+	var p plain
+	if err := n.Decode(&p); err != nil {
+		return err
+	}
+	*r = Route(p)
+	return nil
+}
+
+// PollDuration returns the parsed poll interval; zero means polling is off.
+// The error half is checked at Load (validate); by the time anything calls
+// this the value is known good, the same contract Config's EveryDuration and
+// DrainDuration keep.
+func (r Route) PollDuration() time.Duration {
+	if r.Poll == "" {
+		return 0
+	}
+	d, _ := time.ParseDuration(r.Poll)
+	return d
 }
 
 // Box is one system: many repos, one optional agent identity.
@@ -279,6 +351,25 @@ type Box struct {
 	Kinds []Kind `yaml:"kinds"`
 	Seat  string `yaml:"seat"`
 	Repos []Repo `yaml:"repos"`
+	// SelfDeploy, set, turns on the standing chore that stops claims, waits
+	// for running work to settle, checks and rebuilds the daemon at the
+	// branch's new head, and re-execs on the same socket and store. Absent
+	// means never — the daemon only changes binaries when somebody restarts
+	// it, today's behavior and the default every existing config keeps.
+	SelfDeploy *SelfDeploy `yaml:"self_deploy"`
+}
+
+// SelfDeploy is box.yaml's self_deploy: block — see [Box.SelfDeploy].
+type SelfDeploy struct {
+	// From is the branch this box follows; a moved head is a deploy
+	// candidate.
+	From string `yaml:"from"`
+	// Repo names which of the box's repositories the chore rebuilds from.
+	// Required when the box declares more than one repo — picking one
+	// implicitly would be exactly the derived value this system refuses
+	// everywhere else. A box with exactly one repo may leave this empty and
+	// get that repo.
+	Repo string `yaml:"repo"`
 }
 
 // Kind is box.yaml's spelling of [kind.Declaration].
@@ -468,6 +559,13 @@ type Harness struct {
 	// plugin MCP off and nothing listed, a builder has no MCP surface at all,
 	// which is the right starting point for an agent nobody is watching.
 	MCP []MCPServer `yaml:"mcp"`
+	// Env forwards environment variables from the daemon's own process into
+	// the agent BY NAME — the same discipline [Confine.Env] already keeps,
+	// and for the same reason: the daemon used to hand every builder its
+	// whole environment, every token and key on the machine included, and
+	// none of it reached the agentref. Never name=value: a config file is
+	// not a secret store.
+	Env []string `yaml:"env"`
 }
 
 // Skill pins one skill to the exact tree it names.
@@ -501,9 +599,9 @@ type Repo struct {
 	Branch string `yaml:"branch"`
 	Role   string `yaml:"role"`
 	Lane   string `yaml:"lane"`
-	// Route is the ingress route name that targets this repo; defaults to
-	// "<box>-<name>".
-	Route string `yaml:"route"`
+	// Route is the ingress route that targets this repo; defaults to
+	// "<box>-<name>" with polling off. See [Route].
+	Route Route  `yaml:"route"`
 	Build string `yaml:"build"`
 	Check string `yaml:"check"`
 	// Land selects how a build reaches the base branch. "" (the default)
@@ -518,15 +616,43 @@ type Repo struct {
 	// landing without one is refused at Load: the daemon would have no way
 	// to open the pull request when the loop first tries to land.
 	LandToken string `yaml:"land_token"`
+	// Review names the judgement a change must pass before it lands. ""
+	// (the default) is today's behavior: the command gate alone decides.
+	// "judgement" puts the gate-role reviewer agent
+	// (internal/agent/acp.Reviewer) after the command gate, so a change
+	// also has to satisfy a reader before it reaches the branch.
+	Review string `yaml:"review"`
+	// Approval names the human sign-off a change must collect before it
+	// lands. Absent, or Count zero (the default), is today's behavior:
+	// machine-gated, no person asked — the common case.
+	Approval Approval `yaml:"approval"`
 	// Sections are this repository's named regions — see [forge.Section].
 	// A repository that declares none has one region: itself, and every
 	// unit of work in it takes turns.
 	Sections []Section `yaml:"sections"`
 }
 
+// Approval is a [Repo]'s human sign-off policy.
+type Approval struct {
+	// Count is how many distinct approvals must cover the built head before
+	// the change lands. Zero (the default) is machine-gated.
+	Count int `yaml:"count"`
+	// Sources restricts where an approval may come from. Empty means
+	// "github" — the only source known today (see the refusal in
+	// validate): nothing in this tree records a direct attestation as an
+	// approval.Approval, so naming anything else would wait forever on an
+	// approval no interface can give.
+	Sources []string `yaml:"sources"`
+}
+
 // LandPullRequest is the [Repo.Land] value that opens a pull request before
 // landing. Any other value, including "", lands with a direct fenced push.
 const LandPullRequest = "pull_request"
+
+// ReviewJudgement is the [Repo.Review] value that puts the gate-role reviewer
+// after the command gate. Any other value, including "", leaves the command
+// gate as the only judgement.
+const ReviewJudgement = "judgement"
 
 // Sections converts the declared regions to the forge's form.
 func (r Repo) forgeSections() []forge.Section {
@@ -603,6 +729,20 @@ func (c *Config) validate() error {
 	if r := c.Budget.WindowReserve; r < 0 || r > 1 {
 		return fmt.Errorf("boxcfg: budget.window_reserve %v — a share of the account's window, 0 to 1", r)
 	}
+	switch c.Budget.Credential {
+	case "", "plan", "key":
+	default:
+		return fmt.Errorf("boxcfg: budget.credential %q — this box offers plan (a subscription) or key (a metered API key)", c.Budget.Credential)
+	}
+	// A brake with nobody saying which account it binds is a brake that does
+	// not know what it is protecting: the same call the config already makes
+	// about half a retention policy, an operator who set a brake and got
+	// silence should be told at load, not discover it the day a key in the
+	// daemon's environment moves every run onto an invoice the box thought
+	// it was on a subscription.
+	if c.Budget.Credential == "" && (c.Budget.WindowReserve > 0 || c.Budget.MaxCostPerWindow > 0) {
+		return fmt.Errorf("boxcfg: budget.window_reserve or budget.max_cost_per_window is set with no budget.credential — name plan or key, or neither brake means what it claims")
+	}
 	if c.Retention.KeepFor != "" {
 		if _, err := time.ParseDuration(c.Retention.KeepFor); err != nil {
 			return fmt.Errorf("boxcfg: retention.keep_for: %w", err)
@@ -676,6 +816,7 @@ func (c *Config) validate() error {
 			}
 			bx.Agent = wrapped
 		}
+		explicitCheck := map[string]bool{}
 		for j := range bx.Repos {
 			r := &bx.Repos[j]
 			if r.Name == "" || r.Remote == "" {
@@ -693,16 +834,37 @@ func (c *Config) validate() error {
 			if err := forge.ValidateLane(forge.Lane(r.Lane), forge.Role(r.Role)); err != nil {
 				return fmt.Errorf("boxcfg: box %s repo %s: %w", bx.Name, r.Name, err)
 			}
-			if r.Route == "" {
-				r.Route = bx.Name + "-" + r.Name
+			if r.Route.Name == "" {
+				r.Route.Name = bx.Name + "-" + r.Name
 			}
-			if prev, dup := seenRoutes[r.Route]; dup {
-				return fmt.Errorf("boxcfg: route %q defined by both %s and %s/%s — route names are the API's vocabulary and must be unique", r.Route, prev, bx.Name, r.Name)
+			if prev, dup := seenRoutes[r.Route.Name]; dup {
+				return fmt.Errorf("boxcfg: route %q defined by both %s and %s/%s — route names are the API's vocabulary and must be unique", r.Route.Name, prev, bx.Name, r.Name)
 			}
-			seenRoutes[r.Route] = bx.Name + "/" + r.Name
+			seenRoutes[r.Route.Name] = bx.Name + "/" + r.Name
+			if r.Route.Poll != "" {
+				if _, err := time.ParseDuration(r.Route.Poll); err != nil {
+					return fmt.Errorf("boxcfg: box %s repo %s: route.poll: %w", bx.Name, r.Name, err)
+				}
+			}
+			if r.Route.PollDuration() > 0 {
+				if r.Route.Label == "" {
+					return fmt.Errorf("boxcfg: box %s repo %s: route polls with no label — the label is a person's decision about what the box takes, and an absent label is not \"every open issue\"", bx.Name, r.Name)
+				}
+				if !isGitHubRemote(r.Remote) {
+					return fmt.Errorf("boxcfg: box %s repo %s: route polls remote %q, which is not a github.com remote — polling speaks only that forge", bx.Name, r.Name, r.Remote)
+				}
+			}
+			if r.Route.Contract != "" {
+				resolved, err := loadContract(r.Route.Contract)
+				if err != nil {
+					return fmt.Errorf("boxcfg: box %s repo %s: route.contract: %w", bx.Name, r.Name, err)
+				}
+				r.Route.Contract = resolved
+			}
 			if len(bx.Agent) == 0 && r.Build == "" {
 				return fmt.Errorf("boxcfg: box %s repo %s: no agent and no build command — nothing would ever do the work", bx.Name, r.Name)
 			}
+			explicitCheck[r.Name] = r.Check != ""
 			if r.Check == "" {
 				r.Check = "true"
 			}
@@ -712,10 +874,95 @@ func (c *Config) validate() error {
 			if r.Land == LandPullRequest && r.LandToken != "gh" {
 				return fmt.Errorf("boxcfg: box %s repo %s: land: %s needs land_token — only \"gh\" (gh auth token) is known today, and without one the daemon has no way to open the pull request", bx.Name, r.Name, LandPullRequest)
 			}
+			if r.Review != "" && r.Review != ReviewJudgement {
+				return fmt.Errorf("boxcfg: box %s repo %s: review %q — only %q is known, or leave it unset for the command gate alone", bx.Name, r.Name, r.Review, ReviewJudgement)
+			}
+			if r.Review == ReviewJudgement && len(bx.Agent) == 0 {
+				return fmt.Errorf("boxcfg: box %s repo %s: review: %s with no agent — a build command cannot judge a diff", bx.Name, r.Name, ReviewJudgement)
+			}
+			if r.Review == ReviewJudgement && forge.Lane(r.Lane) == forge.LaneOptimistic {
+				return fmt.Errorf("boxcfg: box %s repo %s: review: %s with lane: %s — the optimistic lane lands first and gates afterward, so a review there would read a diff already on the branch, never a review before the push", bx.Name, r.Name, ReviewJudgement, forge.LaneOptimistic)
+			}
+			if r.Approval.Count < 0 {
+				return fmt.Errorf("boxcfg: box %s repo %s: approval.count %d — a negative count", bx.Name, r.Name, r.Approval.Count)
+			}
+			if r.Approval.Count > 0 && r.Land != LandPullRequest {
+				return fmt.Errorf("boxcfg: box %s repo %s: approval.count with land %q — a GitHub review has nowhere to be without land: %s", bx.Name, r.Name, r.Land, LandPullRequest)
+			}
+			if r.Approval.Count > 0 && forge.Lane(r.Lane) == forge.LaneOptimistic {
+				return fmt.Errorf("boxcfg: box %s repo %s: approval.count with lane: %s — the optimistic lane lands first and gates afterward, so an approver there would be asked about a change already on the branch, never before it landed", bx.Name, r.Name, forge.LaneOptimistic)
+			}
+			for _, s := range r.Approval.Sources {
+				if s != "github" {
+					return fmt.Errorf("boxcfg: box %s repo %s: approval.sources %q — only \"github\" is known today; nothing records a direct attestation as an approval yet", bx.Name, r.Name, s)
+				}
+			}
 			if err := validateSections(bx, r); err != nil {
 				return err
 			}
 		}
+		if err := validateSelfDeploy(bx, explicitCheck); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isGitHubRemote reports whether remote names a github.com repository. A
+// plain prefix check, not a parse: this package has no mirror to resolve a
+// remote against, and a polling route only needs to know which forge to
+// ask — internal/daemon's reader does the actual owner/repo split.
+func isGitHubRemote(remote string) bool {
+	return strings.HasPrefix(remote, "https://github.com/") ||
+		strings.HasPrefix(remote, "http://github.com/") ||
+		strings.HasPrefix(remote, "git@github.com:")
+}
+
+// loadContract resolves a route's contract: text, used exactly as written,
+// or a path to a file holding it, read once here relative to the process's
+// working directory. A value is treated as a path only when it is a single
+// token with no whitespace — anything else is plainly prose, not a filename
+// — and a path-shaped value that does not resolve is REFUSED rather than
+// silently used as the contract's own text: an operator who wrote a
+// filename and mistyped it should be told at Load, not find their box
+// running with the filename itself as the working contract.
+func loadContract(raw string) (string, error) {
+	if strings.ContainsAny(raw, " \t\n") {
+		return raw, nil
+	}
+	b, err := os.ReadFile(raw)
+	if err != nil {
+		return "", fmt.Errorf("%q looks like a path and does not resolve: %w", raw, err)
+	}
+	return string(b), nil
+}
+
+// validateSelfDeploy resolves and checks a box's self_deploy: block, if it
+// has one. explicitCheck records — per repo name, before the loop above
+// defaulted an absent check: to "true" — whether the operator actually wrote
+// one: a self-deploy target that never got a real check would otherwise look
+// exactly like one that always passes, and a commit that cannot be judged
+// must not be deployed.
+func validateSelfDeploy(bx *Box, explicitCheck map[string]bool) error {
+	sd := bx.SelfDeploy
+	if sd == nil {
+		return nil
+	}
+	if sd.From == "" {
+		return fmt.Errorf("boxcfg: box %s: self_deploy needs from — the branch this box follows", bx.Name)
+	}
+	if sd.Repo == "" {
+		if len(bx.Repos) != 1 {
+			return fmt.Errorf("boxcfg: box %s: self_deploy has no repo, and the box declares %d — picking one implicitly is the derived value this system refuses everywhere else; name it in self_deploy.repo", bx.Name, len(bx.Repos))
+		}
+		sd.Repo = bx.Repos[0].Name
+	}
+	had, ok := explicitCheck[sd.Repo]
+	if !ok {
+		return fmt.Errorf("boxcfg: box %s: self_deploy.repo %q is not one of this box's repositories", bx.Name, sd.Repo)
+	}
+	if !had {
+		return fmt.Errorf("boxcfg: box %s: self_deploy.repo %s has no check — a self-deploy target with no check cannot be judged, and a commit that cannot be judged must not be deployed", bx.Name, sd.Repo)
 	}
 	return nil
 }
@@ -876,6 +1123,11 @@ func (h *Harness) validate(box string) error {
 			return fmt.Errorf("boxcfg: box %s: mcp server %s needs exactly one of command or url", box, m.Name)
 		}
 		names[m.Name] = true
+	}
+	for _, name := range h.Env {
+		if name == "" || strings.ContainsRune(name, '=') {
+			return fmt.Errorf("boxcfg: box %s: harness.env %q — a NAME, not an assignment; a value here would put a credential in the config file", box, name)
+		}
 	}
 	return nil
 }
