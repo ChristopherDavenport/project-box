@@ -29,7 +29,7 @@ export function clip(s, n = 200) {
  *  written before `summary` existed still gets. A bare task string (no
  *  backing record, as on the open-ingress form) is accepted directly. */
 export function title(item) {
-  return item?.summary || firstLine(typeof item === 'string' ? item : item?.task);
+  return item?.summary || clip(firstLine(typeof item === 'string' ? item : item?.task));
 }
 
 /** taskURL is the first link in a task's text — an issue, usually. */

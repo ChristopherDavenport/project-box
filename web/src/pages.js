@@ -289,6 +289,10 @@ export class BoxWork extends LitElement {
     .ready { font: var(--jh-font-micro-medium); color: var(--jh-color-content-positive-enabled); text-transform: uppercase; }
     .lapsed { color: var(--jh-color-content-negative-enabled); font-weight: 600; }
     .nowrap { white-space: nowrap; }
+    /* The Work column has no other bound on its content: title() clips the
+       common case, but a bare task string with no newline reaches here
+       unclipped, so the cell itself must refuse to grow past one line. */
+    .worktitle { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   `];
   static properties = { _filter: { state: true }, _sort: { state: true }, _desc: { state: true } };
 
@@ -377,7 +381,7 @@ export class BoxWork extends LitElement {
               <tr>
                 <td><div class="stack">${stateTag(e.state)}${e.ready ? html`<span class="ready">ready</span>` : nothing}</div></td>
                 <th scope="row">
-                  <a href=${'/items/' + e.id}>${title(e) || e.id}</a>
+                  <a class="worktitle" href=${'/items/' + e.id}>${title(e) || e.id}</a>
                   ${e.note ? html`<div class="note" title=${e.note}>${firstLine(e.note)}</div>` : nothing}
                 </th>
                 <td>${e.blocked_by?.length
