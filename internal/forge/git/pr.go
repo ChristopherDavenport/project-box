@@ -48,11 +48,28 @@ type PRLander struct {
 	// the zero value's defaults from NewPRLander.
 	apiBase    string
 	httpClient *http.Client
+	// statusesOnly reports through the commit status API; see [PRLander.StatusesOnly].
+	statusesOnly bool
 }
 
 // NewPRLander wraps inner to open a GitHub pull request at land time,
 // immediately before the fenced push. token supplies the bearer credential
 // per call — never a hardcoded secret.
+// StatusesOnly makes the lander report verdicts as commit statuses rather
+// than check runs. A check run can only be created by a GitHub App; an
+// OAuth token — which is what `land_token: gh` is — gets "You must
+// authenticate via a GitHub App" (403), and the first landing through the
+// reviewer onto main parked on exactly that after both verdicts had passed.
+// A commit status is the form an OAuth token can post: the same context
+// names (box/check, box/review, box/land), the same conclusion, the
+// summary as the description GitHub bounds at 140 characters. The evidence
+// ids ride only the check-run form; the chain is the record either way.
+// The daemon sets this for the gh token and leaves it off for an App.
+func (p *PRLander) StatusesOnly() *PRLander {
+	p.statusesOnly = true
+	return p
+}
+
 func NewPRLander(inner *Lander, token TokenSource) *PRLander {
 	return &PRLander{inner: inner, token: token, apiBase: "https://api.github.com", httpClient: http.DefaultClient}
 }
@@ -562,8 +579,39 @@ func (p *PRLander) postCheck(ctx context.Context, token, owner, repo, sha, name,
 		Name: name, HeadSHA: sha, Status: "completed", Conclusion: conclusion,
 		Output: checkRunOutput{Title: title, Summary: summary, Text: text},
 	}
+	if p.statusesOnly {
+		st := statusInput{State: conclusion, Context: name, Description: statusDescription(title, summary)}
+		endpoint := fmt.Sprintf("%s/repos/%s/%s/statuses/%s", p.apiBase, owner, repo, sha)
+		return p.call(ctx, http.MethodPost, endpoint, token, st, nil)
+	}
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/check-runs", p.apiBase, owner, repo)
 	return p.call(ctx, http.MethodPost, endpoint, token, in, nil)
+}
+
+// statusInput is the commit status API's create body. State is one of
+// success, failure, error, pending — the check-run conclusions this lander
+// posts are the first two.
+type statusInput struct {
+	State       string `json:"state"`
+	Context     string `json:"context"`
+	Description string `json:"description"`
+}
+
+// maxStatusDescription is GitHub's bound on a status description.
+const maxStatusDescription = 140
+
+// statusDescription folds a check run's title and summary into the one
+// line a status carries, cut to GitHub's bound with the cut marked.
+func statusDescription(title, summary string) string {
+	d := title
+	if summary != "" {
+		d += " — " + summary
+	}
+	r := []rune(d)
+	if len(r) <= maxStatusDescription {
+		return d
+	}
+	return string(r[:maxStatusDescription-1]) + "…"
 }
 
 // call issues one GitHub REST API request. in nil omits the body; out nil

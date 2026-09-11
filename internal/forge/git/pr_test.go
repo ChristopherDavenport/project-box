@@ -53,11 +53,15 @@ func githubRemoteNamed(t *testing.T, real, ownerRepo string) string {
 // reused rather than duplicated.
 type fakeGitHub struct {
 	*httptest.Server
-	mu              sync.Mutex
-	byHead          map[string]ghPR
-	creates         int
-	next            int
-	checks          []ghCheckRun
+	mu       sync.Mutex
+	byHead   map[string]ghPR
+	creates  int
+	next     int
+	checks   []ghCheckRun
+	statuses []ghStatus
+	// appOnly makes /check-runs answer as api.github.com does to an OAuth
+	// token: 403, "You must authenticate via a GitHub App."
+	appOnly         bool
 	reviewsByNumber map[int][]ghReview
 }
 
@@ -108,6 +112,16 @@ type ghCheckRun struct {
 		Summary string `json:"summary"`
 		Text    string `json:"text"`
 	} `json:"output"`
+}
+
+// ghStatus is what a test reads back after PRLander posts to
+// /statuses/{sha}: the commit status API's create body plus the sha it was
+// posted on.
+type ghStatus struct {
+	SHA         string `json:"-"`
+	State       string `json:"state"`
+	Context     string `json:"context"`
+	Description string `json:"description"`
 }
 
 func newFakeGitHub(t *testing.T) *fakeGitHub {
@@ -161,6 +175,19 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		g.checks = append(g.checks, in)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(in)
+	case len(parts) == 5 && parts[3] == "statuses" && r.Method == http.MethodPost:
+		var in ghStatus
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		in.SHA = parts[4]
+		g.statuses = append(g.statuses, in)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(in)
+	case len(parts) == 4 && parts[3] == "check-runs" && r.Method == http.MethodPost && g.appOnly:
+		// What api.github.com says to an OAuth token.
+		http.Error(w, `{"message":"You must authenticate via a GitHub App."}`, http.StatusForbidden)
 	case len(parts) == 6 && parts[3] == "pulls" && parts[5] == "reviews" && r.Method == http.MethodGet:
 		number, _ := strconv.Atoi(parts[4])
 		out := g.reviewsByNumber[number]
@@ -988,5 +1015,79 @@ func TestReviewsDecodeAndOnlyApprovedCount(t *testing.T) {
 	}
 	if approved != 1 {
 		t.Fatalf("approved reviews = %d, want 1 — a dismissed or commenting review is not an approval", approved)
+	}
+}
+
+// TestAnOAuthTokenReportsVerdictsAsStatuses. The first landing through the
+// reviewer onto main built, passed both gates, opened its pull request and
+// parked at the check run: a check run is a GitHub App's to create, and
+// `land_token: gh` is an OAuth token. A lander told it holds an OAuth token
+// posts the same verdicts as commit statuses — the form the token can post
+// — under the same context names, and never touches /check-runs.
+func TestAnOAuthTokenReportsVerdictsAsStatuses(t *testing.T) {
+	x := fixPR(t)
+	x.gh.appOnly = true
+	x.pr.StatusesOnly()
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+		Verdicts: []forge.Verdict{
+			{Gate: "build-and-test", Decision: forge.DecisionPass, Reason: "all green"},
+			{Gate: "review", Decision: forge.DecisionPass, Reason: "looks right"},
+		},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	if len(x.gh.checks) != 0 {
+		t.Fatalf("an OAuth lander posted check runs: %+v", x.gh.checks)
+	}
+	if len(x.gh.statuses) != 2 {
+		t.Fatalf("want two statuses posted, got %d: %+v", len(x.gh.statuses), x.gh.statuses)
+	}
+	by := map[string]ghStatus{}
+	for _, st := range x.gh.statuses {
+		by[st.Context] = st
+	}
+	for _, name := range []string{"box/check", "box/review"} {
+		st, ok := by[name]
+		if !ok {
+			t.Fatalf("no %s status: %+v", name, x.gh.statuses)
+		}
+		if st.SHA != string(head) || st.State != "success" {
+			t.Fatalf("%s = %+v, want success on %s", name, st, head)
+		}
+		if len([]rune(st.Description)) > maxStatusDescription {
+			t.Fatalf("%s description is over GitHub's bound: %q", name, st.Description)
+		}
+	}
+	if !strings.Contains(by["box/review"].Description, "looks right") {
+		t.Fatalf("box/review description = %q, want the review verdict's reason", by["box/review"].Description)
+	}
+}
+
+// TestAStatusDescriptionIsCutAtGitHubsBound: a long summary is cut with the
+// cut marked, never refused by the API after the pull request exists.
+func TestAStatusDescriptionIsCutAtGitHubsBound(t *testing.T) {
+	long := strings.Repeat("x", 300)
+	got := statusDescription("gate: pass", long)
+	if n := len([]rune(got)); n != maxStatusDescription {
+		t.Fatalf("len = %d, want %d", n, maxStatusDescription)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Fatalf("the cut is not marked: %q", got[len(got)-10:])
 	}
 }

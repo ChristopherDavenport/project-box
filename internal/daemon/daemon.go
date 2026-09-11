@@ -393,7 +393,10 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// Validated at Load: pull_request landing does not reach here
 				// without a known land_token, and "gh" is the only one today.
 				lp.PRLander = func(inner *gitforge.Lander) forge.Lander {
-					return gitforge.NewPRLander(inner, ghAuthToken)
+					// The gh session's token is an OAuth token, and a check
+					// run is a GitHub App's to create; statuses until the
+					// App (Phase 7) is what signs the landing.
+					return gitforge.NewPRLander(inner, ghAuthToken).StatusesOnly()
 				}
 			}
 			if r.Approval.Count > 0 {
@@ -403,7 +406,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// lp.Approval nil BY CONSTRUCTION, not by a gate that always
 				// passes — today's loop must not change shape at all when no
 				// human boundary is configured.
-				pr := gitforge.NewPRLander(gitforge.NewLander(d.mirror, d.store.Log()), ghAuthToken)
+				pr := gitforge.NewPRLander(gitforge.NewLander(d.mirror, d.store.Log()), ghAuthToken).StatusesOnly()
 				sources := make([]approval.Source, 0, len(r.Approval.Sources))
 				for _, s := range r.Approval.Sources {
 					sources = append(sources, approval.Source(s))
