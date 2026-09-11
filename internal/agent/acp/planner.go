@@ -339,7 +339,7 @@ const plannerContract = `
 ## Your answer
 You are planning, not building: read what you need to decide how this origination becomes units of work, and edit nothing. Reply with ONE JSON object as the last thing in your message:
 
-{"units":[{"id":"api-endpoint","task":"...","summary":"...","sections":["api"],"depends_on":[],"model":""}],"why":"one paragraph"}
+{"units":[{"id":"api-endpoint","task":"...","summary":"...","sections":["api"],"depends_on":[],"model":"","attempts":0}],"why":"one paragraph"}
 
 - Prefer one unit. Split only where two units can be built and verified independently, or where one must land before another can start.
 - id: a plain token, unique in this plan. task: the complete instruction a builder needs, self-contained — the builder will not see this conversation.
@@ -347,6 +347,7 @@ You are planning, not building: read what you need to decide how this originatio
 - sections: the declared section names the unit's paths fall in. Empty means the whole repository, which waits for every section.
 - depends_on: ids that must land first.
 - model: leave empty unless the unit is trivial enough for a cheaper tier or hard enough to need a stronger one; a value the harness lists.
+- attempts: leave at 0 to inherit the box's default budget; set a small integer only when the unit's difficulty warrants more or fewer tries than that default.
 - If the origination is a question, a decision, or already satisfied by the code as it stands, do not plan: reply with a single line starting with ESCALATE: and the reason.
 `
 
@@ -375,6 +376,7 @@ type planAnswer struct {
 		Sections  []string `json:"sections"`
 		DependsOn []string `json:"depends_on"`
 		Model     string   `json:"model"`
+		Attempts  int      `json:"attempts"`
 	} `json:"units"`
 	Why string `json:"why"`
 }
@@ -418,7 +420,7 @@ func parsePlan(text string, repo forge.Repo) ([]plan.Node, error) {
 				return nil, fmt.Errorf("unit %s depends on %q, which the plan does not contain", u.ID, d)
 			}
 		}
-		nodes = append(nodes, plan.Node{ID: u.ID, Task: strings.TrimSpace(u.Task), Summary: strings.TrimSpace(u.Summary), Sections: u.Sections, DependsOn: u.DependsOn, Model: strings.TrimSpace(u.Model)})
+		nodes = append(nodes, plan.Node{ID: u.ID, Task: strings.TrimSpace(u.Task), Summary: strings.TrimSpace(u.Summary), Sections: u.Sections, DependsOn: u.DependsOn, Model: strings.TrimSpace(u.Model), Attempts: u.Attempts})
 	}
 	return nodes, nil
 }

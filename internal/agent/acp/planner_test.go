@@ -249,6 +249,31 @@ func TestAPlanCarriesPerUnitSummaries(t *testing.T) {
 	}
 }
 
+// TestAPlanCarriesPerUnitAttempts: a planner answer naming "attempts" on a
+// unit becomes a plan.Node with that attempt budget, mirroring how a
+// per-unit model tier carries through; a unit that omits it must read as 0,
+// which plan.Node treats as inheriting the box's default, not as a budget
+// of zero tries.
+func TestAPlanCarriesPerUnitAttempts(t *testing.T) {
+	repo := forge.Repo{Name: "app", Sections: []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
+	}}
+	text := "```json\n" +
+		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","sections":["api"],"depends_on":[],"attempts":3},` +
+		`{"id":"room-view","task":"Render widgets","sections":["api"],"depends_on":["api-endpoint"]}],"why":"two units"}` +
+		"\n```"
+	nodes, err := parsePlan(text, repo)
+	if err != nil {
+		t.Fatalf("parsePlan: %v", err)
+	}
+	if len(nodes) != 2 || nodes[0].Attempts != 3 {
+		t.Fatalf("the unit's attempt budget was lost: %+v", nodes)
+	}
+	if nodes[1].Attempts != 0 {
+		t.Fatalf("a unit that names no attempts must inherit, not carry a stray budget: %+v", nodes[1])
+	}
+}
+
 func keysOf(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
