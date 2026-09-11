@@ -404,6 +404,15 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			case bx.Attempts != nil:
 				lp.Attempts = *bx.Attempts
 			}
+			// Repo wins over box; absent on both leaves lp.GateRetries
+			// zero, which the loop itself resolves to its own default —
+			// see [boxcfg.Repo.GateRetries].
+			switch {
+			case r.GateRetries != nil:
+				lp.GateRetries = *r.GateRetries
+			case bx.GateRetries != nil:
+				lp.GateRetries = *bx.GateRetries
+			}
 			if r.Land == boxcfg.LandPullRequest {
 				// The token round 11's #68 landing found out was missing
 				// `workflow` only at the remote's rejection. Probed and
