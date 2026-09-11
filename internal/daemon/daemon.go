@@ -13,6 +13,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -125,6 +126,10 @@ type Daemon struct {
 	// poller reads a route's forge for its polled issues; its Lister is the
 	// daemon's own GitHub reader, swappable in a test.
 	poller *ingress.Poller
+	// landProbe asks GitHub what scopes the land token carries, at every
+	// assemble of a repo configured for pull_request landing — the same
+	// swappable-in-a-test shape as poller's Lister above.
+	landProbe *landTokenScopeProbe
 	// routes and remotes are swapped together at every assemble (New and
 	// Reload), guarded by mu below. remotes carries the repo remote a
 	// route's poll targets — ingress.Route itself does not, since a route
@@ -194,8 +199,9 @@ func New(path string) (*Daemon, error) {
 			Lister: newGHIssueLister(ghAuthToken), Router: router, Log: s.Log(),
 			Tenant: t, Actor: cfg.Runner,
 		},
-		lastPoll: map[string]time.Time{},
-		cfg:      cfg, every: cfg.EveryDuration(),
+		landProbe: newLandTokenScopeProbe(ghAuthToken),
+		lastPoll:  map[string]time.Time{},
+		cfg:       cfg, every: cfg.EveryDuration(),
 	}
 	// The deterministic, agent-free set, plus the one judgement this daemon
 	// can offer. Registering it here does not put an agent on the intake
@@ -399,6 +405,30 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				lp.Attempts = *bx.Attempts
 			}
 			if r.Land == boxcfg.LandPullRequest {
+				// The token round 11's #68 landing found out was missing
+				// `workflow` only at the remote's rejection. Probed and
+				// recorded before the wiring decides anything — the record
+				// is the answer, the refusal below is a consequence of it,
+				// not a replacement for it.
+				scopes := d.landProbe.probe(ctx, r.Remote)
+				body, _ := json.Marshal(scopes)
+				if _, err := d.store.Log().Append(ctx, evidence.Record{
+					Tenant: d.tenant, Scope: "control/config", Kind: "land-token-scopes",
+					Subject: bx.Name + "/" + r.Name, Actor: cfg.Runner, Body: body,
+				}); err != nil {
+					return nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: recording land-token scopes: %w", bx.Name, r.Name, err)
+				}
+				// Every indefinite outcome — a non-GitHub remote, a token or
+				// network failure, an absent X-OAuth-Scopes header, a status
+				// other than 200/404 — is recorded above as unanswered and
+				// does not refuse: boxd stays local-first and keeps starting
+				// offline. Only a definite gap refuses, and only here, at
+				// Load-equivalent time — the wire-side assertion this same
+				// plan adds on the forge side still refuses before any push
+				// either way, so an unanswered probe is never the last word.
+				if scopes.missingWorkflowScope() {
+					return nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: land token scopes (%s) lack \"workflow\", and %s has a .github/workflows directory — run: gh auth refresh -s workflow", bx.Name, r.Name, scopes.Scopes, r.Remote)
+				}
 				// Validated at Load: pull_request landing does not reach here
 				// without a known land_token, and "gh" is the only one today.
 				lp.PRLander = func(inner *gitforge.Lander) forge.Lander {
