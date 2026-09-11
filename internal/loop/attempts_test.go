@@ -186,12 +186,15 @@ func TestLastRefusalParksKeepingTheCommit(t *testing.T) {
 }
 
 // TestGateInfraErrorSpendsNoAttempt: infrastructure trouble is never a
-// judgement the budget can act on, so it must never be retried in-claim
-// however much budget remains — it fails the item outright, same as always.
+// judgement the attempt budget can act on, so it must never be retried
+// in-claim as a build however much budget remains — it parks, keeping the
+// commit (issue #76), once every gate retry this bound allows is spent, and
+// the builder never runs again to buy that park (issue #83).
 func TestGateInfraErrorSpendsNoAttempt(t *testing.T) {
 	e := setup(t, []string{"true"})
 	ctx := context.Background()
 	e.loop.Attempts = 3
+	e.loop.GateBackoff = func(int) time.Duration { return 0 }
 	builder := &countingBuilder{}
 	e.loop.Builder = builder
 	e.loop.Gates = func(forge.Workspace) []forge.Gate {
@@ -209,8 +212,8 @@ func TestGateInfraErrorSpendsNoAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loop: %v", err)
 	}
-	if item.State != queue.StateFailed {
-		t.Fatalf("infra trouble should fail the item, got %s (%s)", item.State, item.Note)
+	if item.State != queue.StateParked {
+		t.Fatalf("infra trouble exhausting its retries should park, got %s (%s)", item.State, item.Note)
 	}
 	if builder.n != 1 {
 		t.Fatalf("builder ran %d times, want exactly 1 — infra trouble must never spend budget on a retry", builder.n)

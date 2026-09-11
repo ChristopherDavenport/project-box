@@ -106,6 +106,29 @@ type Loop struct {
 	// judgement a retry could have used itself (issue #81). Only a refusal
 	// on the last attempt parks.
 	Attempts int
+	// GateRetries bounds how many more times a gate that returned an error —
+	// not a verdict — is re-asked about the SAME [forge.ChangeSet] before the
+	// item parks instead. Zero means [DefaultGateRetries]; there is no
+	// "negative means unbounded" case, for the same reason [Attempts] has
+	// none: boxcfg will refuse a non-positive value at Load (a follow-up
+	// unit), so this field is never asked to mean anything but a real bound
+	// or the default.
+	//
+	// A retry answers a flaky miss, not a wrong change: the gate said
+	// nothing about the change at all, so asking again is free of judgement
+	// and spends no attempt (issue #83). That is the whole difference from
+	// [Attempts] — a refusal is feedback the next attempt can act on, but an
+	// error is nobody's verdict yet, so it is the SAME ask repeated rather
+	// than a new build.
+	GateRetries int
+	// GateBackoff returns how long to wait before re-asking a gate that just
+	// errored, given the try number that just failed (1 for the first).
+	// Nil means a modest default that grows with each try — long enough
+	// that a transient blip (a rate limit, a flaked network call) usually
+	// clears before the next ask, short enough that a real outage still
+	// parks inside a tick or two. Tests set it to a function returning zero
+	// so a retrying gate does not slow the suite down.
+	GateBackoff func(try int) time.Duration
 	// BuildTimeout bounds one build. Zero means [DefaultBuildTimeout]; a
 	// negative value means no bound, which an operator may choose.
 	//
@@ -150,6 +173,18 @@ const DefaultMaxHandoffs = 3
 // fix, into a landed change without a person — and few enough that a change
 // genuinely wrong does not run up a bill arguing with the same gate.
 const DefaultAttempts = 2
+
+// DefaultGateRetries bounds how many more times a gate that errored is
+// re-asked when nothing configures a bound. Two more tries — three asks in
+// all — is enough to clear a flaky miss without turning a genuinely broken
+// gate into a long wait before the park a person will see anyway.
+const DefaultGateRetries = 2
+
+// defaultGateBackoffUnit is the base of [Loop.gateBackoff]'s default growth:
+// try 1 waits one unit, try 2 waits two, and so on. Seconds, because a gate
+// error is infrastructure trouble worth a short pause, not a rate limit
+// worth minutes.
+const defaultGateBackoffUnit = 2 * time.Second
 
 // OpenRepair wires Red to an ingress route: the red commit's sha is the
 // delivery key, so however many post-land checks report the same red, one
@@ -511,7 +546,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		}
 		verdicts = nil
 		passedNow = nil
-		var gateInfra error
+		var gateInfra, gateWait error
 		gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
 			for _, g := range l.gatesFor(item, ws) {
 				if slices.Contains(carried, g.Name()) {
@@ -525,13 +560,28 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 					passedNow = append(passedNow, g.Name())
 					continue
 				}
-				v, err := g.Evaluate(ctx, cs)
+				v, tries, err := l.evaluateGate(ctx, item, g, cs)
 				if err != nil {
-					// Infrastructure trouble is never recorded as a rejected change.
-					gateInfra = fmt.Errorf("gate %s could not conclude: %v", g.Name(), err)
+					if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrUnpriced) {
+						// The meter's own refusal, not infrastructure trouble a
+						// retry could clear: no gate today can hit this (the
+						// meter refuses at pump.Acquire, before Run), so it can
+						// only reach here by construction (a fake gate in
+						// tests). Retrying or parking would both be the loop
+						// second-guessing a rule that is not its to relax.
+						gateWait = fmt.Errorf("gate %s: %w", g.Name(), err)
+						return gateWait
+					}
+					// Infrastructure trouble is never recorded as a rejected
+					// change, even after every retry this bound allowed.
+					gateInfra = fmt.Errorf("gate %s could not conclude after %d tries: %v", g.Name(), tries, err)
 					return gateInfra
 				}
-				body, _ := json.Marshal(v)
+				vr := gateVerdictRecord{Verdict: v}
+				if tries > 1 {
+					vr.Try = tries
+				}
+				body, _ := json.Marshal(vr)
 				rec := l.recordEvidence(ctx, item, "gate", string(head), string(body))
 				if rec.ID != "" {
 					// The chain's own id, threaded onto the verdict it
@@ -559,11 +609,26 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			}
 			return nil
 		})
+		if gateWait != nil {
+			// The unit waits exactly as a refused start at pump.Acquire waits:
+			// the window will turn, and nothing about this commit was judged.
+			item.KeepCandidate(head, base, passedNow)
+			return q.Wait(ctx, item, claim, gateWait.Error())
+		}
 		if gateInfra != nil {
 			// Infrastructure trouble spends no attempt: the budget is for a
 			// judgement the loop received and could act on, and an
-			// inconclusive gate never gave one.
-			return q.Fail(ctx, item, claim, gateInfra.Error())
+			// inconclusive gate never gave one — that holds through every
+			// retry, not just the first ask.
+			//
+			// Parking keeps the commit (issue #76) rather than failing it:
+			// nothing here judged the change wrong, so a person's Retry
+			// should buy the free recheck at the gate that [queue.ParkKeeping]
+			// exists for, not a fresh build. SeverityMedium matches the
+			// existing gate-refusal park below — this needs a look, but nothing
+			// about it is an emergency tonight.
+			item.KeepCandidate(head, base, passedNow)
+			return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, gateInfra.Error())
 		}
 		_ = gerr
 
@@ -1065,6 +1130,93 @@ func (l *Loop) attemptBudget(item queue.WorkItem) int {
 	default:
 		return DefaultAttempts
 	}
+}
+
+// gateRetries bounds how many more times one gate is re-asked after it
+// errors, before the item parks. Mirrors [Loop.attemptBudget]'s "zero means
+// default" rule with no item-level override, because a gate error is the
+// loop's own infrastructure concern, not a per-item budget.
+func (l *Loop) gateRetries() int {
+	if l.GateRetries > 0 {
+		return l.GateRetries
+	}
+	return DefaultGateRetries
+}
+
+// gateBackoff returns how long to wait before re-asking a gate that just
+// failed try, honoring [Loop.GateBackoff] when set.
+func (l *Loop) gateBackoff(try int) time.Duration {
+	if l.GateBackoff != nil {
+		return l.GateBackoff(try)
+	}
+	return time.Duration(try) * defaultGateBackoffUnit
+}
+
+// gateVerdictRecord is the loop-local envelope for a concluded gate's
+// verdict on the chain: [forge.Verdict] embedded so existing readers see
+// exactly the keys they always have, plus which try concluded when a retry
+// is the one that answered. forge.Verdict itself carries no such field —
+// how many times the loop had to ask is the loop's bookkeeping, not the
+// gate's judgement.
+type gateVerdictRecord struct {
+	forge.Verdict
+	Try int `json:"try,omitempty"`
+}
+
+// evaluateGate re-asks g about cs while it returns an error, up to
+// [Loop.gateRetries] more times, waiting [Loop.gateBackoff] between tries. It
+// returns as soon as g concludes — a verdict, pass or fail, is never
+// retried — and the try number that concluded (or, if every try errored,
+// the try count and the LAST error).
+//
+// A meter refusal (capacity.ErrBudget, ErrUnmetered, ErrUnpriced) is
+// returned immediately, un-retried, on the first try that hits it: the
+// window's exhaustion, or a run that reported blind under a budget, is the
+// meter's own rule standing, not infrastructure trouble a re-ask could
+// clear. See the caller's Wait branch.
+//
+// Every erroring try — including the first, which is not yet a "retry" but
+// is still a try nobody may act on as a verdict — is recorded on the chain,
+// keyed to the SAME head the eventual verdict will be, in its own nested
+// telemetry stage: the whole point of the bound is that a re-ask leaves a
+// trace, not a silent redo.
+func (l *Loop) evaluateGate(ctx context.Context, item queue.WorkItem, g forge.Gate, cs forge.ChangeSet) (forge.Verdict, int, error) {
+	head := cs.Members[0].Head
+	maxTries := 1 + l.gateRetries()
+	var lastErr error
+	for try := 1; try <= maxTries; try++ {
+		v, err := g.Evaluate(ctx, cs)
+		if err == nil {
+			return v, try, nil
+		}
+		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrUnpriced) {
+			return forge.Verdict{}, try, err
+		}
+		lastErr = err
+		_ = telemetry.Stage(ctx, "gate-retry", item, func(ctx context.Context) error {
+			l.record(ctx, item, "gate-try", string(head),
+				fmt.Sprintf(`{"gate":%q,"try":%d,"error":%q}`, g.Name(), try, err.Error()))
+			return err
+		})
+		if try == maxTries {
+			break
+		}
+		if wait := l.gateBackoff(try); wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return forge.Verdict{}, try, ctx.Err()
+			case <-timer.C:
+			}
+		} else if ctx.Err() != nil {
+			// A canceled ctx is not retried even when the backoff itself is
+			// zero (tests): propagate it rather than spending one more try
+			// on a context nobody is waiting for the result of.
+			return forge.Verdict{}, try, ctx.Err()
+		}
+	}
+	return forge.Verdict{}, maxTries, lastErr
 }
 
 // settle runs the handoff hook after any settle; closure over termination.

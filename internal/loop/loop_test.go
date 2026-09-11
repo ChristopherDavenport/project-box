@@ -16,6 +16,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/authz"
+	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/checks"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/forge/git"
@@ -1585,24 +1586,72 @@ func TestFailingGateShortCircuitsLaterGates(t *testing.T) {
 // erroringGate never concludes — the shape of infrastructure trouble a real
 // reviewer can hit (an answer that did not parse, a workspace that would not
 // produce a diff): [forge.Gate]'s hardest rule is that this is never recorded
-// as a rejected change.
-type erroringGate struct{ name string }
+// as a rejected change. n, when set, counts every ask, so a test can assert
+// how many times the loop actually retried it.
+type erroringGate struct {
+	name string
+	n    *int
+}
 
 func (g erroringGate) Name() string { return g.name }
 
 func (g erroringGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	if g.n != nil {
+		*g.n++
+	}
 	return forge.Verdict{}, fmt.Errorf("%s: the answer did not parse", g.name)
 }
 
-// TestErroringGateFailsTheItemNeverParksIt: a gate that could not conclude —
-// infrastructure trouble, not a verdict — must settle the item as
-// [queue.StateFailed], never [queue.StateParked]: parking records a
-// judgement, and an error is the one case where nobody made one.
-func TestErroringGateFailsTheItemNeverParksIt(t *testing.T) {
+// erroringNTimesGate errors its first errFor evaluations, then passes every
+// one after — the error-path counterpart to failNTimesGate, for the case
+// where a retry is the thing that clears a flaky miss.
+type erroringNTimesGate struct {
+	name   string
+	n      *int
+	errFor int
+}
+
+func (g erroringNTimesGate) Name() string { return g.name }
+
+func (g erroringNTimesGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	*g.n++
+	if *g.n <= g.errFor {
+		return forge.Verdict{}, fmt.Errorf("%s: still could not conclude on call %d", g.name, *g.n)
+	}
+	return forge.Verdict{Gate: g.name, Decision: forge.DecisionPass, Reason: "concluded"}, nil
+}
+
+// meterRefusalGate always errors with capacity.ErrBudget wrapped in — the
+// shape no gate produces today (the meter refuses at pump.Acquire, before
+// Run ever calls a gate), asserted here by construction per issue #83.
+type meterRefusalGate struct {
+	name string
+	n    *int
+}
+
+func (g meterRefusalGate) Name() string { return g.name }
+
+func (g meterRefusalGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	*g.n++
+	return forge.Verdict{}, fmt.Errorf("%s: %w", g.name, capacity.ErrBudget)
+}
+
+// TestErroringGateRetriesThenParksKeepingTheCommit: a gate that never
+// concludes is re-asked up to GateRetries more times — infrastructure
+// trouble, not a verdict — and once every try is spent it PARKS keeping the
+// commit (issue #76), never fails it: parking with a resume point lets a
+// person's Retry buy the free recheck at the gate, and failing would throw
+// the commit away for trouble nobody judged.
+func TestErroringGateRetriesThenParksKeepingTheCommit(t *testing.T) {
 	e := setup(t, []string{"true"})
 	ctx := context.Background()
+	calls := 0
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.GateRetries = 2
+	e.loop.GateBackoff = func(int) time.Duration { return 0 }
 	e.loop.Gates = func(forge.Workspace) []forge.Gate {
-		return []forge.Gate{erroringGate{name: "review"}}
+		return []forge.Gate{erroringGate{name: "review", n: &calls}}
 	}
 
 	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-gateerror"})
@@ -1616,13 +1665,190 @@ func TestErroringGateFailsTheItemNeverParksIt(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loop: %v", err)
 	}
-	if item.State != queue.StateFailed {
-		t.Fatalf("a gate that could not conclude should fail the item, got %s (%s)", item.State, item.Note)
+	if item.State != queue.StateParked {
+		t.Fatalf("a gate that could not conclude after every retry should park, got %s (%s)", item.State, item.Note)
 	}
-	if item.State == queue.StateParked {
-		t.Fatal("infrastructure trouble must never be recorded as a rejected change")
+	if item.Built == "" {
+		t.Fatal("parking on an exhausted gate error should keep its resume point (issue #76)")
+	}
+	if calls != 3 {
+		t.Fatalf("gate should have been asked once plus two retries: %d", calls)
+	}
+	if builder.n != 1 {
+		t.Fatalf("a gate erroring through every retry must never invoke the builder again: %d builds", builder.n)
 	}
 	if !strings.Contains(item.Note, "review") || !strings.Contains(item.Note, "did not parse") {
-		t.Fatalf("the failure note should name the gate and the trouble: %q", item.Note)
+		t.Fatalf("the park note should name the gate and the last error: %q", item.Note)
+	}
+	if !strings.Contains(item.Note, "3") {
+		t.Fatalf("the park note should say how many tries it took: %q", item.Note)
+	}
+
+	tryRecords := 0
+	for r, err := range e.store.Log().BySubject(ctx, tn, item.Built) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "gate" {
+			t.Fatalf("an errored try must never be recorded as a gate verdict: %+v", r)
+		}
+		if r.Kind == "gate-try" {
+			tryRecords++
+		}
+	}
+	if tryRecords != 3 {
+		t.Fatalf("every try should be on the chain as gate-try, got %d", tryRecords)
+	}
+}
+
+// TestParkedGateErrorResumesAtGateNotBuilder: retrying a park that an
+// exhausted gate error produced must re-enter at the gate on the SAME
+// commit, not rebuild — the free-recheck path issue #57 built and this
+// unit's park keeps by calling ParkKeeping rather than Park.
+func TestParkedGateErrorResumesAtGateNotBuilder(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	calls := 0
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.GateRetries = 1
+	e.loop.GateBackoff = func(int) time.Duration { return 0 }
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{erroringNTimesGate{name: "review", n: &calls, errFor: 2}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-gateerror-resume"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-gateerror-resume", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("both tries erroring should park, got %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 1 {
+		t.Fatalf("builder ran %d times before the park", builder.n)
+	}
+
+	retried, err := q.Retry(ctx, tn, "wi-gateerror-resume", "chris", "probably flaky; try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Built == "" {
+		t.Fatal("retrying a gate-error park should keep the resume point")
+	}
+
+	item, err = e.loop.Run(ctx, retried)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("the gate concluding on the retry's first ask should land, got %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 1 {
+		t.Fatalf("resuming a gate-error park must re-enter at the gate, not the builder: %d builds", builder.n)
+	}
+	if calls != 3 {
+		t.Fatalf("gate should have been asked three times total (two then one more): %d", calls)
+	}
+}
+
+// TestGateErrorThenConcludingProceedsAndNamesTheTry: a gate that errors under
+// the bound and then passes must proceed to land normally, and its verdict
+// record must say which try concluded — a gate that answered on the first
+// ask carries no such field, matching every record before this issue.
+func TestGateErrorThenConcludingProceedsAndNamesTheTry(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	calls := 0
+	e.loop.GateRetries = 2
+	e.loop.GateBackoff = func(int) time.Duration { return 0 }
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{erroringNTimesGate{name: "review", n: &calls, errFor: 2}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-gateerror-recovers"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-gateerror-recovers", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("a gate that concludes under the retry bound should land, got %s (%s)", item.State, item.Note)
+	}
+	if calls != 3 {
+		t.Fatalf("gate should have errored twice then concluded on the third ask: %d", calls)
+	}
+
+	var verdictBody string
+	tryRecords := 0
+	for r, err := range e.store.Log().BySubject(ctx, tn, item.Head) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch r.Kind {
+		case "gate":
+			verdictBody = string(r.Body)
+		case "gate-try":
+			tryRecords++
+		}
+	}
+	if tryRecords != 2 {
+		t.Fatalf("the two errored tries should each be on the chain as gate-try, got %d", tryRecords)
+	}
+	var vr struct {
+		Try int `json:"try"`
+	}
+	if err := json.Unmarshal([]byte(verdictBody), &vr); err != nil {
+		t.Fatalf("verdict body did not parse: %v (%s)", err, verdictBody)
+	}
+	if vr.Try != 3 {
+		t.Fatalf("the verdict record should say try 3 concluded it, got %+v (%s)", vr, verdictBody)
+	}
+}
+
+// TestGateMeterRefusalWaitsWithoutRetryingOrParking is issue #83's part (5):
+// the meter refusing to proceed blind or over budget is the meter's own
+// rule, not infrastructure trouble a retry could clear and not a judgement
+// worth parking for — the unit waits, exactly as a refused start waits.
+func TestGateMeterRefusalWaitsWithoutRetryingOrParking(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	calls := 0
+	e.loop.GateRetries = 2
+	e.loop.GateBackoff = func(int) time.Duration { return 0 }
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{meterRefusalGate{name: "review", n: &calls}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-gate-meter"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-gate-meter", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("a meter refusal should wait, got %s (%s)", item.State, item.Note)
+	}
+	if calls != 1 {
+		t.Fatalf("a meter refusal must never be retried: gate was asked %d times", calls)
+	}
+	if item.Built == "" {
+		t.Fatal("waiting on a meter refusal should keep the resume point, like any other wait")
 	}
 }
