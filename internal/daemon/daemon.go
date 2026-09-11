@@ -389,6 +389,15 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				TTL:          30 * time.Minute,
 				BuildTimeout: cfg.BuildTimeoutDuration(),
 			}
+			// Repo wins over box; absent on both leaves lp.Attempts zero,
+			// which the loop itself resolves to its own default — see
+			// [boxcfg.Repo.Attempts].
+			switch {
+			case r.Attempts != nil:
+				lp.Attempts = *r.Attempts
+			case bx.Attempts != nil:
+				lp.Attempts = *bx.Attempts
+			}
 			if r.Land == boxcfg.LandPullRequest {
 				// Validated at Load: pull_request landing does not reach here
 				// without a known land_token, and "gh" is the only one today.

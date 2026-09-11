@@ -88,6 +88,13 @@ func setup(t *testing.T, gateCmd []string) *env {
 				return []forge.Gate{gate.Command{Label: "build-and-test", Dir: ws.Dir, Commands: [][]string{gateCmd}}}
 			},
 			TTL: time.Hour,
+			// Pinned at the pre-issue-#81 shape: exactly one build before a
+			// gate refusal parks. Tests exercising the attempt budget itself
+			// set this explicitly; every other test here still means what it
+			// said before the budget existed, and scriptedBuilder's
+			// deterministic, task-text-only output has nothing new to commit
+			// on a second attempt in the same workspace.
+			Attempts: 1,
 		},
 		router: &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "runner-1"},
 	}

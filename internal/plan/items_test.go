@@ -20,3 +20,21 @@ func TestItemsCopiesTheNodesSummary(t *testing.T) {
 		t.Fatalf("summary: %q", got)
 	}
 }
+
+// TestItemsCopiesTheNodesAttempts: a node's per-unit attempt-budget override
+// has to make the same crossing Model already does, or a plan that named one
+// would silently lose it the moment it became work (issue #81).
+func TestItemsCopiesTheNodesAttempts(t *testing.T) {
+	p := Plan{Ingress: "ing-1", Replayable: true,
+		Nodes: []Node{{ID: IdentityNode, Task: "fix the thing", Attempts: 4}}}
+	if err := p.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	items := Items(issue("ing-1"), p)
+	if len(items) != 1 {
+		t.Fatalf("items: %d", len(items))
+	}
+	if got := items[0].Attempts; got != 4 {
+		t.Fatalf("attempts: %d, want 4", got)
+	}
+}

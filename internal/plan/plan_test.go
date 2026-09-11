@@ -72,6 +72,7 @@ func TestTheRefIsOverTheGraphNotTheListing(t *testing.T) {
 		func(p *Plan) { p.Facts[0].Value = "3" },
 		func(p *Plan) { p.Decomposer = "y" },
 		func(p *Plan) { p.Nodes[0].Repo = "elsewhere" },
+		func(p *Plan) { p.Nodes[0].Attempts = 3 },
 	} {
 		c := Plan{Ingress: a.Ingress, Kind: a.Kind, Decomposer: a.Decomposer, Replayable: true,
 			Nodes: append([]Node(nil), a.Nodes...), Facts: append([]Fact(nil), a.Facts...)}
@@ -108,6 +109,8 @@ func TestGraphsTheQueueCouldNotRun(t *testing.T) {
 			{ID: "b", Task: "t", DependsOn: []string{"a"}},
 			{ID: "c", Task: "t", DependsOn: []string{"b"}}}}, "cycle"},
 		{"judgement with no author", Plan{Ingress: "i", Nodes: []Node{{ID: "a", Task: "t"}}}, "no author"},
+		{"negative attempts", Plan{Ingress: "i", Replayable: true, Nodes: []Node{
+			{ID: "a", Task: "t", Attempts: -1}}}, "negative budget"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

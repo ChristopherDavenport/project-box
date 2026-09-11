@@ -93,6 +93,19 @@ type Loop struct {
 	// for them — the same posture OpenRepair's depth takes, and for the same
 	// reason: both are the factory summoning itself.
 	MaxHandoffs int
+	// Attempts bounds how many builds one claim may spend on a gate or
+	// review refusal before it parks instead. Zero means [DefaultAttempts];
+	// there is no "negative means unbounded" case as [MaxHandoffs] has,
+	// because boxcfg refuses a non-positive attempts: at Load, so this field
+	// is never asked to mean anything but a real budget or the default.
+	//
+	// A refusal under budget goes straight to the next build in the SAME
+	// claim rather than parking: the gate's verdict is feedback the very
+	// next attempt can act on, told through the carried [agent.Prior], and
+	// parking it instead would spend a person's attention on exactly the
+	// judgement a retry could have used itself (issue #81). Only a refusal
+	// on the last attempt parks.
+	Attempts int
 	// BuildTimeout bounds one build. Zero means [DefaultBuildTimeout]; a
 	// negative value means no bound, which an operator may choose.
 	//
@@ -130,6 +143,13 @@ const MaxRepairDepth = 3
 // repair chain uses, for the same reason: it is enough to be worth having and
 // few enough that nobody discovers the bill afterwards.
 const DefaultMaxHandoffs = 3
+
+// DefaultAttempts bounds how many builds one claim may spend on a gate or
+// review refusal when nothing configures a bound. Two is enough to turn a
+// single flaky miss, or a mistake the refusal itself named plainly enough to
+// fix, into a landed change without a person — and few enough that a change
+// genuinely wrong does not run up a bill arguing with the same gate.
+const DefaultAttempts = 2
 
 // OpenRepair wires Red to an ingress route: the red commit's sha is the
 // delivery key, so however many post-land checks report the same red, one
@@ -404,15 +424,24 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	// would gate and land it, which is the degraded commit the verb exists to
 	// avoid producing.
 	//
-	// Bounded at two passes: a resumed commit that skipped the builder and
-	// still fails its gate gets exactly one pass built afresh — informed by
-	// that failing verdict, now on its own evidence chain (see
-	// acp.Builder.carried) — rather than another free recheck. Whatever that
-	// second pass settles is final; it reaches the switch below like any
-	// other build.
+	// Bounded at [Loop.attemptBudget]: a resumed commit that skipped the
+	// builder and still fails its gate gets exactly one pass built afresh —
+	// informed by that failing verdict, now on its own evidence chain (see
+	// acp.Builder.carried) — rather than another free recheck; the free
+	// recheck spends none of the budget, because attempts are builds. Past
+	// that, every refusal under budget goes straight to the next build in
+	// this SAME claim, told what refused it and how many earlier attempts
+	// this claim has already spent (see agent.Prior) — persisted before the
+	// builder runs again, because acp.Builder loads its item from the queue
+	// itself rather than from what Run holds here (see [queue.Queue.Retain]).
+	// Only a refusal on the LAST attempt parks (issue #81).
 	skipBuild := resumed && !item.Unfinished
-	for attempt := 0; attempt < 2; attempt++ {
+	budget := l.attemptBudget(item)
+	attempt := 0
+	var history []string
+	for {
 		if !skipBuild {
+			attempt++
 			if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
 				bctx, cancelBuild := l.buildDeadline(ctx)
 				defer cancelBuild()
@@ -531,37 +560,68 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			return nil
 		})
 		if gateInfra != nil {
+			// Infrastructure trouble spends no attempt: the budget is for a
+			// judgement the loop received and could act on, and an
+			// inconclusive gate never gave one.
 			return q.Fail(ctx, item, claim, gateInfra.Error())
 		}
 		_ = gerr
 
 		if skipBuild && attempt == 0 && forge.Resolve(verdicts) == forge.DecisionFail {
-			// The one free recheck a resumed park bought just failed again.
-			// Fall through to the builder — same claim, same lease, one
-			// resume point re-set rather than a second — and judge what it
-			// produces instead of parking a commit nobody rebuilt.
+			// The one free recheck a resumed park bought just failed again,
+			// and it spent nothing: attempts are builds. Fall through to the
+			// builder — same claim, same lease — and judge what it produces
+			// as this claim's first real attempt.
 			skipBuild = false
 			continue
 		}
+
+		if forge.Resolve(verdicts) == forge.DecisionFail {
+			reason := reasons(verdicts)
+			if attempt < budget {
+				// Under budget: feedback, not an exception. Told to the next
+				// build through the SAME layer a repair wakes with — the
+				// refused head, which gate said no, and every earlier
+				// attempt this claim has already made, so a builder on its
+				// third attempt is told it is the third rather than starting
+				// cold on a commit that already failed twice.
+				next := attempt + 1
+				history = append(history, fmt.Sprintf("attempt %d was refused: %s", attempt, reason))
+				prior := &agent.Prior{
+					Run: item.ID, Repo: l.Repo.Name, Sha: string(head),
+					Checks: failing(verdicts),
+					Reason: fmt.Sprintf("attempt %d of %d; %s", next, budget, strings.Join(history, "; ")),
+				}
+				l.record(ctx, item, "attempt", string(head),
+					fmt.Sprintf(`{"attempt":%d,"of":%d,"reason":%q}`, next, budget, reason))
+				var rerr error
+				item, claim, rerr = q.Retain(ctx, item, claim, prior, next)
+				if rerr != nil {
+					return q.Fail(ctx, item, claim, fmt.Sprintf("retaining attempt %d of %d: %v", next, budget, rerr))
+				}
+				continue
+			}
+			// The budget ran out. A refusal is never a pass by exhaustion —
+			// nothing lands because attempts ran out — so this parks exactly
+			// like any single gate refusal always has: kept as a resume
+			// point, in case a human Retry (a fresh claim, a fresh budget)
+			// wants the one free recheck that buys. See
+			// [queue.Queue.ParkKeeping].
+			item.KeepCandidate(head, base, passedNow)
+			return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium,
+				fmt.Sprintf("refused on attempt %d of %d: %s", attempt, budget, reason))
+		}
+
+		if forge.Resolve(verdicts) == forge.DecisionPending {
+			// Carry the commit forward so the next tick re-enters at the gate
+			// rather than at the builder, and the satisfied gates with it so it
+			// re-enters at the ONE gate that has not answered. Waiting on a
+			// person is routine and can last days; it must cost neither an agent
+			// run nor a test suite per tick to do it.
+			item.KeepCandidate(head, base, passedNow)
+			return q.Wait(ctx, item, claim, reasons(verdicts))
+		}
 		break
-	}
-	switch forge.Resolve(verdicts) {
-	case forge.DecisionFail:
-		// A change judged and refused: nothing landed, nothing is broken, and
-		// the queue is the right place for it to wait — kept as a resume
-		// point exactly like a pending gate already is, so a retry can ask
-		// the gate again before it pays for another agent run. See
-		// [queue.Queue.ParkKeeping].
-		item.KeepCandidate(head, base, passedNow)
-		return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, reasons(verdicts))
-	case forge.DecisionPending:
-		// Carry the commit forward so the next tick re-enters at the gate
-		// rather than at the builder, and the satisfied gates with it so it
-		// re-enters at the ONE gate that has not answered. Waiting on a
-		// person is routine and can last days; it must cost neither an agent
-		// run nor a test suite per tick to do it.
-		item.KeepCandidate(head, base, passedNow)
-		return q.Wait(ctx, item, claim, reasons(verdicts))
 	}
 
 	// Only the gated lane reaches here with a resolved verdict in hand — a
@@ -989,6 +1049,21 @@ func (l *Loop) maxHandoffs() int {
 		return DefaultMaxHandoffs
 	}
 	return l.MaxHandoffs
+}
+
+// attemptBudget resolves this item's attempt budget: the plan's per-node
+// override wins, then the loop's own (repo-else-box, resolved at assemble),
+// then [DefaultAttempts] — the same zero-means-default precedent
+// [Loop.maxHandoffs] follows.
+func (l *Loop) attemptBudget(item queue.WorkItem) int {
+	switch {
+	case item.Attempts > 0:
+		return item.Attempts
+	case l.Attempts > 0:
+		return l.Attempts
+	default:
+		return DefaultAttempts
+	}
 }
 
 // settle runs the handoff hook after any settle; closure over termination.

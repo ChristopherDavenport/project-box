@@ -195,7 +195,12 @@ type WorkItem struct {
 	// Model is the tier the plan chose for this unit, when it chose one;
 	// empty inherits the section's, then the role's, then the box's.
 	Model string `json:"model,omitempty"`
-	Task  string `json:"task"`
+	// Attempts is the plan's per-unit override of the attempt budget: how
+	// many builds this item's claim may spend on a gate or review refusal
+	// before it parks — see [loop.Loop.Attempts]. Zero inherits the repo's
+	// or box's default.
+	Attempts int    `json:"attempts,omitempty"`
+	Task     string `json:"task"`
 	// Summary is the one line the room shows for this item, distinct from
 	// Task: the task is the full paragraph an agent needs, and showing that
 	// paragraph as the item's name was the gap this field closes. Empty on
@@ -249,6 +254,13 @@ type WorkItem struct {
 	// take", which nothing else carries and which is the most direct signal
 	// there is about whether an item was sized for one.
 	Hops int `json:"hops,omitempty"`
+	// Attempt is the build this claim is currently on, or last was, within
+	// its attempt budget — see [loop.Loop.Attempts]. It exists so a look at
+	// the item shows "attempt 2 of 3" rather than a unit that looks like it
+	// built twice for no stated reason; the budget itself is never read from
+	// here. Scoped to the current claim: a fresh claim starts counting from
+	// nothing, whatever this still says from the one before it.
+	Attempt int `json:"attempt,omitempty"`
 	// PassedGates names the gates that already returned pass on Built.
 	//
 	// They are carried rather than re-run while that head stands. A gate that
@@ -540,6 +552,34 @@ func (q *Queue) HandOff(ctx context.Context, w WorkItem, lease forge.Lease, reas
 	err := q.record(ctx, w, "handedoff", w.ID, reason)
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
+}
+
+// Retain persists an in-claim retry's state — the carried [agent.Prior] and
+// the attempt number — WITHOUT settling the item, and without dropping the
+// claim: every other transition above frees the lease it was handed because
+// it moves the item out of running; this one keeps running, so it renews
+// instead.
+//
+// acp.Builder loads its item fresh from the queue on every call rather than
+// from what [Loop.Run] holds in memory, so a second build in the same claim
+// finds what the first one decided only if this writes it first — the
+// caller's contract is to call Retain BEFORE re-entering the build stage.
+//
+// Lease-checked, not a general setter: prior and attempt are the only fields
+// it changes, named as arguments rather than expected on w beforehand, and it
+// renews the lease before writing. A runner that has already lost this claim
+// — TTL lapsed, another runner recovered it — cannot leave its own record on
+// an item it no longer holds.
+func (q *Queue) Retain(ctx context.Context, w WorkItem, lease forge.Lease, prior *agent.Prior, attempt int) (WorkItem, forge.Lease, error) {
+	renewed, err := q.Store.Leaser(q.Runner).Renew(ctx, lease, q.TTL)
+	if err != nil {
+		return w, lease, err
+	}
+	w.Prior, w.Attempt = prior, attempt
+	if err := q.record(ctx, w, "claimed", w.ID, fmt.Sprintf("attempt %d", attempt)); err != nil {
+		return w, renewed, err
+	}
+	return w, renewed, nil
 }
 
 // Done settles the item, keyed by the commit it produced — the record an

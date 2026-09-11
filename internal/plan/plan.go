@@ -29,6 +29,7 @@ import (
 	"fmt"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -71,6 +72,10 @@ type Node struct {
 	// one — the cheapest model the unit's difficulty allows. Empty leaves
 	// the section's, the role's or the box's default in force.
 	Model string `json:"model,omitempty"`
+	// Attempts overrides this node's attempt budget: how many builds its
+	// claim may spend on a gate or review refusal before it parks — see
+	// [queue.WorkItem.Attempts]. Zero inherits the repo's or box's default.
+	Attempts int `json:"attempts,omitempty"`
 }
 
 // Fact is one input a decomposer read, and when it read it.
@@ -172,8 +177,8 @@ func (p *Plan) Seal() error {
 		// differently and costs differently.
 		sections := slices.Clone(n.Sections)
 		slices.Sort(sections)
-		if len(sections) > 0 || n.Model != "" {
-			put("where:" + n.ID + ":" + strings.Join(sections, "\x00") + ":" + n.Model)
+		if len(sections) > 0 || n.Model != "" || n.Attempts != 0 {
+			put("where:" + n.ID + ":" + strings.Join(sections, "\x00") + ":" + n.Model + ":" + strconv.Itoa(n.Attempts))
 		}
 	}
 	p.Ref = "plan-" + hex.EncodeToString(h.Sum(nil))[:32]
@@ -211,6 +216,9 @@ func (p *Plan) validate() error {
 		}
 		if strings.ContainsAny(n.Model, " \t\n") {
 			return fmt.Errorf("%w: %s node %q names model %q — a tier is the value the agent lists, not a sentence", ErrPlan, p.Ingress, n.ID, n.Model)
+		}
+		if n.Attempts < 0 {
+			return fmt.Errorf("%w: %s node %q attempts %d — a negative budget", ErrPlan, p.Ingress, n.ID, n.Attempts)
 		}
 		byID[n.ID] = n
 	}

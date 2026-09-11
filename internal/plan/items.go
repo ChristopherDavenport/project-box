@@ -32,7 +32,7 @@ func Items(ing ingress.Ingress, p Plan) []queue.WorkItem {
 			Ingress: ing.ID, Plan: p.Ref, Node: n.ID, Kind: string(ing.Kind),
 			Requester: ing.Requester, Repo: repo,
 			Task: n.Task, Summary: n.Summary, Depth: ing.Depth, DependsOn: deps,
-			Sections: n.Sections, Model: n.Model,
+			Sections: n.Sections, Model: n.Model, Attempts: n.Attempts,
 			// Repair work wakes with the attempt it follows rather than cold;
 			// the origination is where that travels, the same way the depth
 			// does. A fanned-out repair gives every node the same predecessor,

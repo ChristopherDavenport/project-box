@@ -310,6 +310,13 @@ type Box struct {
 	// and `mode` is not because the permission mode belongs to the tool
 	// policy and is set through session/set_mode.
 	Session map[string]string `yaml:"session"`
+	// Attempts bounds how many builds one claim may spend on a gate or
+	// review refusal before it parks, for every repo that names no override
+	// of its own — see [Repo.Attempts]. Absent means the loop's own default
+	// (loop.DefaultAttempts); an explicit zero or negative is refused at
+	// validate, because a budget of nothing builds nothing and unknown must
+	// not read as zero.
+	Attempts *int `yaml:"attempts"`
 	// Roles are per-role tiers: what the planner judges on, what the builder
 	// expresses on. A role's model or session wins over the box's for that
 	// role's runs and loses to a section's and to a plan node's. Keys are the
@@ -630,6 +637,12 @@ type Repo struct {
 	// A repository that declares none has one region: itself, and every
 	// unit of work in it takes turns.
 	Sections []Section `yaml:"sections"`
+	// Attempts overrides the box's attempt budget for this repository alone
+	// — see [Box.Attempts]. Absent inherits the box's value, and the loop's
+	// own default when the box names none either. Refused at validate when
+	// it is an explicit zero or negative, for the same reason the box-level
+	// field is.
+	Attempts *int `yaml:"attempts"`
 }
 
 // Approval is a [Repo]'s human sign-off policy.
@@ -789,6 +802,9 @@ func (c *Config) validate() error {
 		if (bx.Model != "" || len(bx.Session) > 0) && len(bx.Agent) == 0 {
 			return fmt.Errorf("boxcfg: box %s: model/session with no agent — a build command opens no session to configure", bx.Name)
 		}
+		if bx.Attempts != nil && *bx.Attempts <= 0 {
+			return fmt.Errorf("boxcfg: box %s: attempts %d — a budget of nothing builds nothing; leave it unset for the loop's own default", bx.Name, *bx.Attempts)
+		}
 		for _, role := range slices.Sorted(maps.Keys(bx.Roles)) {
 			if !agent.Role(role).Known() {
 				return fmt.Errorf("boxcfg: box %s: roles.%s — no such role; the seats are builder, planner, gate, deployer and curator", bx.Name, role)
@@ -896,6 +912,9 @@ func (c *Config) validate() error {
 				if s != "github" {
 					return fmt.Errorf("boxcfg: box %s repo %s: approval.sources %q — only \"github\" is known today; nothing records a direct attestation as an approval yet", bx.Name, r.Name, s)
 				}
+			}
+			if r.Attempts != nil && *r.Attempts <= 0 {
+				return fmt.Errorf("boxcfg: box %s repo %s: attempts %d — a budget of nothing builds nothing; leave it unset to inherit the box's, or the loop's own default", bx.Name, r.Name, *r.Attempts)
 			}
 			if err := validateSections(bx, r); err != nil {
 				return err
