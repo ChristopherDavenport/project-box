@@ -37,11 +37,8 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - run: go generate ./web
-      - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - run: go vet ./...
-      - run: go build ./...
-      - run: go test -race ./...
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      # hack/check.sh is THE check: this job and the factory's own gate
+      # (internal/daemon/daemon.go, gate.Command) run this exact script, so
+      # CI and the gate cannot drift into checking different things the way
+      # d9b4607 showed they could.
+      - run: ./hack/check.sh

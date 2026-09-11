@@ -49,9 +49,9 @@ section your change touches, by heading:
   `box-skills:sqlite`.
 - A property that is not tested is a comment. Tests assert behaviour, and the
   store's conformance suite runs against both backends.
-- `go build ./... && go test ./...` is the check the dogfood gates on; add
-  `-race` when touching anything concurrent. README.md states the web bundle
-  rule in force.
+- `./hack/check.sh` is the check the dogfood gates on and CI calls verbatim:
+  generate, gofmt, vet, build, test -race, govulncheck, in that order. It
+  already runs `-race`. README.md states the web bundle rule in force.
 - Read narrowly: `grep -n` and `sed -n` ranges over whole files; run the
   package you changed while iterating and the full suite once at the end.
   Every byte loaded is re-read on every later turn.
