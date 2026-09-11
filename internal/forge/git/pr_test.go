@@ -63,6 +63,15 @@ type fakeGitHub struct {
 	// token: 403, "You must authenticate via a GitHub App."
 	appOnly         bool
 	reviewsByNumber map[int][]ghReview
+	// scopesHeader, when non-nil, is the value /rate_limit answers with on
+	// its X-OAuth-Scopes response header. A nil pointer sends no such
+	// header at all — how a fine-grained PAT or a GitHub App installation
+	// token actually authenticates, never mentioning scopes either way.
+	scopesHeader *string
+	// requests logs every request's "METHOD /path" this server has seen, so
+	// a test can assert the scope probe was never sent for a change that
+	// never touched .github/workflows/.
+	requests []string
 }
 
 type ghPR struct {
@@ -133,6 +142,21 @@ func newFakeGitHub(t *testing.T) *fakeGitHub {
 }
 
 func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
+	g.mu.Lock()
+	g.requests = append(g.requests, r.Method+" "+r.URL.Path)
+	g.mu.Unlock()
+
+	if r.URL.Path == "/rate_limit" && r.Method == http.MethodGet {
+		g.mu.Lock()
+		header := g.scopesHeader
+		g.mu.Unlock()
+		if header != nil {
+			w.Header().Set("X-OAuth-Scopes", *header)
+		}
+		json.NewEncoder(w).Encode(map[string]string{})
+		return
+	}
+
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 4 || parts[0] != "repos" {
 		http.NotFound(w, r)
@@ -1089,5 +1113,189 @@ func TestAStatusDescriptionIsCutAtGitHubsBound(t *testing.T) {
 	}
 	if !strings.HasSuffix(got, "…") {
 		t.Fatalf("the cut is not marked: %q", got[len(got)-10:])
+	}
+}
+
+// buildOnWorkflow makes one commit in the workspace that adds a file under
+// .github/workflows/, the path [PRLander.assertWorkflowScope] watches for.
+func buildOnWorkflow(t *testing.T, ws forge.Workspace, msg string) forge.Commit {
+	t.Helper()
+	dir := filepath.Join(ws.Dir, ".github", "workflows")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir workflows dir: %v", err)
+	}
+	os.WriteFile(filepath.Join(dir, "ci.yml"), []byte(msg+"\n"), 0o644)
+	mustGit(t, ws.Dir, "add", ".")
+	mustGit(t, ws.Dir, "commit", "-m", msg)
+	return forge.Commit(strings.TrimSpace(mustGit(t, ws.Dir, "rev-parse", "HEAD")))
+}
+
+// remoteHasBranch reports whether remote carries branch — used to assert a
+// refused scope assertion never let the run branch push reach the remote.
+func remoteHasBranch(t *testing.T, remote, branch string) bool {
+	t.Helper()
+	out := mustGit(t, "", "ls-remote", remote, "refs/heads/"+branch)
+	return strings.TrimSpace(out) != ""
+}
+
+// TestPRRefusesWorkflowChangeWithoutWorkflowScope is issue #78's forge half:
+// a change touching .github/workflows/ pushed with a token whose scopes
+// lack `workflow` is refused before any push happens, rather than parking
+// later on GitHub's own rejection of the push.
+func TestPRRefusesWorkflowChangeWithoutWorkflowScope(t *testing.T) {
+	x := fixPR(t)
+	scopes := "repo"
+	x.gh.scopesHeader = &scopes
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOnWorkflow(t, ws, "add ci workflow")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land a workflow change",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+		Verdicts: []forge.Verdict{
+			{Gate: "build-and-test", Decision: forge.DecisionPass, Reason: "all green"},
+		},
+	}
+	_, err = x.pr.Land(ctx, cs)
+	if err == nil {
+		t.Fatal("land should have been refused: token lacks the workflow scope")
+	}
+	if !strings.Contains(err.Error(), "workflow") {
+		t.Fatalf("error = %q, want it to name the missing workflow scope", err.Error())
+	}
+	if !strings.Contains(err.Error(), "gh auth refresh -s workflow") {
+		t.Fatalf("error = %q, want it to contain the fix command verbatim", err.Error())
+	}
+	if remoteHasBranch(t, x.f.remote, "box/run-1") {
+		t.Fatal("run branch was pushed despite the missing scope — the assertion must run before any push")
+	}
+	if len(x.gh.checks) != 0 || len(x.gh.statuses) != 0 {
+		t.Fatalf("a scope refusal is not a verdict and must post nothing: checks=%+v statuses=%+v", x.gh.checks, x.gh.statuses)
+	}
+	if x.gh.creates != 0 {
+		t.Fatalf("want no pull request created, got %d", x.gh.creates)
+	}
+}
+
+// TestPRLandsWorkflowChangeWithWorkflowScope: the same change lands
+// normally end to end once the token's scopes include `workflow`.
+func TestPRLandsWorkflowChangeWithWorkflowScope(t *testing.T) {
+	x := fixPR(t)
+	scopes := "repo, workflow"
+	x.gh.scopesHeader = &scopes
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOnWorkflow(t, ws, "add ci workflow")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land a workflow change",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	landing, err := x.pr.Land(ctx, cs)
+	if err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	if !landing.Complete() {
+		t.Fatalf("landing incomplete: %+v", landing)
+	}
+	got := strings.TrimSpace(mustGit(t, x.f.remote, "rev-parse", "refs/heads/main"))
+	if forge.Commit(got) != head {
+		t.Fatalf("remote main = %s, want %s", got, head)
+	}
+	if x.gh.creates != 1 {
+		t.Fatalf("want exactly one PR created, got %d", x.gh.creates)
+	}
+}
+
+// TestPRSkipsScopeProbeWhenNoWorkflowFileChanges: probing the token's
+// scopes is not free, and GitHub only ever rejects a push over this scope
+// for a change that touches .github/workflows/ — pr_test.go's other
+// fixtures never touch that path, and this pins that the probe request is
+// never sent for them.
+func TestPRSkipsScopeProbeWhenNoWorkflowFileChanges(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	for _, req := range x.gh.requests {
+		if strings.HasPrefix(req, "GET /rate_limit") {
+			t.Fatalf("scope probe sent for a change that never touched .github/workflows/: %v", x.gh.requests)
+		}
+	}
+}
+
+// TestPRRefusesWorkflowChangeWhenTokenReportsNoScopes: a fine-grained PAT
+// or GitHub App installation token authenticates fine but never sends
+// X-OAuth-Scopes at all — that absence must read as neither "has every
+// scope" nor "has none," so the refusal names the distinct reason instead
+// of claiming the scope is missing.
+func TestPRRefusesWorkflowChangeWhenTokenReportsNoScopes(t *testing.T) {
+	x := fixPR(t)
+	x.gh.scopesHeader = nil
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOnWorkflow(t, ws, "add ci workflow")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land a workflow change",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	_, err = x.pr.Land(ctx, cs)
+	if err == nil {
+		t.Fatal("land should have been refused: token does not report scopes")
+	}
+	if strings.Contains(err.Error(), "lacks the workflow scope") {
+		t.Fatalf("error = %q, want the distinct cannot-assert message, not the missing-scope one", err.Error())
+	}
+	if !strings.Contains(err.Error(), "does not report") {
+		t.Fatalf("error = %q, want it to say the token does not report scopes", err.Error())
+	}
+	if remoteHasBranch(t, x.f.remote, "box/run-1") {
+		t.Fatal("run branch was pushed despite being unable to assert the scope")
 	}
 }

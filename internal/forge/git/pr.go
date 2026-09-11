@@ -259,6 +259,97 @@ func (p *PRLander) runBranchAtHead(ctx context.Context, repo forge.Repo, branch 
 	return len(fields) > 0 && forge.Commit(fields[0]) == head
 }
 
+// workflowsPrefix is the path GitHub treats as workflow definitions: moving
+// it requires the OAuth `workflow` scope, which GitHub itself enforces at
+// the push, not before — round 11's #68 landing parked exactly there, after
+// both verdicts had already passed. assertWorkflowScope asks the same
+// question earlier, before any push happens, so the unit parks with the
+// scope named and the fix in hand instead of on the remote's rejection.
+//
+// Phase 7's GitHub App replaces this assertion at this same seam with the
+// App's installation-permission check (docs/PLAN.md Phase 7): the
+// assertion stays: only its question changes, from "does this OAuth token
+// carry workflow" to "does this installation grant workflows: write".
+const workflowsPrefix = ".github/workflows/"
+
+// assertWorkflowScope refuses before any push when mem's changeset touches
+// workflowsPrefix and the token backing this landing cannot be shown to
+// carry the `workflow` scope. It is a no-op for every other change: probing
+// the token costs a real API call, and GitHub only ever rejects a push for
+// this reason when the diff touches workflow files.
+func (p *PRLander) assertWorkflowScope(ctx context.Context, cs forge.ChangeSet, mem forge.Member) error {
+	ws := p.inner.m.workDir(cs.Run, mem.Repo)
+	out, err := run(ctx, ws, "diff", "--name-only", string(mem.Base), string(mem.Head))
+	if err != nil {
+		return fmt.Errorf("diff %s..%s: %w", mem.Base, mem.Head, err)
+	}
+	touches := false
+	for _, f := range strings.Split(out, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(f), workflowsPrefix) {
+			touches = true
+			break
+		}
+	}
+	if !touches {
+		return nil
+	}
+	tok, err := p.token(ctx)
+	if err != nil {
+		return fmt.Errorf("token: %w", err)
+	}
+	scopes, present, err := p.tokenScopes(ctx, tok)
+	if err != nil {
+		return fmt.Errorf("check token scopes: %w", err)
+	}
+	if !present {
+		return fmt.Errorf("git: this change touches %s but the token does not report OAuth scopes (a fine-grained PAT or GitHub App installation token) — the workflow scope cannot be asserted", workflowsPrefix)
+	}
+	for _, s := range scopes {
+		if s == "workflow" {
+			return nil
+		}
+	}
+	return fmt.Errorf("git: this change touches %s but the token lacks the workflow scope (has: %s) — fix: gh auth refresh -s workflow", workflowsPrefix, strings.Join(scopes, ", "))
+}
+
+// tokenScopes asks GitHub what OAuth scopes tok carries. Any authenticated
+// GitHub REST response carries the answer on the X-OAuth-Scopes header, so
+// this asks the cheapest such endpoint rather than add a new one; present
+// reports whether the header was sent at all, since a fine-grained PAT or a
+// GitHub App installation token authenticates fine but never sends it, and
+// that absence must read as neither "has every scope" nor "has none" — the
+// caller decides what to do with unknown.
+func (p *PRLander) tokenScopes(ctx context.Context, tok string) (scopes []string, present bool, err error) {
+	endpoint := p.apiBase + "/rate_limit"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Authorization", "Bearer "+tok)
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return nil, false, err
+	}
+	defer resp.Body.Close()
+	io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, false, fmt.Errorf("github: GET %s: %s", endpoint, resp.Status)
+	}
+	values := resp.Header.Values("X-OAuth-Scopes")
+	if values == nil {
+		return nil, false, nil
+	}
+	raw := strings.TrimSpace(values[0])
+	if raw == "" {
+		return []string{}, true, nil
+	}
+	for _, s := range strings.Split(raw, ",") {
+		scopes = append(scopes, strings.TrimSpace(s))
+	}
+	return scopes, true, nil
+}
+
 // EnsureRequest makes sure a pull request exists covering mem's head onto
 // its branch — the push-and-open steps [PRLander.Land] performs before it
 // lands, extracted so a gate that only wants a request to review can call
@@ -276,6 +367,9 @@ func (p *PRLander) EnsureRequest(ctx context.Context, cs forge.ChangeSet, mem fo
 	repo, ok := p.inner.m.Repo(mem.Repo)
 	if !ok {
 		return "", fmt.Errorf("repo %q not established by Fetch", mem.Repo)
+	}
+	if err := p.assertWorkflowScope(ctx, cs, mem); err != nil {
+		return "", fmt.Errorf("git: ensure request: %w", err)
 	}
 	if !p.runBranchAtHead(ctx, repo, branch, mem.Head) {
 		if _, err := p.pushRunBranch(ctx, cs, mem, branch); err != nil {
