@@ -376,6 +376,9 @@ func TestARebuildIsWokenKnowingWhatRefusedTheLastAttempt(t *testing.T) {
 	if got.Prior.RetriedBy != "chris" || got.Prior.RetryNote != "rebuild: admit the list-item form" {
 		t.Fatalf("the operator's note must be held on its own attributed fields: %+v", *got.Prior)
 	}
+	if got.Prior.Attempt != 0 || got.Prior.Of != 0 {
+		t.Fatalf("a reopen is a fresh claim with a fresh budget — it should wake cold, not mid-count: %+v", *got.Prior)
+	}
 	if len(got.Prior.Verdicts) != 2 {
 		t.Fatalf("want one entry per refused attempt (a same-sha recheck should dedupe), got %+v", got.Prior.Verdicts)
 	}

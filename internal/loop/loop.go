@@ -654,8 +654,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 				history = append(history, fmt.Sprintf("attempt %d was refused: %s", attempt, reason))
 				prior := &agent.Prior{
 					Run: item.ID, Repo: l.Repo.Name, Sha: string(head),
-					Checks: failing(verdicts),
-					Reason: fmt.Sprintf("attempt %d of %d; %s", next, budget, strings.Join(history, "; ")),
+					Checks:  failing(verdicts),
+					Reason:  fmt.Sprintf("attempt %d of %d; %s", next, budget, strings.Join(history, "; ")),
+					Attempt: next,
+					Of:      budget,
 				}
 				l.record(ctx, item, "attempt", string(head),
 					fmt.Sprintf(`{"attempt":%d,"of":%d,"reason":%q}`, next, budget, reason))

@@ -143,6 +143,67 @@ func TestRefusalUnderBudgetRebuildsInClaim(t *testing.T) {
 	}
 }
 
+// TestRefusalUnderBudgetPriorCarriesAttemptAndOf is issue #82's loop-side
+// half: the builder cannot compute where in the budget a retry sits — the
+// effective budget is loop-side knowledge — so the Prior a refusal persists
+// must carry it plainly. Covers both a plan-knob budget (item.Attempts) and
+// the box-level default, since [Loop.attemptBudget] resolves either.
+func TestRefusalUnderBudgetPriorCarriesAttemptAndOf(t *testing.T) {
+	cases := []struct {
+		name         string
+		itemAttempts int
+		loopAttempts int
+		wantOf       int
+	}{
+		{name: "plan-knob budget", itemAttempts: 3, loopAttempts: 0, wantOf: 3},
+		{name: "default budget", itemAttempts: 0, loopAttempts: 0, wantOf: DefaultAttempts},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := setup(t, []string{"true"})
+			ctx := context.Background()
+			e.loop.Attempts = tc.loopAttempts
+			e.loop.Meter = &capacity.Meter{Store: e.store, Tenant: tn, Actor: "runner-1"}
+			calls := 0
+			builder := &priorAwareBuilder{q: &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}, tenant: tn}
+			e.loop.Builder = builder
+			e.loop.Gates = func(forge.Workspace) []forge.Gate {
+				return []forge.Gate{failNTimesGate{name: "build-and-test", n: &calls, failFor: 1}}
+			}
+
+			ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-82-" + tc.name})
+			if err != nil {
+				t.Fatal(err)
+			}
+			q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+			item := ItemFor(ing, "wi-82-"+tc.name, "add a thing")
+			item.Attempts = tc.itemAttempts
+			item, _ = q.Submit(ctx, item)
+
+			item, err = e.loop.Run(ctx, item)
+			if err != nil {
+				t.Fatalf("loop: %v", err)
+			}
+			if item.State != queue.StateDone {
+				t.Fatalf("a refusal under budget should rebuild and land, got %s (%s)", item.State, item.Note)
+			}
+			if len(builder.priors) != 2 {
+				t.Fatalf("want two builds, got %d", len(builder.priors))
+			}
+			p := builder.priors[1]
+			if p == nil {
+				t.Fatal("the second build should have loaded the prior the first attempt's refusal left")
+			}
+			if p.Attempt != 2 {
+				t.Fatalf("p.Attempt = %d, want 2 — the build this Prior wakes", p.Attempt)
+			}
+			if p.Of != tc.wantOf {
+				t.Fatalf("p.Of = %d, want %d — the budget the retry sits within", p.Of, tc.wantOf)
+			}
+		})
+	}
+}
+
 // TestLastRefusalParksKeepingTheCommit: a refusal is never a pass by
 // exhaustion. The last attempt's commit is kept as a resume point exactly
 // like any gate-refusal park's is, and the note names the count.
