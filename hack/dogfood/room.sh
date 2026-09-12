@@ -4,4 +4,4 @@
 # trust model, and anything past loopback is boxgate's job.
 set -eu
 cd "$(dirname "$0")/../.."
-exec ./bin/box -tenant davenport room -socket .factory/boxd.sock -port 8477
+exec ./bin/box -tenant davenport room -socket ../project-box-state/boxd.sock -port 8477

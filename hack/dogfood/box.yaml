@@ -11,10 +11,14 @@
 # #62) being in. TestDogfoodBoxIsNarrow refuses main without both.
 #
 # Every path here is relative to the REPOSITORY ROOT, which is where
-# hack/dogfood/run.sh puts you. The state they name lives in .factory/,
-# which .gitignore excludes: the harness is versioned, the store, mirrors,
-# workspaces, and socket are not. That split is the only difference between
-# this file and the one that ran rounds 1 through 3 from .factory/box.yaml.
+# hack/dogfood/run.sh puts you. The state they name used to live in
+# .factory/, inside the checkout — but a workspace under the checkout
+# advertises the checkout: its absolute path carries the operator's tree as
+# a prefix, and round 10's builder inferred that tree from its own cwd and
+# wrote to it (issue #73). So the store, mirrors, workspaces, and socket
+# live beside the repository instead, in ../project-box-state/. Gitignore
+# is no longer the mechanism keeping state out of the history — there is
+# simply nothing under the checkout to ignore.
 #
 # The tenant is the outermost scope of every key and every evidence chain.
 # Changing it does not rename anything — it starts an empty scope beside the
@@ -23,9 +27,9 @@
 # refused for the same reason.
 tenant: davenport
 runner: boxd
-db: .factory/box.db
-root: .factory/forge
-listen: unix:.factory/boxd.sock
+db: ../project-box-state/box.db
+root: ../project-box-state/forge
+listen: unix:../project-box-state/boxd.sock
 every: 15s
 drain: 60s
 build_timeout: 30m

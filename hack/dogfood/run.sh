@@ -2,8 +2,9 @@
 # Start the factory, pointed at this repository (issue #7).
 #
 # From nothing: builds the binaries, makes the state directory, and runs the
-# daemon on its socket. Everything it writes lands in .factory/, which is
-# gitignored — the harness is versioned, its state is not.
+# daemon on its socket. Everything it writes lands in ../project-box-state/,
+# beside this checkout rather than inside it — a workspace under the
+# checkout advertises the checkout (issue #73).
 #
 # Two environment facts this needs, both of them findings rather than taste:
 #
@@ -20,7 +21,17 @@
 set -eu
 cd "$(dirname "$0")/../.."
 
-mkdir -p .factory
+# One-time migration (issue #73): the state used to live in .factory/,
+# inside the checkout. The db is the daemon's identity and the evidence
+# chain it writes is append-only, so starting fresh at the new location
+# would orphan every chain written since round 1 — move it instead of
+# leaving it behind. Guarded both ways: a tree that has already migrated,
+# or one that never ran under the old layout, does nothing here.
+if [ -d .factory ] && [ ! -e ../project-box-state ]; then
+  mv .factory ../project-box-state
+fi
+
+mkdir -p ../project-box-state
 go generate ./web
 go build -o bin/boxd ./cmd/boxd
 go build -o bin/box ./cmd/box
@@ -30,9 +41,9 @@ go build -o bin/box ./cmd/box
 # the socket from the first and leave it running but unreachable. The store's
 # leases and fencing would keep the WORK correct; the control room would just
 # stop answering. Cheaper to refuse.
-if [ -S .factory/boxd.sock ] &&
-   ./bin/box -tenant davenport -daemon unix:.factory/boxd.sock status >/dev/null 2>&1; then
-  echo "a daemon is already answering on .factory/boxd.sock — refusing to take its socket" >&2
+if [ -S ../project-box-state/boxd.sock ] &&
+   ./bin/box -tenant davenport -daemon unix:../project-box-state/boxd.sock status >/dev/null 2>&1; then
+  echo "a daemon is already answering on ../project-box-state/boxd.sock — refusing to take its socket" >&2
   exit 1
 fi
 

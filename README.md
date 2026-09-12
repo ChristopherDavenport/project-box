@@ -265,8 +265,9 @@ BOX_ACP_LIVE=/path/to/claude-agent-acp go test -run TestLive ./internal/agent/ac
 `max_concurrent: 1`, the gated lane, landing on `refs/heads/factory` and
 never on main. It spends real sessions and needs `gh` authenticated — the
 forge reaches a private HTTPS remote only through the credential channel
-`run.sh` sets up, which the script explains. State lands in `.factory/`,
-which is gitignored; the harness is not.
+`run.sh` sets up, which the script explains. State lands in
+`../project-box-state/`, beside the checkout rather than inside it — a
+workspace under the checkout would advertise the checkout (issue #73).
 
 ## Web control room
 

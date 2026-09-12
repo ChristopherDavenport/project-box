@@ -16,7 +16,22 @@ set -u
 cd "$(dirname "$0")/../.."
 reason=${1:?a reason for the restart, e.g. "roles fix deployed"}
 export PATH=$HOME/coding/ai/buzz-zero-scaling/node_modules/.bin:$PATH
-sock=.factory/boxd.sock
+
+# One-time migration (issue #73), guarded the same way as run.sh's and run
+# here too: this script writes into ../project-box-state below (the log
+# mv's, then run.sh's own redirect) before run.sh gets a chance to migrate,
+# so on the transition restart run.sh's copy of this guard fires too late —
+# the redirect into a directory that does not exist yet kills run.sh before
+# its first line runs. `mv` within one filesystem only relinks the
+# directory entry, so a still-running old daemon's socket file keeps
+# answering at its new path afterward — the sock= line below and the
+# API/pid checks that follow it stay correct against the OLD daemon even
+# though .factory is already gone by the time they run.
+if [ -d .factory ] && [ ! -e ../project-box-state ]; then
+  mv .factory ../project-box-state
+fi
+
+sock=../project-box-state/boxd.sock
 log() { echo "$(date +%H:%M:%S) $*"; }
 api() { path=$1; shift; curl -s --unix-socket "$sock" "http://box/v1/$path" -H 'content-type: application/json' "$@"; }
 running() { api status | python3 -c 'import json,sys; print(json.load(sys.stdin)["spend"]["running"])' 2>/dev/null || echo "?"; }
@@ -38,14 +53,14 @@ fi
 room=$(lsof -t -iTCP:8477 -sTCP:LISTEN 2>/dev/null || true)
 [ -n "$room" ] && { kill $room; log "room pid=$room stopped"; }
 
-mv -f .factory/boxd.log .factory/boxd.prev.log 2>/dev/null || true
-mv -f .factory/room.log .factory/room.prev.log 2>/dev/null || true
-setsid nohup ./hack/dogfood/run.sh > .factory/boxd.log 2>&1 < /dev/null &
+mv -f ../project-box-state/boxd.log ../project-box-state/boxd.prev.log 2>/dev/null || true
+mv -f ../project-box-state/room.log ../project-box-state/room.prev.log 2>/dev/null || true
+setsid nohup ./hack/dogfood/run.sh > ../project-box-state/boxd.log 2>&1 < /dev/null &
 log "run.sh started: generate, build, run"
 i=0; until [ -S "$sock" ] && ./bin/box -tenant davenport -daemon "unix:$sock" status >/dev/null 2>&1; do
-  sleep 1; i=$((i+1)); [ $i -ge 180 ] && { log "boxd did not come up in 180s; see .factory/boxd.log"; exit 1; }
+  sleep 1; i=$((i+1)); [ $i -ge 180 ] && { log "boxd did not come up in 180s; see ../project-box-state/boxd.log"; exit 1; }
 done
-setsid nohup ./hack/dogfood/room.sh > .factory/room.log 2>&1 < /dev/null &
+setsid nohup ./hack/dogfood/room.sh > ../project-box-state/room.log 2>&1 < /dev/null &
 i=0; until curl -s -o /dev/null http://127.0.0.1:8477/; do sleep 1; i=$((i+1)); [ $i -ge 30 ] && break; done
 api resume -X POST -d "{\"reason\":\"restart: $reason — claims back on\"}" >/dev/null
 log "up: $(./bin/box -tenant davenport -daemon "unix:$sock" status | head -1)"

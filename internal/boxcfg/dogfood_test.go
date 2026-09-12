@@ -146,6 +146,32 @@ boxes:
 	}
 }
 
+// TestDogfoodStateIsBesideNotInsideTheRepository: issue #73. A workspace
+// path under the checkout advertises the checkout — its absolute path
+// carries the operator's tree as a prefix, and round 10's builder inferred
+// that tree from its own cwd and wrote to it. So the committed config's
+// Root, DB, and listen socket must all resolve outside the repository
+// (a leading ../, since every path here is relative to the repository
+// root) rather than merely somewhere .gitignore happens to exclude.
+func TestDogfoodStateIsBesideNotInsideTheRepository(t *testing.T) {
+	c, err := Load(dogfoodConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sock := strings.TrimPrefix(c.Listen, "unix:")
+	for _, p := range []struct {
+		name, path string
+	}{
+		{"root", c.Root},
+		{"db", c.DB},
+		{"listen", sock},
+	} {
+		if filepath.IsLocal(p.path) {
+			t.Errorf("%s = %q resolves under the repository — a builder's cwd must not carry the operator's checkout as a prefix (issue #73)", p.name, p.path)
+		}
+	}
+}
+
 // TestDogfoodMeasuresWhatItSpends: round 1's finding, held. A run that will
 // not say what it cost must stop the factory, so the dogfood carries a real
 // token ceiling and never buys its way past silence with allow_unmetered.

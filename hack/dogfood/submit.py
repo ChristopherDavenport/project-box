@@ -5,8 +5,8 @@ One ingress per issue, keyed `issue-<n>` so re-running this is idempotent —
 intake turns an ingress into a work item exactly once, and a second submit
 of the same key reports opened=false rather than queueing a duplicate.
 
-Issues are read from .factory/issues.json, fetched with `gh` when that file
-is absent. Pass issue numbers to submit only those.
+Issues are read from ../project-box-state/issues.json, fetched with `gh`
+when that file is absent. Pass issue numbers to submit only those.
 
 CONTRACT below is the instruction every agent run in this repository has
 executed under since round 1. It rides the task text rather than the agent's
@@ -21,7 +21,10 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
-STATE = ROOT / ".factory"
+# Beside the repository, not inside it (issue #73): a path under the
+# checkout carries the operator's tree as a prefix, and a builder can infer
+# and write to that tree from its own cwd.
+STATE = ROOT.parent / "project-box-state"
 BOX = ROOT / "bin" / "box"
 SOCKET = "unix:" + str(STATE / "boxd.sock")
 REPO = "ChristopherDavenport/project-box"
