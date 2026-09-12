@@ -196,6 +196,7 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
 			Credential: res.Usage.Credential(), Env: res.EnvNames,
+			Session: res.Session.ID, Role: "planner",
 		})
 	}
 	if p.Spend != nil && res.Prompted {

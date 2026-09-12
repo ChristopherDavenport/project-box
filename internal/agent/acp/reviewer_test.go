@@ -186,6 +186,13 @@ func TestTheGateReadsAChangeAndPasses(t *testing.T) {
 	if !sawModel {
 		t.Errorf("the model that judged is not on the record:\n%s", kinds["agent-session"])
 	}
+	// The session record names its own role and carries the session id — a
+	// continuation looking for the newest BUILDER session must be able to
+	// tell a reviewer's record apart from one on the same workitem/<id>
+	// scope, even though both ride the same sessionRecord shape.
+	if !strings.Contains(kinds["agent-session"], `"session":"sess-1"`) || !strings.Contains(kinds["agent-session"], `"role":"reviewer"`) {
+		t.Errorf("the session record does not carry its id and role:\n%s", kinds["agent-session"])
+	}
 	// The reviewer was shown the origination, its section and its purpose.
 	for _, want := range []string{"add the widget package under api/", "the HTTP surface", "plan-abc"} {
 		if !strings.Contains(kinds["agent-prompt"], want) {

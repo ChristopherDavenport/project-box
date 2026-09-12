@@ -94,6 +94,14 @@ var knownUpdates = []string{
 // record exists to end, and refusing a prompt is cheaper than billing one.
 var ErrSessionConfig = errors.New("acp: session configuration refused")
 
+// ErrResume reports that continuing a prior session did not happen: the
+// agent does not advertise the loadSession capability, session/load itself
+// errored, or the mode/configuration this run asks for was refused on the
+// loaded session. All three wrap this one sentinel so a caller does not have
+// to distinguish them to do the one thing any of them calls for — fall back
+// to a cold session rather than fail the build outright.
+var ErrResume = errors.New("acp: session resume failed")
+
 // UpdateKind names what the stream said an agent did. The set is closed and
 // small on purpose: a live view is a timeline, not a log dump, and every kind
 // here is something an operator can act on.
@@ -247,6 +255,11 @@ type Session struct {
 	// Commands are the names the agent listed on available_commands_update,
 	// in the order given. Plugin skills arrive as plugin:skill.
 	Commands []string
+	// ID is the ACP session id: session/new's sessionId, or, on a resume,
+	// the id [Runtime.Resume] asked to continue. It identifies a
+	// transcript, never a credential — an agent-session record carries it
+	// so a later run can find and continue this one.
+	ID string
 }
 
 // ModeState is the protocol's session mode state: the mode in force and the
@@ -424,6 +437,15 @@ type Runtime struct {
 	// Either way the plugin set is RECORDED, because the resolver reads the
 	// same files the harness will. Inheriting is not the same as not knowing.
 	InheritSettings bool
+	// Resume, when set, is a prior run's ACP session id to CONTINUE rather
+	// than open cold: Run calls session/load instead of session/new. Refused
+	// before spending anything when the agent does not advertise the
+	// loadSession capability, and every other resume failure — session/load
+	// itself, or the set_mode/configure assertions that follow it exactly as
+	// they follow a fresh session — wraps [ErrResume], so a caller can fall
+	// back to a cold run instead of failing the build. Empty is the default
+	// and behaves exactly as before this field existed.
+	Resume string
 }
 
 // Result is what a completed run reports.
@@ -847,7 +869,10 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 	go conn.serve()
 
 	var initRes struct {
-		ProtocolVersion int `json:"protocolVersion"`
+		ProtocolVersion   int `json:"protocolVersion"`
+		AgentCapabilities struct {
+			LoadSession bool `json:"loadSession"`
+		} `json:"agentCapabilities"`
 	}
 	if err := conn.call(ctx, "initialize", map[string]any{
 		"protocolVersion": protocolVersion,
@@ -864,21 +889,44 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		return Result{}, fmt.Errorf("%w: offered %d, agent answered %d",
 			ErrProtocolDialect, protocolVersion, initRes.ProtocolVersion)
 	}
+	if rt.Resume != "" && !initRes.AgentCapabilities.LoadSession {
+		// Refused before spending anything: the same posture the dialect
+		// assertion above takes, and for the same reason — a capability we
+		// assume and the agent lacks is cheaper to catch here than as a
+		// session/load call that was never going to succeed.
+		return Result{}, fmt.Errorf("%w: agent does not advertise the loadSession capability", ErrResume)
+	}
 	var newRes struct {
 		SessionID     string             `json:"sessionId"`
 		Modes         *wireModes         `json:"modes"`
 		ConfigOptions []wireConfigOption `json:"configOptions"`
 	}
-	if err := conn.call(ctx, "session/new", map[string]any{
-		"cwd": rt.Dir, "mcpServers": []any{},
-		"_meta": map[string]any{"claudeCode": map[string]any{"options": rt.harnessOptions(b)}},
-	}, &newRes); err != nil {
-		return Result{}, fmt.Errorf("acp: session/new: %w", err)
+	if rt.Resume != "" {
+		if err := conn.call(ctx, "session/load", map[string]any{
+			"sessionId": rt.Resume, "cwd": rt.Dir, "mcpServers": []any{},
+			"_meta": map[string]any{"claudeCode": map[string]any{"options": rt.harnessOptions(b)}},
+		}, &newRes); err != nil {
+			return Result{}, fmt.Errorf("%w: session/load: %v", ErrResume, err)
+		}
+		// The protocol replays the conversation as session/update
+		// notifications rather than answering it inline, so the id is the
+		// one asked for, never one the load response carries.
+		newRes.SessionID = rt.Resume
+	} else {
+		if err := conn.call(ctx, "session/new", map[string]any{
+			"cwd": rt.Dir, "mcpServers": []any{},
+			"_meta": map[string]any{"claudeCode": map[string]any{"options": rt.harnessOptions(b)}},
+		}, &newRes); err != nil {
+			return Result{}, fmt.Errorf("acp: session/new: %w", err)
+		}
 	}
 	// What the agent says it is, before anything is asked of it. Under the
-	// lock because the agent may already be announcing its commands.
+	// lock because the agent may already be announcing its commands — on a
+	// resume, replaying the whole prior conversation before this call even
+	// returns.
 	mu.Lock()
 	res.Session.Opened = true
+	res.Session.ID = newRes.SessionID
 	if newRes.Modes != nil {
 		res.Session.Modes = newRes.Modes.state()
 	}
@@ -889,7 +937,15 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			"sessionId": newRes.SessionID, "modeId": mode,
 		}, nil); err != nil {
 			// Fail closed: running under the wrong permission mode is the
-			// harness-default trap this whole layer exists to prevent.
+			// harness-default trap this whole layer exists to prevent. On a
+			// resume this wraps ErrResume rather than failing the build
+			// outright — a continuation's bundle is asserted at the wire
+			// again exactly as a fresh session's is, and a continuation that
+			// fails this assertion falls back to a cold session rather than
+			// parking the build.
+			if rt.Resume != "" {
+				return Result{}, fmt.Errorf("%w: agent refused permission mode %q on the resumed session: %v", ErrResume, mode, err)
+			}
 			return Result{}, fmt.Errorf("acp: agent refused permission mode %q: %w", mode, err)
 		}
 		mu.Lock()
@@ -906,6 +962,9 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		mu.Lock()
 		refused := res
 		mu.Unlock()
+		if rt.Resume != "" {
+			return refused, fmt.Errorf("%w: %v", ErrResume, err)
+		}
 		return refused, err
 	}
 	var promptRes struct {

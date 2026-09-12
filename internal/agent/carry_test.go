@@ -188,6 +188,20 @@ func TestOperatorNoteRendersSeparatelyFromVerdicts(t *testing.T) {
 	}
 }
 
+// TestAttemptOfAloneIsStillEmpty: a number alone wakes nobody knowing
+// anything, so an otherwise-empty Prior with only Attempt/Of set must still
+// count as empty and render no layer — the in-claim retry budget is not
+// itself carried context.
+func TestAttemptOfAloneIsStillEmpty(t *testing.T) {
+	p := Prior{Attempt: 2, Of: 3}
+	if !p.Empty() {
+		t.Fatal("a prior with only Attempt/Of set reported non-empty")
+	}
+	if _, ok := p.Layer(); ok {
+		t.Fatal("a prior with only Attempt/Of set rendered a layer")
+	}
+}
+
 // TestVerdictsOrRetryAloneAreSomethingToCarry: neither field needs the other
 // present to be worth a layer.
 func TestVerdictsOrRetryAloneAreSomethingToCarry(t *testing.T) {

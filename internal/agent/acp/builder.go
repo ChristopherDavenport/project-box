@@ -207,44 +207,6 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		return "", err
 	}
 
-	// The agentref on the record BEFORE the agent runs: if the run is
-	// disowned mid-flight, the evidence still says exactly which agent was
-	// operating under which instructions.
-	//
-	// The envelope rides it in full rather than as a class name. "This run was
-	// permitted to see class X and ran against endpoint Y" is the question a
-	// vendor-management or data-handling review asks, and answering it from a
-	// class alone would mean re-resolving the bundle to learn where the data
-	// actually went.
-	//
-	// The LAYERS ride it for a reason of the same kind. The agentref is a
-	// digest: it proves which agent ran and cannot say what that agent was.
-	// "Which layers, in which order, on which seat" is the other half of what
-	// an agent knows, and it was reachable only by re-resolving the bundle —
-	// which needs the same material still on disk at the same commits, i.e.
-	// exactly the thing the record exists so nobody has to have.
-	envelope := "(none declared)"
-	if bundle.Envelope != nil {
-		envelope = bundle.Envelope.String()
-	}
-	layers := make([]layerRecord, 0, len(bundle.Layers))
-	for _, l := range bundle.Layers {
-		layers = append(layers, layerRecord{
-			Scope: string(l.Scope), Name: l.Name,
-			Source: string(l.Source.Kind), Digest: l.Source.Digest,
-		})
-	}
-	b.recordJSON(ctx, ws.Run, "agent-run", bundle.Ref, runRecord{
-		AgentRef: bundle.Ref, Role: string(role), Mode: bundle.Tools.PermissionMode,
-		Seat: b.seatName(), Envelope: envelope, Layers: layers,
-	})
-	// And the same fact to whoever is watching, at the same moment. The
-	// record answers afterwards; this is what puts the unit on a live view
-	// from its first instant rather than from its first tool call.
-	if b.Progress != nil {
-		b.Progress(ctx, ws.Run, Update{Kind: UpdateStarted, Text: bundle.Ref})
-	}
-
 	// A sibling of the workspace, never inside it: granted reading material
 	// must not become part of the change.
 	//
@@ -296,28 +258,108 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		}
 	}
 
-	// The prompt itself, verbatim, immediately before it is sent.
-	//
-	// The agentref proves WHICH prompt ran and detects tampering, but it is a
-	// sha256 and therefore one-way: it can settle a dispute and cannot answer
-	// a question. Nothing anywhere held the text, so the most consequential
-	// input in the system — the thing that decides what an agent does with
-	// twenty million tokens — was the one input nobody could read back.
-	//
+	// The prompt itself, verbatim, before it is sent to the cold path — the
+	// composed instructions, the task, the reference material, and the
+	// working contract. A continuation sends something far shorter (see
+	// [continuationPrompt]), because the session already holds this.
+	sent := prompt(bundle, task, granted)
+	rc := attemptCtx{Workspace: ws, Bundle: bundle, Role: role, Task: task,
+		ContextDir: contextDir, SkillsDir: skillsDir, Loaded: loaded}
+
+	// An in-claim retry that is not the last attempt under its budget tries
+	// to continue the session the previous attempt made, rather than paying
+	// for a cold one over the same refusal. loop.DefaultAttempts is 2, so
+	// under the default budget attempt 2 IS the last and goes cold below
+	// exactly as before this existed — continuation only fires once the
+	// budget is 3 or more (a per-plan attempts knob, or the box's own).
+	if hasItem && item.Prior != nil && item.Prior.Attempt > 1 && item.Prior.Attempt < item.Prior.Of {
+		if id, ok, err := b.priorBuilderSession(ctx, ws.Run); err != nil {
+			return "", fmt.Errorf("acp: finding the prior attempt's session: %w", err)
+		} else if ok {
+			head, err := b.runAttempt(ctx, rc, continuationPrompt(*item.Prior), id, id)
+			switch {
+			case err == nil:
+				return head, nil
+			case errors.Is(err, ErrResume):
+				// A failed continuation costs this note, never the attempt:
+				// the cold run below is recorded as its own ordinary one.
+				b.recordJSON(ctx, ws.Run, "agent-resume", bundle.Ref, agentResumeRecord{Session: id, Refused: err.Error()})
+			default:
+				return head, err
+			}
+		}
+		// No prior builder-role session on the chain: nothing to continue,
+		// so this falls through to the cold attempt below exactly as an item
+		// with no in-claim retry budget does.
+	}
+	return b.runAttempt(ctx, rc, sent, "", "")
+}
+
+// attemptCtx is the part of one Build call that is the same across every
+// attempt it makes: the bundle, the workspace, and the materialized context
+// and skills. sent, resume and continues — passed to [Builder.runAttempt]
+// directly — are what differ between a cold attempt and a continuation.
+type attemptCtx struct {
+	Workspace  forge.Workspace
+	Bundle     agent.Bundle
+	Role       agent.Role
+	Task       string
+	ContextDir string
+	SkillsDir  string
+	Loaded     string
+}
+
+// runAttempt sends one prompt to one agent process — cold, or continuing a
+// resumed session when resume is set — and writes THIS attempt's own
+// complete record: its own agentref, agent-run, agent-prompt, agent-session,
+// result, text, and cost. continues names the session this attempt
+// continues, so that fact is stated on the record rather than left to be
+// inferred from an agent-session carrying the same id twice.
+//
+// The agentref goes on the record BEFORE the agent runs: if the run is
+// disowned mid-flight, the evidence still says exactly which agent was
+// operating under which instructions. The envelope and the layers ride it in
+// full for the reason [Builder.Build]'s own doc used to give this block
+// before it moved here: a class name or a bare ref cannot answer what an
+// agent was actually given, and re-resolving the bundle to find out needs
+// the same material still on disk at the same commits — exactly the thing
+// the record exists so nobody has to have.
+func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, continues string) (forge.Commit, error) {
+	ws, bundle := rc.Workspace, rc.Bundle
+	envelope := "(none declared)"
+	if bundle.Envelope != nil {
+		envelope = bundle.Envelope.String()
+	}
+	layers := make([]layerRecord, 0, len(bundle.Layers))
+	for _, l := range bundle.Layers {
+		layers = append(layers, layerRecord{
+			Scope: string(l.Scope), Name: l.Name,
+			Source: string(l.Source.Kind), Digest: l.Source.Digest,
+		})
+	}
+	b.recordJSON(ctx, ws.Run, "agent-run", bundle.Ref, runRecord{
+		AgentRef: bundle.Ref, Role: string(rc.Role), Mode: bundle.Tools.PermissionMode,
+		Seat: b.seatName(), Envelope: envelope, Layers: layers, Continues: continues,
+	})
+	// And the same fact to whoever is watching, at the same moment. The
+	// record answers afterwards; this is what puts the unit on a live view
+	// from its first instant rather than from its first tool call.
+	if b.Progress != nil {
+		b.Progress(ctx, ws.Run, Update{Kind: UpdateStarted, Text: bundle.Ref})
+	}
+
 	// The bundle explanation rides along because the prompt alone does not
 	// say where it came from: Explain renders the layers, their digests, the
 	// tool policy and the context set, which is what makes the agentref
-	// checkable against content rather than merely comparable to itself. It
-	// has existed since Phase 2 and had no caller until now.
-	sent := prompt(bundle, task, granted)
+	// checkable against content rather than merely comparable to itself.
 	explained, _ := b.Composer.Explain(ctx, bundle)
 	b.recordJSON(ctx, ws.Run, "agent-prompt", bundle.Ref, promptRecord{
 		AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained),
 	})
 
-	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: contextDir, Env: b.Env, EnvNames: b.EnvNames,
+	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: rc.ContextDir, Env: b.Env, EnvNames: b.EnvNames,
 		MaxTokens: b.MaxTokens, Transcript: b.Transcript, Progress: b.progress(ctx, ws.Run),
-		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: b.InheritSettings}
+		SkillsDir: rc.SkillsDir, LoadedSkills: rc.Loaded, InheritSettings: b.InheritSettings, Resume: resume}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, sent)
 	elapsed := time.Since(started)
@@ -335,6 +377,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
 			Credential: res.Usage.Credential(), Env: res.EnvNames,
+			Session: res.Session.ID, Role: "builder",
 		})
 	}
 	// Cost is charged even when the run failed. A session that errored
@@ -396,7 +439,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		// rather than being bought a second time. No "changed nothing" check
 		// here: a session may legitimately spend its whole context reading and
 		// hand off with only an account of what it found.
-		left, cerr := b.commit(ctx, ws, task, wipTrailer)
+		left, cerr := b.commit(ctx, ws, rc.Task, wipTrailer)
 		if cerr != nil {
 			return "", cerr
 		}
@@ -408,7 +451,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	// commits what it left, and a run that changed nothing is an error —
 	// "done" with an untouched tree is the silent failure mode agents
 	// default to when confused, and it must never look like success.
-	head, err := b.commit(ctx, ws, task, doneTrailer)
+	head, err := b.commit(ctx, ws, rc.Task, doneTrailer)
 	if err != nil {
 		return "", err
 	}
@@ -416,6 +459,53 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		return "", fmt.Errorf("acp: agent finished without changing anything — no commit, no escalation (stop=%q, %d tool calls)", res.StopReason, len(res.ToolCalls))
 	}
 	return head, nil
+}
+
+// priorBuilderSession finds the newest builder-role agent-session record on
+// run's chain — the ACP session id the previous attempt made, to continue
+// rather than reopen. False when none exists: an item with no prior attempt,
+// or one built before this field existed, has nothing to continue and goes
+// cold exactly as it always has.
+//
+// Only fields needed are unmarshaled, mirroring [priorVerdicts] in
+// internal/queue: the record is [sessionRecord] in full, and reading a
+// subset of its keys is compatible with a body that carries more.
+func (b *Builder) priorBuilderSession(ctx context.Context, run string) (string, bool, error) {
+	var found string
+	for r, err := range b.Store.Log().Since(ctx, b.Tenant, "workitem/"+run, 0) {
+		if err != nil {
+			return "", false, err
+		}
+		if r.Kind != "agent-session" {
+			continue
+		}
+		var rec struct {
+			Session string `json:"session"`
+			Role    string `json:"role"`
+		}
+		if err := json.Unmarshal(r.Body, &rec); err != nil {
+			return "", false, fmt.Errorf("acp: agent-session record %s: %w", r.ID, err)
+		}
+		if rec.Role == "builder" && rec.Session != "" {
+			found = rec.Session
+		}
+	}
+	return found, found != "", nil
+}
+
+// continuationPrompt is what a continued session is sent instead of the
+// whole composed prompt: the session already holds that, so only the fact
+// that a gate refused the change and why needs to arrive again.
+func continuationPrompt(prior agent.Prior) string {
+	var w strings.Builder
+	w.WriteString("The review gate refused this change; here is why. Fix it and commit.\n\n")
+	for _, v := range prior.Verdicts {
+		fmt.Fprintf(&w, "## Attempt %d — the %s gate refused\n%s\n\n", v.Attempt, v.Gate, v.Reason)
+	}
+	if prior.Reason != "" {
+		fmt.Fprintf(&w, "## What the checks said\n%s\n\n", prior.Reason)
+	}
+	return w.String()
 }
 
 // commit is the adapter's half of the working contract — the agent commits,
@@ -653,6 +743,20 @@ type runRecord struct {
 	// order carries: a narrower layer's contribution only means anything
 	// against what it came after.
 	Layers []layerRecord `json:"layers,omitempty"`
+	// Continues is the prior run's ACP session id when this run continued
+	// it, empty for a cold run. Stated explicitly rather than left to be
+	// inferred from the agent-session record sharing an id with an earlier
+	// one — a shared id says what happened, not that this run knew it.
+	Continues string `json:"continues,omitempty"`
+}
+
+// agentResumeRecord narrates a continuation that did not happen: the session
+// a retry tried to continue, and why the attempt refused rather than ran. A
+// failed continuation costs this note, never the build — the cold attempt
+// that follows is recorded as its own ordinary run.
+type agentResumeRecord struct {
+	Session string `json:"session"`
+	Refused string `json:"refused"`
 }
 
 // layerRecord is one composed layer, named the way Explain names it.
@@ -702,6 +806,14 @@ type sessionRecord struct {
 	// evidence chain that carried them would be a credential store with
 	// extra steps.
 	Env []string `json:"env,omitempty"`
+	// Session is the ACP session id this run opened or resumed — see
+	// [Session.ID] — so a later attempt can find it and continue it.
+	Session string `json:"session,omitempty"`
+	// Role is which seat wrote this record: builder, planner, or reviewer.
+	// Load-bearing, not decorative — builder and reviewer records share the
+	// workitem/<id> scope, and a continuation that picked up the reviewer's
+	// session id would resume the wrong agent.
+	Role string `json:"role,omitempty"`
 }
 
 // recordJSON writes a narrative record whose body is a marshalled value —

@@ -76,10 +76,21 @@ type Prior struct {
 	// itself.
 	RetriedBy string `json:"retriedBy,omitempty"`
 	RetryNote string `json:"retryNote,omitempty"`
+	// Attempt is the number of the build this Prior wakes, and Of the
+	// claim's attempt budget it wakes under — an in-claim retry's own count,
+	// distinct from Verdicts' per-refusal attempt numbers, which span a
+	// unit's whole rebuilt life. Zero means this is not an in-claim retry: a
+	// fresh claim carries no budget to continue within. Set by the loop at
+	// its Retain site, never by [queue.Queue]'s reopen path — a fresh claim
+	// is a fresh budget and goes cold.
+	Attempt int `json:"attempt,omitempty"`
+	Of      int `json:"of,omitempty"`
 }
 
 // Empty reports whether there is nothing here worth carrying. A repo and a
-// branch alone say only where work happens, which the agent knows already.
+// branch alone say only where work happens, which the agent knows already;
+// Attempt and Of alone say only a number, which wakes nobody knowing
+// anything either.
 func (p Prior) Empty() bool {
 	return p.Run == "" && p.Sha == "" && p.Reason == "" && len(p.Checks) == 0 &&
 		len(p.Notes) == 0 && len(p.Verdicts) == 0 && p.RetryNote == ""

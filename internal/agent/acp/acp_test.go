@@ -414,6 +414,18 @@ func fakeAgent(scenario string) {
 	}
 	mode := ""
 	var sessionID string
+	// loadedID and loadedCwd are what the last session/load call carried, so
+	// a resume scenario's prompt handler can echo them back for the test to
+	// assert against — the same convention "session"'s prompt reply uses for
+	// model/effort/fast/mode.
+	var loadedID, loadedCwd string
+	// resumeScenarios advertise the loadSession capability at initialize:
+	// every scenario in this file that exercises session/load. A scenario
+	// absent from this set is what "the agent does not advertise resume" is
+	// tested against, without needing a scenario of its own.
+	resumeScenarios := map[string]bool{
+		"resume": true, "resume-load-fails": true, "resume-mode-refused": true,
+	}
 	// The session configuration the fake exposes, shaped like the real
 	// adapter's: a model option tagged with the protocol's model category
 	// (one plain value and one group, so flattening is exercised), an
@@ -448,7 +460,11 @@ func fakeAgent(scenario string) {
 			if scenario == "dialect" {
 				v = 2 // an agent from a protocol this runtime has not read
 			}
-			f.write(map[string]any{"id": id, "result": map[string]any{"protocolVersion": v}})
+			result := map[string]any{"protocolVersion": v}
+			if resumeScenarios[scenario] {
+				result["agentCapabilities"] = map[string]any{"loadSession": true}
+			}
+			f.write(map[string]any{"id": id, "result": result})
 		case "session/new":
 			sessionID = "sess-1"
 			if p, ok := m["params"].(map[string]any); ok {
@@ -471,7 +487,31 @@ func fakeAgent(scenario string) {
 						{"name": "box-skills:go", "description": "Idiomatic Go"},
 						{"name": "box-skills:sqlite", "description": "SQLite best practices"},
 					}}})
+		case "session/load":
+			p, _ := m["params"].(map[string]any)
+			loadedID, _ = p["sessionId"].(string)
+			loadedCwd, _ = p["cwd"].(string)
+			if scenario == "resume-load-fails" {
+				f.write(map[string]any{"id": id, "error": map[string]any{"code": -32000, "message": "no such session"}})
+				break
+			}
+			sessionID = loadedID
+			// The protocol replays the conversation as notifications rather
+			// than answering it inline — one turn of it, enough for the
+			// runtime's tolerance of a replay under this call to matter.
+			f.notify("session/update", map[string]any{"sessionId": sessionID,
+				"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+					"content": map[string]any{"type": "text", "text": "(replayed) the earlier turn\n"}}})
+			f.write(map[string]any{"id": id, "result": map[string]any{
+				"modes": map[string]any{"currentModeId": "default",
+					"availableModes": []map[string]any{{"id": "default", "name": "Default"}, {"id": "acceptEdits", "name": "Accept edits"}}},
+				"configOptions": configOptions(),
+			}})
 		case "session/set_mode":
+			if scenario == "resume-mode-refused" {
+				f.write(map[string]any{"id": id, "error": map[string]any{"code": -32001, "message": "mode refused on the resumed session"}})
+				break
+			}
 			if p, ok := m["params"].(map[string]any); ok {
 				mode, _ = p["modeId"].(string)
 			}
@@ -603,8 +643,12 @@ func fakeAgent(scenario string) {
 					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
 						"content": map[string]any{"type": "text", "text": "Finished what the last session started.\nHANDOFF: the widget is whole now\n"}}})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
-			case "worker":
-				// A real day's work: edit, commit, hand off.
+			case "worker", "resume-load-fails":
+				// A real day's work: edit, commit, hand off. "resume-load-fails"
+				// rides the same prompt handling because its own point is
+				// upstream of here — session/load refuses — and the cold
+				// attempt that follows a refused continuation is an ordinary
+				// build like this one.
 				os.WriteFile("widget.go", []byte("package app // built by the fake worker\n"), 0o644)
 				gitc("add", "-A")
 				gitc("commit", "-m", "add widget")
@@ -650,6 +694,21 @@ func fakeAgent(scenario string) {
 					"stopReason": "end_turn",
 					"usage":      map[string]any{"inputTokens": 10, "outputTokens": 5},
 				}})
+			case "resume":
+				// The continued session: it picks up mid-task rather than
+				// starting over, so its commit is distinct from a cold
+				// "worker" run's — and it echoes what session/load carried,
+				// so the test can assert the id and cwd it was actually
+				// sent.
+				os.WriteFile("resumed.go", []byte("package app // continued by the fake resumed session\n"), 0o644)
+				gitc("add", "-A")
+				gitc("commit", "-m", "continue after the gate's refusal")
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text",
+							"text": fmt.Sprintf("resumed:%s cwd:%s\nHANDOFF: continued from the refused attempt\n", loadedID, loadedCwd)}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn",
+					"usage": map[string]any{"inputTokens": 10, "outputTokens": 5}}})
 			case "session":
 				// Reports the session as it stands, so a test can assert that
 				// what was set is what is in force — and the protocol's

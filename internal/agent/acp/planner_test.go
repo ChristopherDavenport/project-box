@@ -98,6 +98,13 @@ func TestThePlannerAnswersInUnits(t *testing.T) {
 	if !strings.Contains(kinds["agent-prompt"], "## Sections of app") || !strings.Contains(kinds["agent-prompt"], "the HTTP surface") {
 		t.Errorf("the planner was not shown the sections:\n%s", kinds["agent-prompt"])
 	}
+	// The session record names its own role and carries the session id — a
+	// continuation looking for the newest BUILDER session must be able to
+	// tell a planner's record apart from one, even though both ride the same
+	// sessionRecord shape.
+	if !strings.Contains(kinds["agent-session"], `"session":"sess-1"`) || !strings.Contains(kinds["agent-session"], `"role":"planner"`) {
+		t.Errorf("the session record does not carry its id and role:\n%s", kinds["agent-session"])
+	}
 	// Continuity: what this plan learned wakes the next one.
 	wake, ok, err := st.WakeLayer(ctx, 5)
 	if err != nil || !ok || !strings.Contains(wake.Instructions, "widgets live under internal/api") {
