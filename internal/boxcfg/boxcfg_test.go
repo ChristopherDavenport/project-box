@@ -822,3 +822,49 @@ boxes:
 		t.Fatalf("repo = %+v, want land=pull_request land_token=gh lane=gated", r)
 	}
 }
+
+// TestUnsetRootIsBesideNotInsideTheWorkingDirectory: an unset root must not
+// resolve to a path under the daemon's cwd, or a builder can infer the
+// operator's checkout from its own working directory and write to it
+// (issue #73).
+func TestUnsetRootIsBesideNotInsideTheWorkingDirectory(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filepath.IsLocal(c.Root) {
+		t.Fatalf("root = %q resolves inside the working directory, want beside it", c.Root)
+	}
+}
+
+// TestUnsetDBAndListenFollowRoot: db and listen ride the same knob as root
+// when they too are unset, so the daemon's whole state footprint moves
+// together (issue #73).
+func TestUnsetDBAndListenFollowRoot(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(c.Root, "box.db"); c.DB != want {
+		t.Fatalf("db = %q, want %q", c.DB, want)
+	}
+	if want := "unix:" + filepath.Join(c.Root, "boxd.sock"); c.Listen != want {
+		t.Fatalf("listen = %q, want %q", c.Listen, want)
+	}
+}

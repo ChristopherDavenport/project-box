@@ -31,11 +31,21 @@ import (
 type Config struct {
 	Tenant string `yaml:"tenant"`
 	Runner string `yaml:"runner"`
-	DB     string `yaml:"db"`
-	Root   string `yaml:"root"`
+	// DB is the daemon's SQLite store. Unset defaults under Root, so the
+	// daemon's whole state footprint follows one knob.
+	DB string `yaml:"db"`
+	// Root is the daemon's workspace root — mirrors, worktrees, plans, and
+	// reviews all live under it. Unset resolves to a directory beside the
+	// daemon's working directory, never inside it: a workspace path must
+	// not carry the tree the daemon was started in as a prefix, or a
+	// builder can infer the operator's checkout from its own cwd and write
+	// to it (issue #73).
+	Root string `yaml:"root"`
 	// Listen is the daemon's unix socket. The daemon is socket-only by
 	// design: network exposure, tokens, TLS, and OIDC are layers in front
-	// (boxgate), never the daemon's own concern.
+	// (boxgate), never the daemon's own concern. Unset defaults under Root,
+	// for the same reason Root itself defaults beside the working
+	// directory rather than inside it (issue #73).
 	Listen string `yaml:"listen"`
 	Every  string `yaml:"every"`
 	// Drain bounds the graceful-shutdown wait for in-flight runs; empty
@@ -718,14 +728,14 @@ func (c *Config) validate() error {
 	if c.Runner == "" {
 		c.Runner = "boxd"
 	}
-	if c.DB == "" {
-		c.DB = "box.db"
-	}
 	if c.Root == "" {
-		c.Root = "forge"
+		c.Root = filepath.Join("..", "box-state")
+	}
+	if c.DB == "" {
+		c.DB = filepath.Join(c.Root, "box.db")
 	}
 	if c.Listen == "" {
-		c.Listen = "unix:boxd.sock"
+		c.Listen = "unix:" + filepath.Join(c.Root, "boxd.sock")
 	}
 	if !strings.HasPrefix(c.Listen, "unix:") {
 		return fmt.Errorf("boxcfg: listen %q — the daemon is socket-only; front it with boxgate for the network", c.Listen)

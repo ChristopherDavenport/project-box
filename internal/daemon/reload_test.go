@@ -153,6 +153,11 @@ func TestReloadRefusesIdentityChangesAndBadConfigs(t *testing.T) {
 	if _, err := d.Reload(ctx, "chris"); err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("tenant change should refuse: %v", err)
 	}
+	// Identity change: a different root, tenant restored, in the same file.
+	writeCfg(t, cfgPath, db, filepath.Join(dir, "forge2"), map[string]string{"api": apiRem})
+	if _, err := d.Reload(ctx, "chris"); err == nil || !strings.Contains(err.Error(), "root") {
+		t.Fatalf("root change should refuse: %v", err)
+	}
 	// Broken YAML.
 	os.WriteFile(cfgPath, []byte("boxes: ["), 0o644)
 	if _, err := d.Reload(ctx, "chris"); err == nil {
