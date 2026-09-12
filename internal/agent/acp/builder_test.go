@@ -615,6 +615,26 @@ func TestTheSectionReachesThePromptAndTheRef(t *testing.T) {
 	}
 }
 
+// TestThePromptNamesTheWorkspace: issue #73. A builder inferred the
+// operator's checkout from its own cwd because nothing ever told it where it
+// actually was; the prompt now says so, in the words that back the runtime's
+// own path judgement of file-shaped tool calls.
+func TestThePromptNamesTheWorkspace(t *testing.T) {
+	got := prompt(agent.Bundle{}, "the task", "", "/work/tree-1")
+	for _, want := range []string{"/work/tree-1", "repository root", "refused"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt missing %q:\n%s", want, got)
+		}
+	}
+	// A Build with no workspace path (a probe, an experiment) gets no
+	// section naming one, the same way an empty contextDir gets no
+	// "Reference material" section.
+	got = prompt(agent.Bundle{}, "the task", "", "")
+	if strings.Contains(got, "## Where you are") {
+		t.Errorf("an empty workspace path still produced a section naming one:\n%s", got)
+	}
+}
+
 // TestAnItemNamingAnUndeclaredSectionIsRefused: running it unscoped would be
 // the silent widening a section exists to prevent.
 func TestAnItemNamingAnUndeclaredSectionIsRefused(t *testing.T) {

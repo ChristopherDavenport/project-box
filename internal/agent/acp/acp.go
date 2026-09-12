@@ -21,6 +21,7 @@ import (
 	"maps"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -679,14 +680,22 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 				return nil, err
 			}
 			ok, reason := b.Tools.Permits(p.ToolCall.Title)
+			label := p.ToolCall.Title
+			if ok {
+				// The name check passed; a file-shaped ask still answers to
+				// where, not just what — see [Runtime.judgePath].
+				if pathOK, why := rt.judgePath(p.ToolCall); !pathOK {
+					ok, reason, label = false, why, why
+				}
+			}
 			telemetry.ToolCall(ctx, p.ToolCall.Title, ok)
 			mu.Lock()
 			if !ok {
-				res.Denied = append(res.Denied, p.ToolCall.Title)
+				res.Denied = append(res.Denied, label)
 				// Only the refusal, so that the live account and Result agree
 				// exactly: a permitted ask announces itself as a tool_call too,
 				// and emitting here as well would count it twice.
-				emit(Update{Kind: UpdateDenied, Tool: p.ToolCall.Title})
+				emit(Update{Kind: UpdateDenied, Tool: label})
 			}
 			mu.Unlock()
 			return permissionResponse(p, ok, reason), nil
@@ -1197,9 +1206,54 @@ func (r *Result) noteUnknown(kind string) {
 }
 
 type toolCall struct {
-	ToolCallID string `json:"toolCallId"`
-	Title      string `json:"title"`
-	Kind       string `json:"kind"`
+	ToolCallID string          `json:"toolCallId"`
+	Title      string          `json:"title"`
+	Kind       string          `json:"kind"`
+	RawInput   json.RawMessage `json:"rawInput"`
+	Locations  []struct {
+		Path string `json:"path"`
+	} `json:"locations"`
+	// Meta carries the harness's own account of the call, the same shape
+	// [sessionUpdate.tool] reads it from — see [wireMeta.ClaudeCode]'s doc
+	// comment for why toolName is the identifier and Title is prose that
+	// cannot be matched or judged.
+	Meta *wireMeta `json:"_meta,omitempty"`
+}
+
+// name is this call's stable identifier the same way [sessionUpdate.tool]
+// prefers it: the harness's toolName when the dialect supplies one, the
+// human title otherwise.
+func (t toolCall) name() string {
+	if t.Meta != nil && t.Meta.ClaudeCode != nil && t.Meta.ClaudeCode.ToolName != "" {
+		return t.Meta.ClaudeCode.ToolName
+	}
+	return t.Title
+}
+
+// paths is every path this call's rawInput or locations name, in the fields
+// the pinned dialect actually uses: file_path (Read/Edit/Write/MultiEdit),
+// path (Glob/Grep), notebook_path (NotebookEdit), and locations[].path.
+func (t toolCall) paths() []string {
+	var in struct {
+		FilePath     string `json:"file_path"`
+		Path         string `json:"path"`
+		NotebookPath string `json:"notebook_path"`
+	}
+	if len(t.RawInput) > 0 {
+		json.Unmarshal(t.RawInput, &in)
+	}
+	var out []string
+	for _, p := range []string{in.FilePath, in.Path, in.NotebookPath} {
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	for _, l := range t.Locations {
+		if l.Path != "" {
+			out = append(out, l.Path)
+		}
+	}
+	return out
 }
 
 type permissionRequest struct {
@@ -1210,6 +1264,82 @@ type permissionRequest struct {
 		Name     string `json:"name"`
 		Kind     string `json:"kind"`
 	} `json:"options"`
+}
+
+// pathJudgedTools are the tool names whose rawInput is judged by path, on top
+// of whatever [agent.ToolPolicy.Permits] already decided by name. Bash is
+// deliberately absent: its rawInput carries a shell command line, not a
+// path, and pretending a command can be judged by path would be a boundary
+// that looks enforced and is not — the container is Bash's boundary, per
+// ARCHITECTURE's ingress section, and this check is defense inside it.
+var pathJudgedTools = map[string]bool{
+	"Read": true, "Edit": true, "Write": true, "MultiEdit": true,
+	"NotebookEdit": true, "Glob": true, "Grep": true,
+}
+
+// judgePath answers a file-shaped permission ask by where it reads or
+// writes, not just what it is named — the gap issue #73 found: a builder
+// whose workspace sits inside the operator's own checkout read and wrote it
+// by absolute path, and nothing judged that because tool policy only ever
+// matched names.
+//
+// The boundary is three subtrees, not one: rt.Dir (the workspace),
+// rt.ContextDir (the materialized context set), and rt.SkillsDir (the
+// generated skills plugin) — the latter two are SIBLINGS of the workspace,
+// not under it, so each is checked on its own.
+//
+// A tool outside [pathJudgedTools] is left to the name check alone — Bash
+// among them, see that var's comment. A judged tool with no path anywhere
+// parseable is refused rather than waved through, except Glob/Grep, whose
+// path is optional and defaults to the cwd. rt.Dir empty means a bare
+// Runtime (tests) with no boundary to assert, so judging is skipped.
+func (rt *Runtime) judgePath(tc toolCall) (bool, string) {
+	name := tc.name()
+	if !pathJudgedTools[name] || rt.Dir == "" {
+		return true, ""
+	}
+	paths := tc.paths()
+	if len(paths) == 0 {
+		if name == "Glob" || name == "Grep" {
+			return true, ""
+		}
+		return false, fmt.Sprintf("%s: no path to judge", name)
+	}
+	for _, p := range paths {
+		if !rt.pathInBounds(p) {
+			return false, fmt.Sprintf("%s %s", name, p)
+		}
+	}
+	return true, ""
+}
+
+// pathInBounds resolves p against the workspace when it is relative, then
+// asks whether it falls under rt.Dir, rt.ContextDir, or rt.SkillsDir — a
+// separator-aware prefix check, so "/a/b-evil" is never mistaken for a path
+// under "/a/b".
+func (rt *Runtime) pathInBounds(p string) bool {
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(rt.Dir, p)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	abs = filepath.Clean(abs)
+	for _, root := range []string{rt.Dir, rt.ContextDir, rt.SkillsDir} {
+		if root == "" {
+			continue
+		}
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			continue
+		}
+		rootAbs = filepath.Clean(rootAbs)
+		if abs == rootAbs || strings.HasPrefix(abs, rootAbs+string(filepath.Separator)) {
+			return true
+		}
+	}
+	return false
 }
 
 // permissionResponse picks the agent's own allow/reject option matching the

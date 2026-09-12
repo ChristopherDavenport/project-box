@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -75,6 +76,55 @@ func TestDeniedToolIsDeniedAtTheStream(t *testing.T) {
 		if !contains(res.Text, want) {
 			t.Fatalf("agent's view missing %q in %q", want, res.Text)
 		}
+	}
+}
+
+// TestPermissionIsJudgedByPathNotJustName: issue #73. A builder whose
+// workspace sits inside the operator's own checkout read and wrote it by
+// absolute path, and nothing refused it — the runtime's tool policy judges
+// names at the stream and never paths. A file-shaped ask is now judged
+// against the workspace, the materialized context set, and the skills
+// directory (the three subtrees a confining wrapper is told to let through),
+// refused when its path falls outside all three or carries none at all, and
+// Bash is left to the name check alone since a command line is not a path.
+func TestPermissionIsJudgedByPathNotJustName(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	rt := runtimeFor(t, "pathy")
+	rt.ContextDir = t.TempDir()
+	outside := t.TempDir()
+	rt.Env = append(rt.Env, "ACP_FAKE_OUTSIDE="+outside, "ACP_FAKE_CONTEXT="+rt.ContextDir)
+	res, err := rt.Run(ctx, bundle(), "do the work")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if res.StopReason != "end_turn" {
+		t.Fatalf("stop reason: %q", res.StopReason)
+	}
+	for _, want := range []string{
+		"read-inside:allowed",
+		"read-outside:denied",
+		"read-context:allowed",
+		"read-nopath:denied",
+		"bash-outside:allowed",
+	} {
+		if !contains(res.Text, want) {
+			t.Errorf("agent's view missing %q in %q", want, res.Text)
+		}
+	}
+	// The refused-by-path denial names both the tool and the path, so the
+	// record reads "Read /home/..." rather than just "Read".
+	found := false
+	for _, d := range res.Denied {
+		if strings.Contains(d, "Read") && strings.Contains(d, outside) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("res.Denied does not carry the tool and the refused path: %+v", res.Denied)
+	}
+	if slices.Contains(res.Denied, "Read") {
+		t.Error("the in-bounds and context reads were denied")
 	}
 }
 
@@ -581,6 +631,46 @@ func fakeAgent(scenario string) {
 					}
 					report += fmt.Sprintf(" %s:%s", lower(tool), verdict)
 				}
+				f.notify("session/update", map[string]any{
+					"sessionId": sessionID,
+					"update":    map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": report}},
+				})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "pathy":
+				// Issue #73: a permission ask judged by name alone never
+				// catches a builder that reads or writes outside its own
+				// workspace — nothing judges WHERE. This scenario asks for a
+				// Read at five different paths and one Bash, the way the real
+				// dialect carries rawInput and _meta.claudeCode.toolName on a
+				// permission ask.
+				cwd, _ := os.Getwd()
+				outside := os.Getenv("ACP_FAKE_OUTSIDE")
+				ctxDir := os.Getenv("ACP_FAKE_CONTEXT")
+				ask := func(callID, tool string, rawInput map[string]any) string {
+					resp := f.request("session/request_permission", map[string]any{
+						"sessionId": sessionID,
+						"toolCall": map[string]any{
+							"toolCallId": callID, "title": tool, "kind": "read",
+							"rawInput": rawInput,
+							"_meta":    map[string]any{"claudeCode": map[string]any{"toolName": tool}},
+						},
+						"options": []map[string]any{
+							{"optionId": "yes", "name": "Allow", "kind": "allow_once"},
+							{"optionId": "no", "name": "Reject", "kind": "reject_once"},
+						},
+					})
+					if res, ok := resp["result"].(map[string]any); ok {
+						if oc, ok := res["outcome"].(map[string]any); ok && oc["optionId"] == "yes" {
+							return "allowed"
+						}
+					}
+					return "denied"
+				}
+				report = "read-inside:" + ask("t-in", "Read", map[string]any{"file_path": filepath.Join(cwd, "inside.txt")})
+				report += " read-outside:" + ask("t-out", "Read", map[string]any{"file_path": filepath.Join(outside, "evil.txt")})
+				report += " read-context:" + ask("t-ctx", "Read", map[string]any{"file_path": filepath.Join(ctxDir, "doc.md")})
+				report += " read-nopath:" + ask("t-nopath", "Read", map[string]any{})
+				report += " bash-outside:" + ask("t-bash", "Bash", map[string]any{"command": "cat " + filepath.Join(outside, "evil.txt")})
 				f.notify("session/update", map[string]any{
 					"sessionId": sessionID,
 					"update":    map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": report}},
