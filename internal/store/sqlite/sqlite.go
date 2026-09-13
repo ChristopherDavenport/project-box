@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS chain (
 	kind         TEXT    NOT NULL,
 	subject      TEXT    NOT NULL,
 	actor        TEXT    NOT NULL,
+	pid          INTEGER NOT NULL DEFAULT 0,
 	on_behalf_of TEXT    NOT NULL,
 	grant_id     TEXT    NOT NULL,
 	body         BLOB    NOT NULL,
@@ -139,6 +140,10 @@ func Open(path string, opts ...Option) (*Store, error) {
 		s.Close()
 		return nil, fmt.Errorf("sqlite: upgrade runlog schema: %w", err)
 	}
+	if err := addChainPidColumn(w); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("sqlite: upgrade chain schema: %w", err)
+	}
 	return s, nil
 }
 
@@ -175,6 +180,42 @@ func addRunlogSessionColumn(w *sql.DB) error {
 		return nil
 	}
 	_, err = w.Exec(`ALTER TABLE runlog ADD COLUMN session TEXT NOT NULL DEFAULT ''`)
+	return err
+}
+
+// addChainPidColumn is the repository's second schema evolution, for the same
+// reason as [addRunlogSessionColumn]: CREATE TABLE IF NOT EXISTS is a no-op
+// against a chain table that predates pid, including the live dogfood
+// daemon's, so this adds the column once when absent rather than requiring a
+// migration tool. The default of 0 reads as "not asserted" on every row this
+// upgrade touches, which is exactly what those rows are — no old record ever
+// asserted a pid.
+func addChainPidColumn(w *sql.DB) error {
+	rows, err := w.Query(`PRAGMA table_info(chain)`)
+	if err != nil {
+		return err
+	}
+	has := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "pid" {
+			has = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	if has {
+		return nil
+	}
+	_, err = w.Exec(`ALTER TABLE chain ADD COLUMN pid INTEGER NOT NULL DEFAULT 0`)
 	return err
 }
 
@@ -457,10 +498,10 @@ func (g *log) Append(ctx context.Context, r evidence.Record) (evidence.Record, e
 			return err
 		}
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO chain (tenant, scope, seq, id, prev, kind, subject, actor, on_behalf_of, grant_id, body, at_ns, trace)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO chain (tenant, scope, seq, id, prev, kind, subject, actor, pid, on_behalf_of, grant_id, body, at_ns, trace)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			string(r.Tenant), r.Scope, int64(r.Seq), r.ID, r.Prev, r.Kind, r.Subject,
-			r.Actor, r.OnBehalfOf, r.Grant, r.Body, r.At.UnixNano(), r.Trace)
+			r.Actor, int64(r.Pid), r.OnBehalfOf, r.Grant, r.Body, r.At.UnixNano(), r.Trace)
 		return err
 	})
 	if err != nil {
@@ -469,19 +510,20 @@ func (g *log) Append(ctx context.Context, r evidence.Record) (evidence.Record, e
 	return r, nil
 }
 
-const recordCols = `tenant, scope, seq, id, prev, kind, subject, actor, on_behalf_of, grant_id, body, at_ns, trace`
+const recordCols = `tenant, scope, seq, id, prev, kind, subject, actor, pid, on_behalf_of, grant_id, body, at_ns, trace`
 
 func scanRecord(rows interface{ Scan(...any) error }) (evidence.Record, error) {
 	var r evidence.Record
 	var tn string
-	var seq, atNS int64
+	var seq, atNS, pid int64
 	err := rows.Scan(&tn, &r.Scope, &seq, &r.ID, &r.Prev, &r.Kind, &r.Subject,
-		&r.Actor, &r.OnBehalfOf, &r.Grant, &r.Body, &atNS, &r.Trace)
+		&r.Actor, &pid, &r.OnBehalfOf, &r.Grant, &r.Body, &atNS, &r.Trace)
 	if err != nil {
 		return evidence.Record{}, err
 	}
 	r.Tenant = tenant.ID(tn)
 	r.Seq = uint64(seq)
+	r.Pid = int32(pid)
 	r.At = time.Unix(0, atNS).UTC()
 	return r, nil
 }
@@ -572,10 +614,10 @@ func (g *log) Compact(ctx context.Context, t tenant.ID, scope string, through ui
 			return err
 		}
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO chain (tenant, scope, seq, id, prev, kind, subject, actor, on_behalf_of, grant_id, body, at_ns, trace)
-			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			`INSERT INTO chain (tenant, scope, seq, id, prev, kind, subject, actor, pid, on_behalf_of, grant_id, body, at_ns, trace)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			string(sum.Tenant), sum.Scope, int64(sum.Seq), sum.ID, sum.Prev, sum.Kind, sum.Subject,
-			sum.Actor, sum.OnBehalfOf, sum.Grant, sum.Body, sum.At.UnixNano(), sum.Trace); err != nil {
+			sum.Actor, int64(sum.Pid), sum.OnBehalfOf, sum.Grant, sum.Body, sum.At.UnixNano(), sum.Trace); err != nil {
 			return err
 		}
 		out = sum

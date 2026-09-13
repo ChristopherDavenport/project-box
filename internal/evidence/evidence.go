@@ -61,6 +61,13 @@ type Record struct {
 	Subject string
 	// Actor is the authenticated subject that took the action.
 	Actor string
+	// Pid is the process id the wire itself asserted for a local unix-socket
+	// peer — kernel-supplied credentials, never a header the caller wrote. Zero
+	// means no local process was asserted: a proxy, a runner one hop removed,
+	// or a record sealed before this field existed. Zero is never a claim that
+	// the actor ran as pid 0; unknown never reads as zero anywhere else in
+	// this package, and this field is no exception.
+	Pid int32
 	// OnBehalfOf is the subject whose authority was exercised, empty when the
 	// actor acted on its own. Both are recorded because an audit needs to
 	// separate a change a person made from one an automation made for them,

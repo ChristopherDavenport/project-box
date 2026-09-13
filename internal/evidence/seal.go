@@ -14,7 +14,16 @@ import (
 // sealDomain versions the canonical serialization. Any change to the field
 // set or encoding MUST change it, or old and new records would hash under one
 // scheme and Verify could not tell a tampered record from a re-encoded one.
-const sealDomain = "project-box/evidence/v1"
+//
+// sealDomainV1 is the field set before Pid existed. Every chain written under
+// it — the dogfood daemon's live database included — must keep verifying
+// byte-for-byte, so it is not retired: CheckRecord still accepts it, but only
+// for a record whose Pid is zero. A record asserting a real pid has no v1
+// spelling — Pid was never zero for it — so it must match v2.
+const (
+	sealDomainV1 = "project-box/evidence/v1"
+	sealDomain   = "project-box/evidence/v2"
+)
 
 // Seal fills in a record's ID from its canonical serialization. Seq and Prev
 // must already be assigned; every other field is hashed as given, so a sealed
@@ -32,12 +41,25 @@ func Seal(r Record) (Record, error) {
 	return r, nil
 }
 
-// digest hashes the canonical serialization: a domain tag, then every field
-// except ID, each length-prefixed so no two field boundaries can collide.
-// Length-prefixed concatenation is chosen over JSON because determinism is
-// load-bearing here and JSON's is easy to lose (key order, number forms,
-// escaping) without any test noticing.
+// digest hashes the canonical serialization under the current domain: a
+// domain tag, then every field except ID, each length-prefixed so no two
+// field boundaries can collide. Length-prefixed concatenation is chosen over
+// JSON because determinism is load-bearing here and JSON's is easy to lose
+// (key order, number forms, escaping) without any test noticing.
 func digest(r Record) []byte {
+	return digestDomain(r, sealDomain)
+}
+
+// digestV1 hashes the field set as it stood before Pid existed — CheckRecord's
+// fallback for records sealed under sealDomainV1.
+func digestV1(r Record) []byte {
+	return digestDomain(r, sealDomainV1)
+}
+
+// digestDomain hashes r's canonical serialization under domain. v1 omits Pid
+// entirely rather than hashing a zero for it: the field did not exist yet, and
+// "absent" and "present but zero" must not collide in the digest.
+func digestDomain(r Record, domain string) []byte {
 	h := sha256.New()
 	put := func(b []byte) {
 		var n [8]byte
@@ -50,7 +72,7 @@ func digest(r Record) []byte {
 		binary.BigEndian.PutUint64(n[:], v)
 		put(n[:])
 	}
-	put([]byte(sealDomain))
+	put([]byte(domain))
 	put([]byte(r.Tenant))
 	put([]byte(r.Scope))
 	putU64(r.Seq)
@@ -58,6 +80,9 @@ func digest(r Record) []byte {
 	put([]byte(r.Kind))
 	put([]byte(r.Subject))
 	put([]byte(r.Actor))
+	if domain != sealDomainV1 {
+		putU64(uint64(r.Pid))
+	}
 	put([]byte(r.OnBehalfOf))
 	put([]byte(r.Grant))
 	put(r.Body)
@@ -68,11 +93,20 @@ func digest(r Record) []byte {
 
 // CheckRecord reports whether a record's ID matches its content. This is the
 // tamper check: any altered field changes the digest.
+//
+// A record matches either the current domain, or — only when its Pid is zero
+// — sealDomainV1's field set. That second branch is not leniency: a record
+// with Pid zero and a v1 digest is exactly what every chain written before
+// this change looks like, and it must keep verifying byte-for-byte. A record
+// that asserts a nonzero Pid has no v1 spelling to fall back to.
 func CheckRecord(r Record) error {
-	if r.ID != hex.EncodeToString(digest(r)) {
-		return fmt.Errorf("evidence: record %s/%s seq %d does not match its id — content altered", r.Tenant, r.Scope, r.Seq)
+	if r.ID == hex.EncodeToString(digest(r)) {
+		return nil
 	}
-	return nil
+	if r.Pid == 0 && r.ID == hex.EncodeToString(digestV1(r)) {
+		return nil
+	}
+	return fmt.Errorf("evidence: record %s/%s seq %d does not match its id — content altered", r.Tenant, r.Scope, r.Seq)
 }
 
 // CheckLink reports whether cur correctly extends prev. A zero prev admits

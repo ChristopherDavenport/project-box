@@ -45,6 +45,10 @@ var DDL = []string{
 		granted_at TIMESTAMP   NOT NULL OPTIONS (allow_commit_timestamp = true),
 		expires_at TIMESTAMP   NOT NULL,
 	) PRIMARY KEY (tenant, repo, ref)`,
+	// pid, like session below, is the DDL for a fresh or emulator database
+	// only. Altering an existing production Spanner database to add this
+	// column is an operator's DDL action against the live instance, out of
+	// this package's scope.
 	`CREATE TABLE chain (
 		tenant       STRING(63)  NOT NULL,
 		scope        STRING(MAX) NOT NULL,
@@ -54,6 +58,7 @@ var DDL = []string{
 		kind         STRING(MAX) NOT NULL,
 		subject      STRING(MAX) NOT NULL,
 		actor        STRING(MAX) NOT NULL,
+		pid          INT64       NOT NULL,
 		on_behalf_of STRING(MAX) NOT NULL,
 		grant_id     STRING(MAX) NOT NULL,
 		body         BYTES(MAX)  NOT NULL,
@@ -433,9 +438,9 @@ func (g *log) Append(ctx context.Context, r evidence.Record) (evidence.Record, e
 		}
 		sealed = rr
 		return txn.BufferWrite([]*gspanner.Mutation{gspanner.Insert("chain",
-			[]string{"tenant", "scope", "seq", "id", "prev", "kind", "subject", "actor", "on_behalf_of", "grant_id", "body", "at_ns", "trace"},
+			[]string{"tenant", "scope", "seq", "id", "prev", "kind", "subject", "actor", "pid", "on_behalf_of", "grant_id", "body", "at_ns", "trace"},
 			[]any{string(rr.Tenant), rr.Scope, int64(rr.Seq), rr.ID, rr.Prev, rr.Kind, rr.Subject,
-				rr.Actor, rr.OnBehalfOf, rr.Grant, rr.Body, rr.At.UnixNano(), rr.Trace},
+				rr.Actor, int64(rr.Pid), rr.OnBehalfOf, rr.Grant, rr.Body, rr.At.UnixNano(), rr.Trace},
 		)})
 	})
 	if err != nil {
@@ -444,19 +449,20 @@ func (g *log) Append(ctx context.Context, r evidence.Record) (evidence.Record, e
 	return sealed, nil
 }
 
-const recordCols = `tenant, scope, seq, id, prev, kind, subject, actor, on_behalf_of, grant_id, body, at_ns, trace`
+const recordCols = `tenant, scope, seq, id, prev, kind, subject, actor, pid, on_behalf_of, grant_id, body, at_ns, trace`
 
 func scanRecord(row *gspanner.Row) (evidence.Record, error) {
 	var r evidence.Record
 	var tn string
-	var seq, atNS int64
+	var seq, atNS, pid int64
 	err := row.Columns(&tn, &r.Scope, &seq, &r.ID, &r.Prev, &r.Kind, &r.Subject,
-		&r.Actor, &r.OnBehalfOf, &r.Grant, &r.Body, &atNS, &r.Trace)
+		&r.Actor, &pid, &r.OnBehalfOf, &r.Grant, &r.Body, &atNS, &r.Trace)
 	if err != nil {
 		return evidence.Record{}, err
 	}
 	r.Tenant = tenant.ID(tn)
 	r.Seq = uint64(seq)
+	r.Pid = int32(pid)
 	r.At = time.Unix(0, atNS).UTC()
 	return r, nil
 }
@@ -560,9 +566,9 @@ func (g *log) Compact(ctx context.Context, t tenant.ID, scope string, through ui
 				Kind:  gspanner.ClosedOpen,
 			}),
 			gspanner.InsertOrUpdate("chain",
-				[]string{"tenant", "scope", "seq", "id", "prev", "kind", "subject", "actor", "on_behalf_of", "grant_id", "body", "at_ns", "trace"},
+				[]string{"tenant", "scope", "seq", "id", "prev", "kind", "subject", "actor", "pid", "on_behalf_of", "grant_id", "body", "at_ns", "trace"},
 				[]any{string(sum.Tenant), sum.Scope, int64(sum.Seq), sum.ID, sum.Prev, sum.Kind, sum.Subject,
-					sum.Actor, sum.OnBehalfOf, sum.Grant, sum.Body, sum.At.UnixNano(), sum.Trace},
+					sum.Actor, int64(sum.Pid), sum.OnBehalfOf, sum.Grant, sum.Body, sum.At.UnixNano(), sum.Trace},
 			),
 		})
 	})

@@ -147,3 +147,86 @@ func TestOpenUpgradesARunlogTableWithNoSessionColumn(t *testing.T) {
 		t.Errorf("post-upgrade row's session = %q, want agentref-2", got[1].Session)
 	}
 }
+
+// TestOpenUpgradesAChainTableWithNoPidColumn is the repository's second
+// schema evolution, proven the same way the first one was: a database built
+// before pid existed, with a row already in it — exactly dogfood's live
+// database. Open must add the column in place and go on serving both the
+// pre-upgrade row (reading back Pid 0, "not asserted", never an invented
+// value) and a new row appended with one.
+func TestOpenUpgradesAChainTableWithNoPidColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "box.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open raw: %v", err)
+	}
+	if _, err := raw.Exec(`CREATE TABLE chain (
+		tenant       TEXT    NOT NULL,
+		scope        TEXT    NOT NULL,
+		seq          INTEGER NOT NULL,
+		id           TEXT    NOT NULL,
+		prev         TEXT    NOT NULL,
+		kind         TEXT    NOT NULL,
+		subject      TEXT    NOT NULL,
+		actor        TEXT    NOT NULL,
+		on_behalf_of TEXT    NOT NULL,
+		grant_id     TEXT    NOT NULL,
+		body         BLOB    NOT NULL,
+		at_ns        INTEGER NOT NULL,
+		trace        TEXT    NOT NULL,
+		PRIMARY KEY (tenant, scope, seq)
+	) STRICT`); err != nil {
+		t.Fatalf("create old-shape table: %v", err)
+	}
+	old, err := evidence.Seal(evidence.Record{
+		Tenant: tenant.ID("t1"), Scope: "scope-old",
+		Seq: 1, Kind: "test", Subject: "sha-old", Actor: "a",
+		Body: []byte(`{"probe":true}`), At: time.Unix(0, 0).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("seal old-shape record: %v", err)
+	}
+	if _, err := raw.Exec(
+		`INSERT INTO chain (tenant, scope, seq, id, prev, kind, subject, actor, on_behalf_of, grant_id, body, at_ns, trace) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		string(old.Tenant), old.Scope, int64(old.Seq), old.ID, old.Prev, old.Kind, old.Subject,
+		old.Actor, old.OnBehalfOf, old.Grant, old.Body, old.At.UnixNano(), old.Trace); err != nil {
+		t.Fatalf("insert old-shape row: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatalf("close raw: %v", err)
+	}
+
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("open must upgrade the table rather than fail: %v", err)
+	}
+	defer s.Close()
+
+	ctx := context.Background()
+	log := s.Log()
+	got, err := log.Head(ctx, tenant.ID("t1"), "scope-old")
+	if err != nil {
+		t.Fatalf("head: %v", err)
+	}
+	if got.Pid != 0 {
+		t.Errorf("pre-upgrade row's pid = %d, want 0 — an upgrade must not invent one", got.Pid)
+	}
+	if err := evidence.CheckRecord(got); err != nil {
+		t.Errorf("pre-upgrade row must still verify under the v1 fallback: %v", err)
+	}
+
+	next, err := log.Append(ctx, evidence.Record{
+		Tenant: tenant.ID("t1"), Scope: "scope-old",
+		Kind: "test", Subject: "sha-new", Actor: "a", Pid: 4242,
+		Body: []byte(`{"probe":true}`),
+	})
+	if err != nil {
+		t.Fatalf("append after upgrade: %v", err)
+	}
+	if next.Pid != 4242 {
+		t.Errorf("post-upgrade row's pid = %d, want 4242", next.Pid)
+	}
+	if err := evidence.CheckRecord(next); err != nil {
+		t.Errorf("post-upgrade row must verify under v2: %v", err)
+	}
+}

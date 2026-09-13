@@ -362,6 +362,51 @@ func Run(t *testing.T, open func(t *testing.T) Harness) {
 		}
 	})
 
+	t.Run("chain/on-behalf-of-and-pid-round-trip", func(t *testing.T) {
+		// on_behalf_of and pid exist to separate a change a person made from one
+		// an automation made for them, on a specific process — an audit query
+		// that can only read one of them back is not carrying the other, whatever
+		// Append accepted.
+		tn := tid(t)
+		log := s.Log()
+		r := rec(tn, "scope", "sha-1")
+		r.OnBehalfOf = "person@example.com"
+		r.Pid = 4242
+		want, err := log.Append(ctx, r)
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		check := func(name string, got evidence.Record) {
+			t.Helper()
+			if got.OnBehalfOf != want.OnBehalfOf || got.Pid != want.Pid {
+				t.Fatalf("%s: on_behalf_of/pid did not round-trip: want on_behalf_of=%q pid=%d, got on_behalf_of=%q pid=%d",
+					name, want.OnBehalfOf, want.Pid, got.OnBehalfOf, got.Pid)
+			}
+		}
+		head, err := log.Head(ctx, tn, "scope")
+		if err != nil {
+			t.Fatalf("head: %v", err)
+		}
+		check("head", head)
+		for got, err := range log.Since(ctx, tn, "scope", 1) {
+			if err != nil {
+				t.Fatalf("since: %v", err)
+			}
+			check("since", got)
+		}
+		found := false
+		for got, err := range log.BySubject(ctx, tn, "sha-1") {
+			if err != nil {
+				t.Fatalf("by subject: %v", err)
+			}
+			check("by subject", got)
+			found = true
+		}
+		if !found {
+			t.Fatalf("by subject: record not found")
+		}
+	})
+
 	t.Run("chain/since-and-by-subject", func(t *testing.T) {
 		tn := tid(t)
 		log := s.Log()
