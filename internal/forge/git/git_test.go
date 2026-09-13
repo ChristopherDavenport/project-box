@@ -812,6 +812,63 @@ func TestChangedPathsOfABadCommitErrors(t *testing.T) {
 	}
 }
 
+func TestFileAtReadsBytesFromTheRepoOwnMirror(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+	leaser := f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := m.Checkout(ctx, lease, f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	os.WriteFile(filepath.Join(ws.Dir, "README.md"), []byte("changed\n"), 0o644)
+	mustGit(t, ws.Dir, "add", ".")
+	mustGit(t, ws.Dir, "commit", "-m", "change readme")
+	head := forge.Commit(strings.TrimSpace(mustGit(t, ws.Dir, "rev-parse", "HEAD")))
+	// FileAt does not fetch; collect the new commit into the mirror the same
+	// way Land's push step does, without landing.
+	if _, err := run2(ctx, m.mirrorDir(f.repo.Name), "fetch", ws.Dir, string(head)); err != nil {
+		t.Fatalf("collect head into mirror: %v", err)
+	}
+
+	cases := []struct {
+		name        string
+		at          forge.Commit
+		path        string
+		want        string
+		errContains string
+	}{
+		{name: "present at base", at: f.base, path: "README.md", want: "seed\n"},
+		{name: "same path, different bytes at a later commit", at: head, path: "README.md", want: "changed\n"},
+		{name: "path absent at that commit", at: f.base, path: "nope.txt", errContains: "nope.txt"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := m.FileAt(ctx, f.repo, tc.at, tc.path)
+			if tc.errContains != "" {
+				if err == nil {
+					t.Fatalf("FileAt(%s, %s): want error, got nil", tc.at, tc.path)
+				}
+				if !strings.Contains(err.Error(), tc.errContains) {
+					t.Fatalf("FileAt error = %q, want to contain %q", err.Error(), tc.errContains)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("FileAt(%s, %s): %v", tc.at, tc.path, err)
+			}
+			if string(got) != tc.want {
+				t.Fatalf("FileAt(%s, %s) = %q, want %q", tc.at, tc.path, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestPatchIDIsStableAcrossARebaseAndDiffersForADifferentPatch(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()

@@ -183,6 +183,48 @@ func (m *Mirror) ChangedPaths(ctx context.Context, repo forge.Repo, from, to for
 	return strings.Split(out, "\n"), nil
 }
 
+// FileAt returns the bytes of one file at one commit, read from a repo's own
+// mirror — the one Fetch already keeps for landing, checkout and diffing.
+//
+// This is not [Mirror.ReadPinned]. ReadPinned resolves a remote URL and
+// commit into a SEPARATE mirror keyed by their hash, under skills/, for a
+// skill or kind pin that names a remote the box may never otherwise track.
+// FileAt resolves a [forge.Repo] the mirror already has under its own name —
+// a repo Fetch cloned for some other reason entirely. Folding them into one
+// call would mean either fetching a tracked repo a second time under the
+// pin's hash-keyed path, or teaching ReadPinned to resolve repos by name
+// instead of by remote: two different keyings serving two different
+// callers, not one function that grew a second key by accident. Do not
+// simplify them together.
+//
+// path is a repo-relative slash path: git's <commit>:<path> pathspec is
+// literal, not translated for the host, so a caller must not pass it through
+// filepath.Join on a platform where that would swap in a backslash.
+//
+// FileAt does not fetch, exactly as ChangedPaths does not: the commit must
+// already be in the mirror, and a helper that fetched on a miss would hide a
+// stale mirror instead of surfacing it. A path absent at the commit is a
+// distinct, wrapped error naming the path, commit and repo — never empty
+// bytes, per this repo's unknown-never-reads-as-zero rule.
+func (m *Mirror) FileAt(ctx context.Context, repo forge.Repo, at forge.Commit, path string) ([]byte, error) {
+	lk := m.fetchLock(repo.Name)
+	lk.RLock()
+	defer lk.RUnlock()
+	dir := m.mirrorDir(repo.Name)
+	spec := string(at) + ":" + path
+	oid, err := run(ctx, dir, "rev-parse", spec)
+	if err != nil {
+		return nil, fmt.Errorf("git: %s not found at %s in %s: %w", path, at, repo.Name, err)
+	}
+	cmd := exec.CommandContext(ctx, "git", "cat-file", "blob", strings.TrimSpace(oid))
+	cmd.Dir = dir
+	body, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("git: reading %s at %s in %s: %w", path, at, repo.Name, err)
+	}
+	return body, nil
+}
+
 // Checkout materializes a workspace at a commit. It presents the lease's
 // token by renewing it — the leaser is the only authority on whether the
 // claim survived, so a runner that stalled past its deadline is refused a
