@@ -71,7 +71,7 @@ func TestAssembleRefusesADefiniteWorkflowScopeGap(t *testing.T) {
 	defer ts.Close()
 	d := newGHLandDaemon(t, ts)
 
-	if _, _, _, _, err := d.assemble(ctx, d.cfg); err == nil {
+	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err == nil {
 		t.Fatal("land token missing the workflow scope, on a repo with a workflows directory, was accepted")
 	} else if !strings.Contains(err.Error(), "gh auth refresh -s workflow") {
 		t.Fatalf("error = %v, want it to contain the one-line fix verbatim", err)
@@ -102,7 +102,7 @@ func TestAssembleAcceptsAScopeListCarryingWorkflow(t *testing.T) {
 	defer ts.Close()
 	d := newGHLandDaemon(t, ts)
 
-	loops, _, _, _, err := d.assemble(ctx, d.cfg)
+	loops, _, _, _, _, err := d.assemble(ctx, d.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestAssembleAcceptsAMissingWorkflowsDirectory(t *testing.T) {
 	defer ts.Close()
 	d := newGHLandDaemon(t, ts)
 
-	if _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
+	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -151,6 +151,62 @@ func TestAssembleAcceptsAMissingWorkflowsDirectory(t *testing.T) {
 	}
 	if !got.Answered || got.Scopes != "repo,read:org" || got.HasWorkflowsDir {
 		t.Fatalf("recorded scopes = %+v, want the answered header verbatim with no workflows directory", got)
+	}
+}
+
+// TestMissingIssuesScope is the pure-function table for the repo-scope gap:
+// answered and lacking both "repo" and "public_repo" refuses; either one
+// present passes; and — unlike missingWorkflowScope — an unanswered outcome
+// never refuses regardless of HasWorkflowsDir, since issue closing has no
+// repo-shape precondition to gate on.
+func TestMissingIssuesScope(t *testing.T) {
+	cases := []struct {
+		name string
+		s    landTokenScopes
+		want bool
+	}{
+		{"answered lacking both", landTokenScopes{Answered: true, Scopes: "read:org,workflow"}, true},
+		{"answered with repo", landTokenScopes{Answered: true, Scopes: "repo,read:org"}, false},
+		{"answered with public_repo", landTokenScopes{Answered: true, Scopes: "public_repo"}, false},
+		{"unanswered", landTokenScopes{Answered: false, Reason: "no header"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := c.s.missingIssuesScope(); got != c.want {
+				t.Fatalf("missingIssuesScope() = %v, want %v for %+v", got, c.want, c.s)
+			}
+		})
+	}
+}
+
+// TestAssembleRefusesADefiniteIssuesScopeGap mirrors
+// TestAssembleRefusesADefiniteWorkflowScopeGap for the repo-scope gap: a
+// classic OAuth token whose scopes are answered and lack both "repo" and
+// "public_repo" refuses assemble, unconditionally of HasWorkflowsDir — a
+// 404 (no workflows directory) is used here precisely to prove that.
+func TestAssembleRefusesADefiniteIssuesScopeGap(t *testing.T) {
+	ctx := context.Background()
+	ts := httptest.NewServer(scopesHandler(t, http.StatusNotFound, "read:org"))
+	defer ts.Close()
+	d := newGHLandDaemon(t, ts)
+
+	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err == nil {
+		t.Fatal("land token missing both repo and public_repo scopes was accepted")
+	} else if !strings.Contains(err.Error(), "gh auth refresh -s repo") {
+		t.Fatalf("error = %v, want it to contain the one-line fix verbatim", err)
+	}
+}
+
+// TestAssembleAcceptsPublicRepoScope is the issues-scope gap's passing case:
+// "public_repo" alone satisfies it, same as "repo" does.
+func TestAssembleAcceptsPublicRepoScope(t *testing.T) {
+	ctx := context.Background()
+	ts := httptest.NewServer(scopesHandler(t, http.StatusNotFound, "public_repo,read:org"))
+	defer ts.Close()
+	d := newGHLandDaemon(t, ts)
+
+	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -187,7 +243,7 @@ func TestAssembleNonGitHubRemoteProbesNothing(t *testing.T) {
 		return nil, nil
 	})}
 
-	if _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
+	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
 		t.Fatal(err)
 	}
 }

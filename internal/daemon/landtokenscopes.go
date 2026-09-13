@@ -60,6 +60,28 @@ func (s landTokenScopes) missingWorkflowScope() bool {
 	return true
 }
 
+// missingIssuesScope reports the one definite gap closing a driving issue
+// exists to catch before GitHub's own 403 does: an answered, classic-OAuth
+// scope list carrying neither "repo" nor "public_repo". Classic OAuth has no
+// standalone "issues" scope — issue write rides "repo" (and "public_repo"
+// for a public repository) — so those are the only two names that satisfy
+// it. Unlike missingWorkflowScope this does not gate on HasWorkflowsDir:
+// issue closing is unconditional on pull_request landing, not on a repo
+// shape. Every indefinite outcome is, as with missingWorkflowScope, not a
+// gap this probe can see, so it does not refuse.
+func (s landTokenScopes) missingIssuesScope() bool {
+	if !s.Answered {
+		return false
+	}
+	for _, sc := range strings.Split(s.Scopes, ",") {
+		switch strings.TrimSpace(sc) {
+		case "repo", "public_repo":
+			return false
+		}
+	}
+	return true
+}
+
 // probe parses remote to an owner/repo FIRST, with the daemon's own
 // ghOwnerRepo — a remote that does not name a github.com repository is
 // probe-cannot-answer without ever calling token (which shells out to `gh

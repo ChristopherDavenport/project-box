@@ -64,7 +64,7 @@ func TestAssembleAppendsTheReviewerWhenDeclared(t *testing.T) {
 		}
 		t.Cleanup(func() { d.Close() })
 
-		loops, _, _, _, err := d.assemble(ctx, d.cfg)
+		loops, _, _, _, _, err := d.assemble(ctx, d.cfg)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,7 +96,7 @@ func TestAssembleAppendsTheReviewerWhenDeclared(t *testing.T) {
 		}
 		t.Cleanup(func() { d.Close() })
 
-		loops, _, _, _, err := d.assemble(ctx, d.cfg)
+		loops, _, _, _, _, err := d.assemble(ctx, d.cfg)
 		if err != nil {
 			t.Fatal(err)
 		}

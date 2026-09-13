@@ -58,6 +58,14 @@ type Server struct {
 	// Plans, when set, lets retry and resolve reach an origination whose
 	// planning failed — the one exception that exists before any item does.
 	Plans *plan.Store
+	// EscalationResolved, when set, is told a person gave up on an
+	// origination's planning — invoked only once s.Plans.Resolve itself has
+	// succeeded, carrying the ingress id, the resolving actor, the plan
+	// failure's own recorded reason (read just before Resolve overwrote the
+	// chain's newest standing), and the resolver's own note. Nil is exactly
+	// today's behavior: resolving an escalation closes nothing — the same
+	// nil-means-unwired seam as loop.PRLander and loop.Approval.
+	EscalationResolved func(ctx context.Context, id, actor, reason, note string)
 	// Meter, when set, puts the capacity window's account on /v1/status —
 	// what the factory has spent, and how much of that it could not measure.
 	// A cost brake nobody can read is a brake nobody trusts.
@@ -424,7 +432,17 @@ func (s *Server) resume(w http.ResponseWriter, r *http.Request) { s.control(w, r
 // could not clear a queue the pump had stopped draining.
 func (s *Server) resolve(w http.ResponseWriter, r *http.Request) {
 	s.reopen(w, r, s.Queue.Resolve, queue.StateDone, func(ctx context.Context, id, actor, note string) error {
-		return s.Plans.Resolve(ctx, s.Tenant, id, actor, note)
+		// Read before Resolve appends its own record — the plan's newest
+		// standing is still "failed" here, so Reason is the plan-failed
+		// body, not the note this call is about to write over it with.
+		st, _ := s.Plans.Standing(ctx, s.Tenant, id)
+		if err := s.Plans.Resolve(ctx, s.Tenant, id, actor, note); err != nil {
+			return err
+		}
+		if s.EscalationResolved != nil {
+			s.EscalationResolved(ctx, id, actor, st.Reason, note)
+		}
+		return nil
 	})
 }
 

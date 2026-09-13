@@ -130,12 +130,22 @@ type Daemon struct {
 	// assemble of a repo configured for pull_request landing — the same
 	// swappable-in-a-test shape as poller's Lister above.
 	landProbe *landTokenScopeProbe
+	// escalationCloser closes the GitHub issue a resolved escalation's
+	// origination named, when its box lands by pull request. The same
+	// GET/comment-dedupe/PATCH sequence git.PRLander's own closeDrivingIssue
+	// performs, duplicated here rather than exported across the section
+	// boundary between the daemon and the forge/git packages — see
+	// ghOwnerRepo's own comment for the precedent.
+	escalationCloser *escalationCloser
 	// routes and remotes are swapped together at every assemble (New and
 	// Reload), guarded by mu below. remotes carries the repo remote a
 	// route's poll targets — ingress.Route itself does not, since a route
-	// is forge-agnostic and a remote is not.
+	// is forge-agnostic and a remote is not. landPR carries which of those
+	// routes' repos land by pull request — the fact [Daemon.resolveEscalatedIssue]
+	// needs to know before it will close anything.
 	routes  map[string]ingress.Route
 	remotes map[string]string
+	landPR  map[string]bool
 	// lastPoll is the last time each named route was polled, so a route's
 	// own Poll interval — not the daemon's tick — paces the reader. It
 	// survives a reload: a route that keeps its name keeps its schedule.
@@ -199,9 +209,10 @@ func New(path string) (*Daemon, error) {
 			Lister: newGHIssueLister(ghAuthToken), Router: router, Log: s.Log(),
 			Tenant: t, Actor: cfg.Runner,
 		},
-		landProbe: newLandTokenScopeProbe(ghAuthToken),
-		lastPoll:  map[string]time.Time{},
-		cfg:       cfg, every: cfg.EveryDuration(),
+		landProbe:        newLandTokenScopeProbe(ghAuthToken),
+		escalationCloser: newEscalationCloser(ghAuthToken),
+		lastPoll:         map[string]time.Time{},
+		cfg:              cfg, every: cfg.EveryDuration(),
 	}
 	// The deterministic, agent-free set, plus the one judgement this daemon
 	// can offer. Registering it here does not put an agent on the intake
@@ -212,7 +223,7 @@ func New(path string) (*Daemon, error) {
 		s.Close()
 		return nil, err
 	}
-	loops, routes, remotes, kinds, err := d.assemble(context.Background(), cfg)
+	loops, routes, remotes, landPR, kinds, err := d.assemble(context.Background(), cfg)
 	if err != nil {
 		s.Close()
 		return nil, err
@@ -238,6 +249,7 @@ func New(path string) (*Daemon, error) {
 	}
 	d.routes = routes
 	d.remotes = remotes
+	d.landPR = landPR
 	// The exception queue ages whether or not anybody is looking, so the
 	// sweep is what makes "nobody is looking" audible. The log is the weakest
 	// sink there is and the only one that needs no configuration; a real
@@ -268,6 +280,10 @@ func New(path string) (*Daemon, error) {
 		Live:    d.live,
 		Started: time.Now(),
 		Reload:  d.reloadForAPI,
+		// A person resolving an escalation and a runner landing a plan's
+		// last unit are the two ways an issue closes; this is the seam for
+		// the first, invoked only once Plans.Resolve itself has succeeded.
+		EscalationResolved: d.resolveEscalatedIssue,
 	}
 	if ui, err := web.Dist(); err == nil {
 		d.API.UI = ui
@@ -280,15 +296,16 @@ func (d *Daemon) Close() error { return d.store.Close() }
 
 // assemble builds the executor, route and declaration tables from a config —
 // used at New and again at every Reload.
-func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*loop.Loop, map[string]ingress.Route, map[string]string, kind.Sets, error) {
+func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*loop.Loop, map[string]ingress.Route, map[string]string, map[string]bool, kind.Sets, error) {
 	loops := map[string]*loop.Loop{}
 	routes := map[string]ingress.Route{}
+	landPR := map[string]bool{}
 	remotes := map[string]string{}
 	kinds := kind.Sets{}
 	for _, bx := range cfg.Boxes {
 		set, err := d.declarations(ctx, bx)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, err
 		}
 		kinds[bx.Name] = set
 		if len(bx.Agent) == 0 {
@@ -297,7 +314,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			// at a time. Refused here, where the operator can see it coming.
 			for _, name := range set.Names() {
 				if decl, err := set.Lookup(name); err == nil && decl.Decomposer() == acp.PlannerName {
-					return nil, nil, nil, nil, fmt.Errorf("daemon: box %s kind %s names the planner decomposer and the box has no agent — a build command cannot judge", bx.Name, name)
+					return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s kind %s names the planner decomposer and the box has no agent — a build command cannot judge", bx.Name, name)
 				}
 			}
 		}
@@ -349,7 +366,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			repo := r.ForgeRepo()
 			repos = append(repos, repo)
 			if err := d.mirror.Fetch(ctx, repo); err != nil {
-				return nil, nil, nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
+				return nil, nil, nil, nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
 			}
 			check := r.Check
 			if r.Review == boxcfg.ReviewJudgement && agentBuilder == nil {
@@ -357,7 +374,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// agent never reaches here. A nil agentBuilder in this branch
 				// is this assembly disagreeing with that refusal, not a
 				// config an operator could have written.
-				return nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: review: judgement with no agent builder — should have been refused at Load", bx.Name, r.Name)
+				return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: review: judgement with no agent builder — should have been refused at Load", bx.Name, r.Name)
 			}
 			reviews := r.Review == boxcfg.ReviewJudgement
 			lp := &loop.Loop{
@@ -425,7 +442,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					Tenant: d.tenant, Scope: "control/config", Kind: "land-token-scopes",
 					Subject: bx.Name + "/" + r.Name, Actor: cfg.Runner, Body: body,
 				}); err != nil {
-					return nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: recording land-token scopes: %w", bx.Name, r.Name, err)
+					return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: recording land-token scopes: %w", bx.Name, r.Name, err)
 				}
 				// Every indefinite outcome — a non-GitHub remote, a token or
 				// network failure, an absent X-OAuth-Scopes header, a status
@@ -436,7 +453,18 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// plan adds on the forge side still refuses before any push
 				// either way, so an unanswered probe is never the last word.
 				if scopes.missingWorkflowScope() {
-					return nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: land token scopes (%s) lack \"workflow\", and %s has a .github/workflows directory — run: gh auth refresh -s workflow", bx.Name, r.Name, scopes.Scopes, r.Remote)
+					return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: land token scopes (%s) lack \"workflow\", and %s has a .github/workflows directory — run: gh auth refresh -s workflow", bx.Name, r.Name, scopes.Scopes, r.Remote)
+				}
+				// Closing a driving issue — on plan completion, or a
+				// resolved escalation — needs the same token's issues
+				// write. Classic OAuth carries it on "repo" (or
+				// "public_repo" for a public repository), never a
+				// standalone "issues" scope, so an answered list lacking
+				// both is the definite gap, asserted here for the same
+				// reason the workflow one is: at Load, not at the first
+				// close's own rejection.
+				if scopes.missingIssuesScope() {
+					return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: land token scopes (%s) lack \"repo\" or \"public_repo\" — issue closing needs issues write — run: gh auth refresh -s repo", bx.Name, r.Name, scopes.Scopes)
 				}
 				// Validated at Load: pull_request landing does not reach here
 				// without a known land_token, and "gh" is the only one today.
@@ -446,6 +474,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					// App (Phase 7) is what signs the landing.
 					return gitforge.NewPRLander(inner, ghAuthToken).StatusesOnly()
 				}
+				landPR[r.Route.Name] = true
 			}
 			if r.Approval.Count > 0 {
 				// Validated at Load: a count needs land: pull_request and a
@@ -506,7 +535,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			Progress: d.progress,
 		})
 	}
-	return loops, routes, remotes, kinds, nil
+	return loops, routes, remotes, landPR, kinds, nil
 }
 
 // declarations resolves one box's kind declarations: the seeds, then the
@@ -669,7 +698,7 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 			return "", fmt.Errorf("daemon: %s is the daemon's identity, not its configuration — changing it (%q -> %q) needs a restart; reload refused, old config still running", f.name, f.was, f.now)
 		}
 	}
-	loops, routes, remotes, kinds, err := d.assemble(ctx, ncfg)
+	loops, routes, remotes, landPR, kinds, err := d.assemble(ctx, ncfg)
 	if err != nil {
 		return "", fmt.Errorf("daemon: reload refused, old config still running: %w", err)
 	}
@@ -691,6 +720,7 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 	d.every = ncfg.EveryDuration()
 	d.routes = routes
 	d.remotes = remotes
+	d.landPR = landPR
 	d.mu.Unlock()
 
 	summary := fmt.Sprintf("boxes=%d executors=%d routes=%d every=%s", len(ncfg.Boxes), len(loops), len(routes), ncfg.Every)

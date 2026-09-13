@@ -99,7 +99,7 @@ func TestTheFactoryRunsWithNoAgentInIt(t *testing.T) {
 	// 1. No agent runtime was assembled. This is the structural half, and the
 	// one that catches the erosion: a builder that is an *acp.Builder here
 	// means an agent got onto a path this config never asked for one on.
-	loops, _, _, kinds, err := d.assemble(ctx, d.cfg)
+	loops, _, _, _, kinds, err := d.assemble(ctx, d.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
