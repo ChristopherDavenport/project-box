@@ -76,6 +76,13 @@ export function fmtUSD(micros) {
   return usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
 }
 
+/** fmtCost is fmtUSD's same precision rule for a value already in dollars —
+ *  agent-result's cost_usd, never micros. */
+export function fmtCost(usd) {
+  usd = usd ?? 0;
+  return usd < 1 ? `$${usd.toFixed(4)}` : `$${usd.toFixed(2)}`;
+}
+
 /**
  * tokenSplit is the total broken into what it is billed as. A cached read
  * costs roughly a tenth of a fresh input token and an output token several

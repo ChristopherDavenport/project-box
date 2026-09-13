@@ -77,6 +77,10 @@ export const getPlanDiff = (ref, other, signal) =>
 export const getActivity = (signal) => fetchJSON('/v1/activity', signal);
 export const getSessions = (signal) => fetchJSON('/v1/sessions', signal);
 export const getSession = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/session`, signal);
+// One unit's agent sessions alone — the same rows getSession's own
+// agent_sessions field carries, for a caller that wants the list without the
+// rest of the card.
+export const getItemSessions = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/sessions`, signal);
 // The run log: what a run did, kept after it — a work item's id, or plan-<ingress> for a judgement.
 export const getRunFrames = (run, signal) => fetchJSON(`/v1/runs/${encodeURIComponent(run)}/frames`, signal);
 

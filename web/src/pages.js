@@ -12,7 +12,7 @@ import {
 } from './api.js';
 import { ActivityController } from './sse.js';
 import {
-  age, title, taskURL, short, fmtTokens, fmtUSD, tokenSplit, breakdown, origin, place, hold, why,
+  age, title, taskURL, short, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, place, hold, why,
   describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail,
 } from './format.js';
 import { base, toast, focusInto } from './ui.js';
@@ -446,14 +446,93 @@ export function collapse(frames) {
  *  or out of the run log: the daemon stamps one moment on both. */
 const frameKey = (f) => `${f.at}|${f.kind}|${f.call ?? ''}|${f.tool ?? ''}`;
 
+/** groupFramesBySession buckets frames by the agentref that produced them —
+ *  never by time, per issue #107. A frame with no `session` predates
+ *  attribution and goes to `unattributed`, first and on its own; every other
+ *  frame goes to the bucket named by its agentref, whether or not that
+ *  agentref is one of this scope's known AgentSessions rows (a session the
+ *  chain has not caught up to yet still gets its own bucket rather than
+ *  losing its frames). Each bucket is `collapse`d on its own, so a tool call
+ *  announced and titled inside one session folds into one row exactly as it
+ *  always has. */
+export function groupFramesBySession(frames) {
+  const unattributed = [];
+  const byRef = new Map();
+  const order = [];
+  for (const f of frames ?? []) {
+    const ref = f.session || '';
+    if (!ref) { unattributed.push(f); continue; }
+    if (!byRef.has(ref)) { byRef.set(ref, []); order.push(ref); }
+    byRef.get(ref).push(f);
+  }
+  for (const ref of order) byRef.set(ref, collapse(byRef.get(ref)));
+  return { unattributed: collapse(unattributed), byRef, order };
+}
+
+/** continuationTree links each AgentSession row that continued a prior ACP
+ *  session to the row that opened it, so a rebuild's second attempt renders
+ *  nested under the first rather than as a fresh top-level card. Linked by
+ *  the ACP session id (`continues` naming another row's `session`), which is
+ *  a different value than the agentref `groupFramesBySession` keys frames
+ *  by. Rows named by no other row's session — including every row when
+ *  `sessions` carries no `session`/`continues` data at all — come back as
+ *  roots, in their given order. */
+export function continuationTree(sessions) {
+  const openedBy = new Map();
+  for (const s of sessions ?? []) if (s.session) openedBy.set(s.session, s.agentref);
+  const childrenOf = new Map();
+  const roots = [];
+  for (const s of sessions ?? []) {
+    const parent = s.continues ? openedBy.get(s.continues) : undefined;
+    if (parent && parent !== s.agentref) {
+      if (!childrenOf.has(parent)) childrenOf.set(parent, []);
+      childrenOf.get(parent).push(s);
+    } else {
+      roots.push(s);
+    }
+  }
+  return { roots, childrenOf };
+}
+
+/** sessionForest is groupFramesBySession and continuationTree composed: every
+ *  row this scope's frames named, known AgentSessions rows first in chain
+ *  order and any agentref frames named that the chain has not caught up to
+ *  after, as synthetic rows carrying nothing but that agentref. Callers walk
+ *  `roots` and recurse into `childrenOf` to render the whole tree; frames for
+ *  a row are `byRef.get(row.agentref) ?? []`. */
+export function sessionForest(sessions, frames) {
+  const { unattributed, byRef, order } = groupFramesBySession(frames);
+  const known = new Set((sessions ?? []).map((s) => s.agentref));
+  const extra = order.filter((ref) => !known.has(ref)).map((ref) => ({ agentref: ref }));
+  const { roots, childrenOf } = continuationTree([...(sessions ?? []), ...extra]);
+  return { unattributed, byRef, roots, childrenOf };
+}
+
+/** frameList is the ol.frames markup itself, factored out so a session
+ *  section and the flat pages that came before it render one agent's
+ *  timeline identically: newest first, a call folded to one row by
+ *  `collapse`, denials and escalations picked out by FRAME_APPEARANCE. */
+function frameList(frames, emptyMessage) {
+  return frames.length === 0
+    ? html`<p class="empty">${emptyMessage}</p>`
+    : html`<ol class="frames" aria-label="Agent timeline, newest first">${frames.slice().reverse().map((f) => html`
+        <li class=${FRAME_APPEARANCE[f.kind] ?? ''}>
+          <span class="t"><box-when .at=${f.at}></box-when></span>
+          <span class="k">${f.kind}</span>
+          <span class="x">${frameLine(f)}</span>
+        </li>`)}</ol>`;
+}
+
 /**
  * Sessions: one card per running unit — what it is, how far it has got, and
- * what its agent is doing right now.
+ * the sequence of agent sessions it is, issue #107's own framing.
  *
  * Cards side by side rather than one merged feed, because fan-out is the case
  * a feed breaks on: several runs interleave into a stream that reads as noise,
  * and the question an operator has — is THIS unit moving — is then answered by
- * scrolling.
+ * scrolling. Inside a card, what used to be one interleaved timeline is now
+ * one section per agent session — same grouping box-item uses, since a unit
+ * here and a unit there are the same chain read two ways.
  */
 export class BoxSessions extends LitElement {
   static styles = [base, css`
@@ -465,16 +544,23 @@ export class BoxSessions extends LitElement {
     .layer { font: var(--jh-font-micro-medium); padding: 2px var(--jh-space-200); border-radius: var(--jh-border-radius-100);
              background: var(--jh-color-container-secondary-enabled); }
     h4 { margin: var(--jh-space-300) 0 var(--jh-space-100); font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
-    ol { list-style: none; margin: 0; padding: 0; max-height: 480px; overflow-y: auto; font: var(--jh-font-helper-regular); }
-    li { display: grid; grid-template-columns: 64px 64px 1fr; gap: var(--jh-space-200); padding: 3px 0;
-         border-bottom: 1px solid var(--jh-color-divider-secondary); }
-    li .x b { font-weight: 600; }
-    li .t { color: var(--jh-color-content-secondary-enabled); font-variant-numeric: tabular-nums; }
-    li .k { font-weight: 600; }
-    li .x { white-space: pre-wrap; overflow-wrap: anywhere; }
-    li.negative .k { color: var(--jh-color-content-negative-enabled); }
-    li.positive .k { color: var(--jh-color-content-positive-enabled); }
+    ol.frames { list-style: none; margin: 0; padding: 0; max-height: 320px; overflow-y: auto; font: var(--jh-font-helper-regular); }
+    ol.frames li { display: grid; grid-template-columns: 5.5em 6em 1fr; gap: var(--jh-space-200); padding: 3px 0;
+                   border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    ol.frames .x b { font-weight: 600; }
+    ol.frames .t { color: var(--jh-color-content-secondary-enabled); font-variant-numeric: tabular-nums; }
+    ol.frames .k { font-weight: 600; }
+    ol.frames .x { white-space: pre-wrap; overflow-wrap: anywhere; }
+    ol.frames li.negative .k { color: var(--jh-color-content-negative-enabled); }
+    ol.frames li.positive .k { color: var(--jh-color-content-positive-enabled); }
     .blind { color: var(--jh-color-content-secondary-enabled); font-style: italic; margin: 0; }
+    details.session { margin: var(--jh-space-300) 0 0; padding: var(--jh-space-300); border-radius: var(--jh-border-radius-200);
+                       background: var(--jh-color-container-secondary-enabled); }
+    details.session details.session { margin-left: var(--jh-space-400); }
+    .session-meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: baseline;
+                    font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .session-meta b { color: var(--jh-color-content-primary-enabled); font-weight: 600; }
+    .session-meta .running { color: var(--jh-color-content-positive-enabled); font-weight: 600; }
   `];
   static properties = { _frames: { state: true } };
 
@@ -484,16 +570,29 @@ export class BoxSessions extends LitElement {
     // last fetch returned. Without this a card would only move as fast as the
     // roster refetch, which is the reload the page exists to replace.
     this._frames = {};
+    // The agentrefs the last fetch knew about. A frame naming one outside
+    // this set belongs to a session the chain has recorded since — the
+    // listing itself is stale, not just missing a card to paint the frame
+    // into, so this refetches rather than quietly buffering the frame.
+    this._known = new Set();
     this._activity = new ActivityController(this, {
       limit: 1,
       onEvent: () => this._refresh(),
       onSession: (f) => {
         this._frames = { ...this._frames, [f.item]: [...(this._frames[f.item] ?? []), f] };
+        if (f.session && !this._known.has(f.session)) this._refresh();
       },
     });
   }
 
-  _task = new Task(this, { task: async (_, { signal }) => getSessions(signal), args: () => [] });
+  _task = new Task(this, {
+    task: async (_, { signal }) => {
+      const rows = await getSessions(signal);
+      this._known = new Set(rows.flatMap((s) => (s.agent_sessions ?? []).map((a) => a.agentref)));
+      return rows;
+    },
+    args: () => [],
+  });
 
   _refresh() {
     clearTimeout(this._timer);
@@ -508,10 +607,12 @@ export class BoxSessions extends LitElement {
   // The fetched timeline is the truth about the past; the streamed frames are
   // what has happened since. Deduped by sequence, which the server assigns —
   // a refetch mid-stream otherwise shows an operator the same tool call twice
-  // and makes a quiet run look busy.
-  _timeline(s) {
+  // and makes a quiet run look busy. Left uncollapsed: collapse() runs per
+  // session inside sessionForest, once frames are grouped rather than merged
+  // flat.
+  _liveFrames(s) {
     const seen = new Set((s.timeline ?? []).map((f) => f.seq));
-    return collapse([...(s.timeline ?? []), ...(this._frames[s.id] ?? []).filter((f) => !seen.has(f.seq))]);
+    return [...(s.timeline ?? []), ...(this._frames[s.id] ?? []).filter((f) => !seen.has(f.seq))];
   }
 
   render() {
@@ -526,8 +627,33 @@ export class BoxSessions extends LitElement {
     });
   }
 
+  _sessionMeta(s) {
+    return html`<span class="session-meta">
+      <b>${s.role || 'agent'}</b>
+      ${s.attempt ? html`<span>attempt ${s.attempt}${s.of ? ` of ${s.of}` : ''}</span>` : nothing}
+      ${s.model ? html`<span>${s.model}</span>` : nothing}
+      ${s.agentref ? html`<span><box-hash label="agentref" .value=${s.agentref}></box-hash></span>` : nothing}
+      ${s.started
+        ? (s.finished ? html`<span>ended <box-when .at=${s.ended}></box-when></span>` : html`<span class="running">running</span>`)
+        : nothing}
+      ${s.finished ? html`<span>${fmtTokens(s.tokens)} tokens · ${fmtCost(s.cost_usd)}</span>` : nothing}
+    </span>`;
+  }
+
+  _sessionRow(s, byRef, childrenOf) {
+    const frames = byRef.get(s.agentref) ?? [];
+    const children = childrenOf.get(s.agentref) ?? [];
+    return html`
+      <details class="session" ?open=${!s.finished}>
+        <summary>${this._sessionMeta(s)}</summary>
+        ${frameList(frames, 'Nothing said yet.')}
+        ${children.map((c) => this._sessionRow(c, byRef, childrenOf))}
+      </details>`;
+  }
+
   _card(s) {
-    const frames = this._timeline(s);
+    const frames = this._liveFrames(s);
+    const { unattributed, byRef, roots, childrenOf } = sessionForest(s.agent_sessions, frames);
     return html`
       <jh-card header-title=${title(s) || s.id} header-subtitle=${origin(s) || place(s)} padding="medium">
         <div class="meta">
@@ -540,7 +666,7 @@ export class BoxSessions extends LitElement {
           ${s.judgement
             ? html`<span>ingress <box-hash label="ingress id" .value=${s.id} href=${'/ingress/' + s.id} chars="18"></box-hash></span>`
             : html`<span>item <box-hash label="item id" .value=${s.id} href=${'/items/' + s.id} chars="18"></box-hash></span>`}
-          ${s.agentref ? html`<span>agent <box-hash label="agentref" .value=${s.agentref}></box-hash></span>` : nothing}
+          ${s.agent_tokens ? html`<span>${fmtTokens(s.agent_tokens)} tokens · ${fmtCost(s.agent_cost_usd)} across every session below</span>` : nothing}
           ${s.head ? html`<span>head <box-hash label="commit" .value=${s.head} href=${'/provenance/' + s.head}></box-hash></span>` : nothing}
         </div>
         ${/* Which layers, in which order — the agentref is a digest and alone
@@ -549,21 +675,19 @@ export class BoxSessions extends LitElement {
           ? html`<div class="layers" aria-label="Agent layers">${s.layers.map((l) => html`
               <span class="layer" title=${`${l.source} ${l.digest}`}>${l.scope}:${l.name}</span>`)}</div>`
           : nothing}
-        <h4>Timeline <span class="helper">— newest first</span></h4>
-        ${/* Newest at the top: the question is what the agent is doing NOW,
-             and history is what you scroll down into. */ ''}
-        ${frames.length === 0
+        <h4>Agent sessions <span class="helper">— chain order, newest first inside each</span></h4>
+        ${unattributed.length === 0 && roots.length === 0
           ? (s.watching
               ? html`<p class="empty">Started; nothing said yet.</p>`
               : html`<p class="blind">No live stream here — another runner holds this, or the window has rolled.
                      Silence about the run, not an idle agent.</p>`)
-          : html`<ol aria-label="Agent timeline, newest first">${frames.slice().reverse().map((f) => html`
-              <li class=${FRAME_APPEARANCE[f.kind] ?? ''}>
-                <span class="t"><box-when .at=${f.at}></box-when></span>
-                <span class="k">${f.kind}</span>
-                <span class="x">${frameLine(f)}</span>
-              </li>`)}
-            </ol>`}
+          : html`
+            ${unattributed.length ? html`
+              <details class="session" open>
+                <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
+                ${frameList(unattributed, 'Nothing here.')}
+              </details>` : nothing}
+            ${roots.map((row) => this._sessionRow(row, byRef, childrenOf))}`}
       </jh-card>`;
   }
 }
@@ -682,6 +806,14 @@ export class BoxItem extends LitElement {
     ol.frames .x { white-space: pre-wrap; overflow-wrap: anywhere; }
     ol.frames li.negative .k { color: var(--jh-color-content-negative-enabled); }
     ol.frames li.positive .k { color: var(--jh-color-content-positive-enabled); }
+    details.session { margin: var(--jh-space-300) 0 0; padding: var(--jh-space-300); border-radius: var(--jh-border-radius-200);
+                       background: var(--jh-color-container-secondary-enabled); }
+    details.session details.session { margin-left: var(--jh-space-400); }
+    details.session summary { color: var(--jh-color-content-primary-enabled); }
+    .session-meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: baseline;
+                    font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .session-meta b { color: var(--jh-color-content-primary-enabled); font-weight: 600; }
+    .session-meta .running { color: var(--jh-color-content-positive-enabled); font-weight: 600; }
   `];
   constructor() {
     super();
@@ -714,29 +846,78 @@ export class BoxItem extends LitElement {
   // What the run did: the kept frames first, then whatever has streamed
   // since that is not already among them. The daemon stamps one moment on a
   // frame for both, so the same frame seen twice is recognised as one.
+  // Left uncollapsed here — collapse() runs per session, inside
+  // groupFramesBySession, once frames are grouped rather than merged flat.
   _frames(kept) {
     const seen = new Set((kept ?? []).map(frameKey));
-    return collapse([...(kept ?? []), ...this._live.filter((f) => !seen.has(frameKey(f)))]);
+    return [...(kept ?? []), ...this._live.filter((f) => !seen.has(frameKey(f)))];
   }
 
-  _agent(item, kept) {
+  // The agentref a session's header links to the record that explains what
+  // it was — the agent-prompt record on this same page's Timeline card,
+  // reached by fragment rather than a route this room does not have.
+  _agentRefLink(ref, promptRefs) {
+    return promptRefs.has(ref)
+      ? html`<a href=${'#agent-prompt-' + ref}><box-hash label="agentref" .value=${ref}></box-hash></a>`
+      : html`<box-hash label="agentref" .value=${ref}></box-hash>`;
+  }
+
+  // A row groupFramesBySession/continuationTree gave a real Started time is
+  // one of this unit's own AgentSessions; one without is a synthesized stub
+  // built from a frame naming a session the chain has not caught up to yet
+  // — see sessionForest. The two render at different fidelity because that
+  // is the most either can honestly say.
+  _sessionSummary(s, promptRefs) {
+    return html`<span class="session-meta">
+      <b>${s.role || 'agent'}</b>
+      ${s.attempt ? html`<span>attempt ${s.attempt}${s.of ? ` of ${s.of}` : ''}</span>` : nothing}
+      ${s.model ? html`<span>${s.model}</span>` : nothing}
+      ${s.agentref ? html`<span>${this._agentRefLink(s.agentref, promptRefs)}</span>` : nothing}
+      ${s.session ? html`<span><box-hash label="ACP session" .value=${s.session}></box-hash></span>` : nothing}
+      ${s.started ? html`<span>started <box-when .at=${s.started}></box-when></span>` : nothing}
+      ${s.started
+        ? (s.finished ? html`<span>ended <box-when .at=${s.ended}></box-when></span>` : html`<span class="running">running</span>`)
+        : nothing}
+      ${s.finished ? html`<span>${fmtTokens(s.tokens)} tokens · ${fmtCost(s.cost_usd)}</span>` : nothing}
+    </span>`;
+  }
+
+  // One session's own section, recursing into whatever continued it — see
+  // continuationTree — so a rebuild's second attempt nests under the first
+  // instead of reading as an unrelated card below it.
+  _sessionCard(s, byRef, childrenOf, promptRefs) {
+    const frames = byRef.get(s.agentref) ?? [];
+    const children = childrenOf.get(s.agentref) ?? [];
+    return html`
+      <details class="session" ?open=${!s.finished}>
+        <summary>${this._sessionSummary(s, promptRefs)}</summary>
+        ${frameList(frames, 'Nothing said yet.')}
+        ${children.map((c) => this._sessionCard(c, byRef, childrenOf, promptRefs))}
+      </details>`;
+  }
+
+  _sessions(item, kept, evidence) {
     const frames = this._frames(kept);
+    const { unattributed, byRef, roots, childrenOf } = sessionForest(item.agent_sessions, frames);
+    const promptRefs = new Set((evidence ?? []).filter((r) => r.Kind === 'agent-prompt').map((r) => r.Subject));
     const running = item.state === 'claimed';
     const subtitle = running
-      ? 'What the agent is doing, as it does it — newest first'
-      : 'What the agent did, from the run log — newest first';
+      ? 'One section per agent session, chain order — newest first inside each'
+      : 'One section per agent session, chain order, from the run log — newest first inside each';
+    const empty = unattributed.length === 0 && roots.length === 0;
     return html`
       <jh-card header-title="Agent" header-subtitle=${subtitle} padding="medium">
-        ${frames.length === 0
+        ${empty
           ? html`<p class="empty">${running
               ? 'Nothing streamed yet. The first frame is the agent starting.'
               : 'Nothing was kept for this run — it ran before the run log existed, or its frames were pruned.'}</p>`
-          : html`<ol class="frames" aria-label="Agent timeline, newest first">${frames.slice().reverse().map((f) => html`
-              <li class=${FRAME_APPEARANCE[f.kind] ?? ''}>
-                <span class="t"><box-when .at=${f.at}></box-when></span>
-                <span class="k">${f.kind}</span>
-                <span class="x">${frameLine(f)}</span>
-              </li>`)}</ol>`}
+          : html`
+            ${unattributed.length ? html`
+              <details class="session" open>
+                <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
+                ${frameList(unattributed, 'Nothing here.')}
+              </details>` : nothing}
+            ${roots.map((s) => this._sessionCard(s, byRef, childrenOf, promptRefs))}`}
       </jh-card>`;
   }
 
@@ -805,6 +986,8 @@ export class BoxItem extends LitElement {
           ${item.opened ? html`<dt>Opened</dt><dd><box-when .at=${item.opened} abs></box-when> <span class="helper">(<box-when .at=${item.opened}></box-when>)</span></dd>` : nothing}
           ${item.changed ? html`<dt>Last change</dt><dd><box-when .at=${item.changed} abs></box-when> <span class="helper">(${age(item.in_state_sec)} in this state)</span></dd>` : nothing}
           ${item.hops ? html`<dt>Sessions</dt><dd>${item.hops + 1}, after ${item.hops} handoff(s)</dd>` : nothing}
+          ${item.agent_tokens ? html`<dt>Agent spend</dt><dd>${fmtTokens(item.agent_tokens)} tokens · ${fmtCost(item.agent_cost_usd)}
+              <span class="helper">summed across every agent session below</span></dd>` : nothing}
         </dl>
         <details>
           <summary>Full task text</summary>
@@ -829,7 +1012,7 @@ export class BoxItem extends LitElement {
     return html`
       <ol class="chain" aria-label="Run timeline">
         ${evidence.map((r) => html`
-          <li>
+          <li id=${r.Kind === 'agent-prompt' ? 'agent-prompt-' + r.Subject : nothing}>
             ${kindTag(r.Kind)}
             <div>
               <div class="what">${describe(r)}</div>
@@ -846,7 +1029,7 @@ export class BoxItem extends LitElement {
       error: failed,
       complete: ({ item, evidence, kept }) => html`
         ${this._head(item)}
-        ${this._agent(item, kept)}
+        ${this._sessions(item, kept, evidence)}
         <jh-card header-title="Timeline" header-subtitle="What this unit did, in order, from its own evidence chain" padding="medium">
           ${this._chain(evidence)}
         </jh-card>`,
@@ -879,6 +1062,11 @@ export class BoxIngress extends LitElement {
     ol.frames .x { white-space: pre-wrap; overflow-wrap: anywhere; }
     ol.frames li.negative .k { color: var(--jh-color-content-negative-enabled); }
     ol.frames li.positive .k { color: var(--jh-color-content-positive-enabled); }
+    details.session { margin: var(--jh-space-300) 0 0; padding: var(--jh-space-300); border-radius: var(--jh-border-radius-200);
+                       background: var(--jh-color-container-secondary-enabled); }
+    .session-meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: baseline;
+                    font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .session-meta b { color: var(--jh-color-content-primary-enabled); font-weight: 600; }
   `];
 
   constructor() {
@@ -913,30 +1101,48 @@ export class BoxIngress extends LitElement {
 
   // The kept frames first, then whatever has streamed since that is not
   // already among them — the same merge-dedup box-item uses, on the same
-  // frameKey the daemon stamps on both.
+  // frameKey the daemon stamps on both. Left uncollapsed: collapse() runs
+  // per session inside sessionForest.
   _frames(kept) {
     const seen = new Set((kept ?? []).map(frameKey));
-    return collapse([...(kept ?? []), ...this._live.filter((f) => !seen.has(frameKey(f)))]);
+    return [...(kept ?? []), ...this._live.filter((f) => !seen.has(frameKey(f)))];
+  }
+
+  // A judgement has no AgentSessions rows to read — no queue item means no
+  // /v1/items/{id}/session for control to answer from (IngressView carries
+  // none either) — so every section here is the synthesized kind
+  // sessionForest builds from a frame's own `session` field alone: an
+  // agentref and nothing else. Same grouping box-item and box-sessions use,
+  // at the fidelity a judgement's evidence actually supports.
+  _sessionCard(s, byRef) {
+    const frames = byRef.get(s.agentref) ?? [];
+    return html`
+      <details class="session" open>
+        <summary><span class="session-meta"><b>agent</b> <box-hash label="agentref" .value=${s.agentref}></box-hash></span></summary>
+        ${frameList(frames, 'Nothing said yet.')}
+      </details>`;
   }
 
   _agent(ing, kept) {
     const frames = this._frames(kept);
+    const { unattributed, byRef, roots } = sessionForest([], frames);
     const running = !ing.standing;
     const subtitle = running
-      ? 'What the agent is doing, as it does it — newest first'
-      : 'What the agent did, from the run log — newest first';
+      ? 'One section per agent session — newest first inside each'
+      : 'One section per agent session, from the run log — newest first inside each';
     return html`
       <jh-card header-title="Agent" header-subtitle=${subtitle} padding="medium">
-        ${frames.length === 0
+        ${unattributed.length === 0 && roots.length === 0
           ? html`<p class="empty">${running
               ? 'Nothing streamed yet. The first frame is the agent starting.'
               : 'Nothing was kept for this run — it ran before the run log existed, or its frames were pruned.'}</p>`
-          : html`<ol class="frames" aria-label="Agent timeline, newest first">${frames.slice().reverse().map((f) => html`
-              <li class=${FRAME_APPEARANCE[f.kind] ?? ''}>
-                <span class="t"><box-when .at=${f.at}></box-when></span>
-                <span class="k">${f.kind}</span>
-                <span class="x">${frameLine(f)}</span>
-              </li>`)}</ol>`}
+          : html`
+            ${unattributed.length ? html`
+              <details class="session" open>
+                <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
+                ${frameList(unattributed, 'Nothing here.')}
+              </details>` : nothing}
+            ${roots.map((s) => this._sessionCard(s, byRef))}`}
       </jh-card>`;
   }
 
