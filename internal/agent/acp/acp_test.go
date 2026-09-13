@@ -896,6 +896,11 @@ func fakeAgent(scenario string) {
 			case "planner-escalate":
 				f.request("_box/escalate", map[string]any{"reason": "this origination is a question, not a change"})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "planner-noanswer":
+				// The run never answers: the transport refuses session/prompt
+				// itself, the way the incident's session-limit rejection did.
+				f.write(map[string]any{"id": id, "error": map[string]any{"code": -32603,
+					"message": "Internal error: You've hit your session limit"}})
 			case "review-pass", "review-fail", "review-silent", "review-neither",
 				"review-resolved", "review-resolutions-missing", "review-unresolved-pass":
 				// The gate role's occupant. Every scenario first reports what

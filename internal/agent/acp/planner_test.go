@@ -212,6 +212,57 @@ func TestAnAnswerWithNoPlanIsAnError(t *testing.T) {
 	}
 }
 
+// TestAPlannerThatNeverAnsweredIsErrNoAnswer: a transport refusal on
+// session/prompt — a session-limit rejection, a mid-response server error —
+// is a run nobody judged, not a plan the box should park as an exception.
+// pump.intakeOne (internal/pump) leans on errors.Is(err, plan.ErrNoAnswer) to
+// tell the two apart, so the rpc message must survive into the error text
+// for a plan-failed reason to quote it.
+func TestAPlannerThatNeverAnsweredIsErrNoAnswer(t *testing.T) {
+	p, ing, _ := plannerRig(t, "planner-noanswer")
+	_, err := p.Decompose(context.Background(), ing, plannerDecl())
+	if err == nil || !errors.Is(err, plan.ErrNoAnswer) {
+		t.Fatalf("a run that never answered was not reported as plan.ErrNoAnswer: %v", err)
+	}
+	if !strings.Contains(err.Error(), "session limit") {
+		t.Fatalf("the rpc message did not survive into the error text: %v", err)
+	}
+	var esc *loop.Escalation
+	if errors.As(err, &esc) {
+		t.Fatalf("a never-answered run was mistaken for an escalation: %v", err)
+	}
+}
+
+// TestAPlannerEscalationIsNotErrNoAnswer: an escalation is an answer — the
+// agent said its piece — so it must not also satisfy plan.ErrNoAnswer, or
+// the loop side would retry and defer a run that already told us why it
+// stopped.
+func TestAPlannerEscalationIsNotErrNoAnswer(t *testing.T) {
+	p, ing, _ := plannerRig(t, "planner-escalate")
+	_, err := p.Decompose(context.Background(), ing, plannerDecl())
+	var esc *loop.Escalation
+	if !errors.As(err, &esc) {
+		t.Fatalf("escalation not carried: %v", err)
+	}
+	if errors.Is(err, plan.ErrNoAnswer) {
+		t.Fatalf("an escalation was mistaken for a run that never answered: %v", err)
+	}
+}
+
+// TestAMalformedPlanIsNotErrNoAnswer: a plan that fails to parse is an
+// answered run — the agent replied, just not in the shape asked for — so it
+// must park as an exception rather than be retried as if nobody answered.
+func TestAMalformedPlanIsNotErrNoAnswer(t *testing.T) {
+	p, ing, _ := plannerRig(t, "planner-noplan")
+	_, err := p.Decompose(context.Background(), ing, plannerDecl())
+	if err == nil || !strings.Contains(err.Error(), "no plan") {
+		t.Fatalf("an answer with no plan was accepted: %v", err)
+	}
+	if errors.Is(err, plan.ErrNoAnswer) {
+		t.Fatalf("a malformed plan was mistaken for a run that never answered: %v", err)
+	}
+}
+
 // TestLastObjectIsStringAware: a brace inside a task's prose must not end
 // the object early.
 func TestLastObjectIsStringAware(t *testing.T) {

@@ -203,7 +203,11 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 		p.Spend(ctx, run, res.Usage)
 	}
 	if err != nil {
-		return plan.Result{}, fmt.Errorf("acp: planner: %w", err)
+		// The one seam where a planner error means the run never answered: a
+		// transport failure, a limit refusal, a mid-response server error. The
+		// loop side (pump.intakeOne) retries and defers on [plan.ErrNoAnswer]
+		// rather than parking an exception for a run nobody judged.
+		return plan.Result{}, fmt.Errorf("acp: planner: %w: %w", plan.ErrNoAnswer, err)
 	}
 	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed)))
 	rec.json(ctx, "agent-text", bundle.Ref, textRecord{AgentRef: bundle.Ref, Text: res.Text, StopReason: res.StopReason})
