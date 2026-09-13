@@ -43,6 +43,15 @@ const planDomain = "project-box/planref/v1"
 // ErrPlan marks a graph that does not hold together.
 var ErrPlan = errors.New("plan")
 
+// ErrNoAnswer marks a planner run that never answered: a transport error, a
+// mid-response server error, or a limit refusal, as distinct from a planner
+// that answered with an escalation or a plan the parse refuses. A decomposer
+// wraps it around whatever it saw at the seam where the run stopped
+// talking — the acp planner wraps it at its rt.Run seam — so intake can tell
+// "the account's window closed on this run" from "the planner judged and
+// that judgement does not hold."
+var ErrNoAnswer = errors.New("plan: the planner run never answered")
+
 // Node is one unit of work the plan calls for.
 type Node struct {
 	// ID names this node within the plan, and it is what a dependent names.

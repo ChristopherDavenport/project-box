@@ -45,6 +45,10 @@ type Pump struct {
 	// side — their leases key on (tenant, repo, ref), so they contend for
 	// nothing.
 	Loops map[string]*loop.Loop
+	// Meter paces both Drain's claims and, since issue #110, intake's
+	// judgement decomposers: a planner run is an account spend exactly like a
+	// build, and the account's own window is read nowhere but here. Required
+	// whenever a box declares a judgement decomposer.
 	Meter *capacity.Meter
 	Queue *queue.Queue
 	// StarveAfter is how many consecutive section waits mark a candidate as
@@ -197,16 +201,36 @@ func (p *Pump) intakeOne(ctx context.Context, ingressID string) (int, error) {
 		return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
 	}
 	if !planned {
-		if pl, err = plan.Make(ctx, p.Decomposers, ing, decl); err != nil {
-			if p.judgement(decl) {
-				// The seat whose failure parks the one origination that asked
-				// for a judgement. A deterministic decomposer's error stays a
-				// tick error: it costs nothing to retry and points at config.
-				if ferr := p.Plans.Fail(ctx, ing, err.Error()); ferr != nil {
-					return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, ferr)
+		if p.judgement(decl) {
+			var def deferralError
+			if pl, err = p.planJudgement(ctx, ing, decl); err != nil {
+				switch {
+				case errors.Is(err, errSkipTick):
+					// The meter refused before the planner ever ran: pacing,
+					// not failure. No record — the meter's refusal already
+					// holds the origination pending, and one per tick would
+					// spam the chain.
+					return 0, nil
+				case errors.As(err, &def):
+					if derr := p.Plans.Defer(ctx, ing, def.reason); derr != nil {
+						return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, derr)
+					}
+					return 0, nil
+				default:
+					// Either the planner answered (an escalation, a malformed
+					// plan, a parse refusal) or the retry bound was spent
+					// against a meter that never said the window was the
+					// problem. Either way it is the seat whose failure parks
+					// the one origination that asked for a judgement.
+					if ferr := p.Plans.Fail(ctx, ing, err.Error()); ferr != nil {
+						return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, ferr)
+					}
+					return 0, nil
 				}
-				return 0, nil
 			}
+		} else if pl, err = plan.Make(ctx, p.Decomposers, ing, decl); err != nil {
+			// A deterministic decomposer's error stays a tick error: it
+			// costs nothing to retry and points at config.
 			return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
 		}
 		// Recorded BEFORE the work exists. A graph whose items predate the
@@ -524,4 +548,89 @@ func (d *Daemon) Run(ctx context.Context) error {
 func (p *Pump) judgement(decl kind.Declaration) bool {
 	d, err := p.Decomposers.Resolve(decl.Decomposer())
 	return err == nil && !d.Replayable()
+}
+
+// DefaultDeferRetries bounds how many more times a judgement run that never
+// answered — [plan.ErrNoAnswer] — is retried in place before intake gives up
+// on it as a planning failure. Mirrors [loop.DefaultGateRetries]'s "a re-ask
+// needs a small bound, not an unbounded spin" shape: the issue's own words are
+// "retried in place under a bound before it parks."
+const DefaultDeferRetries = 2
+
+// errSkipTick signals intakeOne that the meter refused before the planner
+// ever ran: the origination stays pending with no record, because the
+// meter's own refusal is already why nothing happened this tick, and a
+// record per tick would spam the chain for a fact that has not changed.
+var errSkipTick = errors.New("pump: the meter is pacing this origination")
+
+// deferralError signals intakeOne to record a [plan.Store.Defer] rather than
+// a [plan.Store.Fail]: a judgement run that never answered, retried, then
+// found the meter itself refusing on the very next acquire — the run's own
+// spend charged the report that closed the window. reason is the meter's
+// refusal, which already names the window, utilization, reserve and reset
+// time, plus the run's own error.
+type deferralError struct{ reason string }
+
+func (d deferralError) Error() string { return d.reason }
+
+// meterPacing reports whether err is one of the meter's own pacing refusals
+// rather than an infrastructure failure — the same set [Pump.Drain] treats as
+// "wait for the next tick," plus [capacity.ErrUnpriced], which a planner run
+// billed under a cost budget can also hit.
+func meterPacing(err error) bool {
+	return errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrBusy) ||
+		errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrUnpriced) ||
+		errors.Is(err, capacity.ErrCredential)
+}
+
+// planJudgement runs a judgement decomposer under the same pacing Drain
+// already gives every claim — see issue #110. The account's own five-hour
+// window is read nowhere but the meter, so this is the one seam that makes
+// intake subject to the same refusal a run mid-item already is.
+//
+// A pre-run refusal returns [errSkipTick]: the decomposer is never invoked,
+// and nothing is recorded. A run that never answered ([plan.ErrNoAnswer]) is
+// retried in place up to [DefaultDeferRetries] more times, releasing and
+// re-acquiring the meter before each retry — the failed run's own Spend has
+// already charged its limit report, so a run that reported the window
+// exhausted makes the very next Acquire refuse, which is returned as a
+// [deferralError] naming that refusal. A run that answers — with a plan, an
+// escalation, or an error that is not [plan.ErrNoAnswer] — returns
+// immediately, retried or not; only a planner that never answered spins
+// again. If the bound is spent against a meter that still admits, the last
+// run's plain error is returned for the caller to fail as it always has.
+func (p *Pump) planJudgement(ctx context.Context, ing ingress.Ingress, decl kind.Declaration) (plan.Plan, error) {
+	release, err := p.Meter.Acquire(ctx, ing.ID)
+	if err != nil {
+		if meterPacing(err) {
+			return plan.Plan{}, errSkipTick
+		}
+		return plan.Plan{}, err
+	}
+	maxTries := 1 + DefaultDeferRetries
+	var runErr error
+	for try := 1; try <= maxTries; try++ {
+		var pl plan.Plan
+		pl, runErr = plan.Make(ctx, p.Decomposers, ing, decl)
+		release()
+		if runErr == nil {
+			return pl, nil
+		}
+		if !errors.Is(runErr, plan.ErrNoAnswer) {
+			// The planner answered — an escalation, a malformed plan, a
+			// parse refusal — which is a judgement, not a pacing question.
+			return plan.Plan{}, runErr
+		}
+		if try == maxTries {
+			break // the bound is spent; fall through to the caller's Fail.
+		}
+		release, err = p.Meter.Acquire(ctx, ing.ID)
+		if err != nil {
+			if meterPacing(err) {
+				return plan.Plan{}, deferralError{reason: fmt.Sprintf("%s: %s", err.Error(), runErr.Error())}
+			}
+			return plan.Plan{}, err
+		}
+	}
+	return plan.Plan{}, runErr
 }

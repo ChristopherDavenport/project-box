@@ -156,6 +156,44 @@ func TestByRefFindsAPlanByItsContentAddress(t *testing.T) {
 	}
 }
 
+// TestADeferralFoldsToDeferredAndStaysUnblocked. A deferral is the meter's
+// own pacing, not an exception: Standing must still surface it so a room can
+// explain why nothing is happening, but Blocked must stay false so intake
+// keeps offering the origination to the planner every tick the meter allows.
+func TestADeferralFoldsToDeferredAndStaysUnblocked(t *testing.T) {
+	s := store(t)
+	ctx := context.Background()
+	ps := &Store{Log: s.Log(), Actor: "boxd"}
+	ing := issue("ing-1")
+	openOn(t, s, ing)
+
+	if err := ps.Defer(ctx, ing, "capacity: the account's five_hour window is rejected"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := ps.Standing(ctx, tn, ing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != "deferred" || st.Reason == "" {
+		t.Fatalf("standing after a deferral: %+v", st)
+	}
+	if st.Blocked() {
+		t.Fatal("a deferred origination must stay unblocked — intake retries it, the meter is what holds it")
+	}
+
+	// And it must not have landed in the exception queue: a deferral is not
+	// an exception, so nothing lists it and nobody needs to retry or resolve
+	// it by hand.
+	for rec, err := range s.Log().Since(ctx, tn, "index/exceptions", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Subject == ing.ID {
+			t.Fatalf("a deferral wrote an index/exceptions record: %+v", rec)
+		}
+	}
+}
+
 func openOn(t *testing.T, s *sqlite.Store, ing ingress.Ingress) {
 	t.Helper()
 	body, err := json.Marshal(ing)

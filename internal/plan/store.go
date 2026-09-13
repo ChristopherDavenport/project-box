@@ -140,14 +140,19 @@ const (
 	FailedKind   = "plan-failed"
 	RetriedKind  = "plan-retried"
 	ResolvedKind = "plan-resolved"
+	// DeferredKind marks a judgement run that never answered — the meter's
+	// own pacing, not a judgement that the plan does not hold. It is written
+	// on the same chain as the others but carries none of the exception's
+	// consequences: see [Store.Defer].
+	DeferredKind = "plan-deferred"
 )
 
 // Standing is where an origination stands with respect to planning: nothing
 // yet, planned, failed and waiting for a person, sent back for another
-// attempt, or given up on.
+// attempt, given up on, or deferred by the meter's own pacing.
 type Standing struct {
-	// State is "", planned, failed, retried, or resolved — the newest of
-	// the planning events on the chain.
+	// State is "", planned, failed, retried, resolved, or deferred — the
+	// newest of the planning events on the chain.
 	State  string
 	Reason string
 	At     time.Time
@@ -175,6 +180,8 @@ func (s *Store) Standing(ctx context.Context, t tenant.ID, ingressID string) (St
 			st = Standing{State: "retried", Reason: string(rec.Body), At: rec.At}
 		case ResolvedKind:
 			st = Standing{State: "resolved", Reason: string(rec.Body), At: rec.At}
+		case DeferredKind:
+			st = Standing{State: "deferred", Reason: string(rec.Body), At: rec.At}
 		}
 	}
 	return st, nil
@@ -203,6 +210,26 @@ func (s *Store) Fail(ctx context.Context, ing ingress.Ingress, reason string) er
 		Actor: s.Actor, Body: []byte(reason),
 	})
 	return err
+}
+
+// Defer records that a judgement run never answered — the meter's own
+// pacing, not a judgement the plan does not hold — on the origination's
+// chain.
+//
+// Unlike [Store.Fail], this writes NO index/exceptions record: a deferral is
+// not an exception. Nobody gave up on the origination and nobody needs to
+// look at it; the meter's window did the refusing and the meter's window
+// will do the admitting, on its own clock. Intake keeps seeing the
+// origination as pending — [Standing.Blocked] stays false for "deferred" —
+// and retries it the next tick the meter allows a start.
+func (s *Store) Defer(ctx context.Context, ing ingress.Ingress, reason string) error {
+	if _, err := s.Log.Append(ctx, evidence.Record{
+		Tenant: ing.Tenant, Scope: ingress.Scope(ing.ID), Kind: DeferredKind, Subject: ing.ID,
+		Actor: s.Actor, OnBehalfOf: ing.Requester, Body: []byte(reason),
+	}); err != nil {
+		return fmt.Errorf("%w: recording the deferral of %s: %w", ErrPlan, ing.ID, err)
+	}
+	return nil
 }
 
 // Retry sends a failed planning back for another attempt; Resolve gives up on

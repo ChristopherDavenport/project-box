@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
+	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/kind"
@@ -54,6 +55,10 @@ func judgementWorld(t *testing.T, judge *flaky) (*Pump, *ingress.StoreRouter, *p
 		Store: s, Tenant: tn, Runner: "pump-runner",
 		Queue: &queue.Queue{Store: s, Runner: "pump-runner", TTL: time.Hour},
 		Kinds: kind.Sets{"shop": set}, Decomposers: reg, Plans: plans,
+		// An unbudgeted meter: these tests are about the judgement seat's own
+		// failure handling, not the meter's pacing, so the meter must admit
+		// every acquire rather than nil-panic on one.
+		Meter: &capacity.Meter{Store: s, Tenant: tn, Actor: "pump-runner"},
 	}
 	return p, &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "pump-runner"},
 		plans, &control.Room{Store: s, Tenant: tn, Actor: "chris"}
