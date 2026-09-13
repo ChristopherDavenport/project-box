@@ -2,6 +2,10 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -434,5 +438,134 @@ func TestARestoredMeterAgreesWithTheLiveStartCount(t *testing.T) {
 	}
 	if got := fresh.Report().Started; got != live {
 		t.Fatalf("a restored meter disagreed with the live one: restored=%d live=%d", got, live)
+	}
+}
+
+// twoSectionBuilder writes into both declared sections in the same build —
+// proof a landing that spans more than one is recorded as both, not just
+// the first section a changed path happens to match.
+type twoSectionBuilder struct{}
+
+func (twoSectionBuilder) Build(_ context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	if err := os.MkdirAll(filepath.Join(ws.Dir, "api"), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Join(ws.Dir, "web"), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, "api", "a.txt"), []byte(task+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, "web", "w.txt"), []byte(task+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "commit", "-m", scriptedCommitSubject(task)); err != nil {
+		return "", err
+	}
+	out, err := sh(ws.Dir, "git", "rev-parse", "HEAD")
+	return forge.Commit(strings.TrimSpace(out)), err
+}
+
+// doneWorkItem reads the `done` record off id's own chain scope and
+// unmarshals its body back into a WorkItem — the loop's own account of what
+// a landing looked like at the moment it settled, event-sourced onto the
+// same record every other transition already rides.
+func doneWorkItem(t *testing.T, e *env, id string) queue.WorkItem {
+	t.Helper()
+	for r, err := range e.store.Log().Since(context.Background(), tn, "workitem/"+id, 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind != "done" {
+			continue
+		}
+		var w queue.WorkItem
+		if err := json.Unmarshal(r.Body, &w); err != nil {
+			t.Fatalf("done record body did not parse: %v", err)
+		}
+		return w
+	}
+	t.Fatalf("no done record for %s", id)
+	return queue.WorkItem{}
+}
+
+// TestALandingRecordsTheSectionsAndPathsItTouched is issue #200's loop half:
+// git.ChangedPaths was computed at the gate and thrown away, so nothing on
+// the chain said what a landing actually changed. A build that touches two
+// declared sections writes both names, sorted, on its done record.
+func TestALandingRecordsTheSectionsAndPathsItTouched(t *testing.T) {
+	e := sectioned(t)
+	e.loop.Builder = twoSectionBuilder{}
+	ctx := context.Background()
+
+	item := e.submit(t, "both-1", nil)
+	item, err := e.loop.Run(ctx, item)
+	if err != nil || item.State != queue.StateDone {
+		t.Fatalf("run: %v %+v", err, item)
+	}
+
+	done := doneWorkItem(t, e, item.ID)
+	if want := []string{"api", "web"}; !slices.Equal(done.LandedSections, want) {
+		t.Fatalf("landed sections = %v, want %v", done.LandedSections, want)
+	}
+	for _, want := range []string{"api/a.txt", "web/w.txt"} {
+		if !slices.Contains(done.LandedPaths, want) {
+			t.Errorf("landed paths %v missing %q", done.LandedPaths, want)
+		}
+	}
+}
+
+// TestALandingOutsideEveryDeclaredSectionRecordsUnsectioned: a build that
+// only touches paths no declared section covers writes the literal name
+// "unsectioned", never an empty list — unknown never reads as "touched
+// nothing".
+func TestALandingOutsideEveryDeclaredSectionRecordsUnsectioned(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+
+	// scriptedBuilder (e's default) writes answer.txt at the repository
+	// root, outside both declared sections.
+	item := e.submit(t, "outside-1", nil)
+	item, err := e.loop.Run(ctx, item)
+	if err != nil || item.State != queue.StateDone {
+		t.Fatalf("run: %v %+v", err, item)
+	}
+
+	done := doneWorkItem(t, e, item.ID)
+	if want := []string{"unsectioned"}; !slices.Equal(done.LandedSections, want) {
+		t.Fatalf("landed sections = %v, want %v", done.LandedSections, want)
+	}
+	if want := []string{"answer.txt"}; !slices.Equal(done.LandedPaths, want) {
+		t.Fatalf("landed paths = %v, want %v", done.LandedPaths, want)
+	}
+}
+
+// TestTheOptimisticLaneRecordsLandedSectionsToo: the land-then-check lane
+// shares this loop's one land-and-record path, not a copy of it that
+// forgot the census.
+func TestTheOptimisticLaneRecordsLandedSectionsToo(t *testing.T) {
+	e := sectioned(t)
+	e.loop.Builder = twoSectionBuilder{}
+	optimistic(e)
+	calls := new(int)
+	e.loop.Gates = func(ws forge.Workspace) []forge.Gate {
+		return []forge.Gate{scripted{label: "post-land", calls: calls, step: func(int) (forge.Verdict, error) {
+			return forge.Verdict{Gate: "post-land", Decision: forge.DecisionPass, Reason: "clean"}, nil
+		}}}
+	}
+	ctx := context.Background()
+
+	item := e.submit(t, "opt-1", nil)
+	item, err := e.loop.Run(ctx, item)
+	if err != nil || item.State != queue.StateDone {
+		t.Fatalf("run: %v %+v", err, item)
+	}
+
+	done := doneWorkItem(t, e, item.ID)
+	if want := []string{"api", "web"}; !slices.Equal(done.LandedSections, want) {
+		t.Fatalf("landed sections = %v, want %v", done.LandedSections, want)
 	}
 }

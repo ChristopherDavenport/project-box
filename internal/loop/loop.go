@@ -1333,6 +1333,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	// the same, because the promotion predicate reads only the check chain.
 	checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
 		checks.Status{Green: true, Lane: string(forge.LaneGated)}, l.Runner)
+	l.recordLanding(ctx, &item, ws, base, head)
 	item, err = q.Done(ctx, item, claim, head)
 	l.recordIssueClosed(ctx, item, cs, landing)
 	return l.settle(ctx, item), err
@@ -1557,6 +1558,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		item.KeepCandidate(head, base, nil)
 		return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
 	}
+	l.recordLanding(ctx, &item, ws, base, head)
 
 	var verdicts []forge.Verdict
 	var infra error
@@ -2708,6 +2710,63 @@ func missingSections(current, needed []string) []string {
 		missing = append(missing, s)
 	}
 	return missing
+}
+
+// unsectionedLanding names a changed path that no declared section covers —
+// recorded rather than dropped, so a repository with no declared sections,
+// or a change that strays from every one it declares, reads as a fact on
+// the chain instead of an empty [queue.WorkItem.LandedSections].
+const unsectionedLanding = "unsectioned"
+
+// landedSections maps a landing's changed paths onto the repository's
+// declared sections, mirroring the daemon's sectionOfPath
+// (internal/daemon/selfdeploy.go) over [forge.Section] rather than
+// boxcfg.Section. The result is sorted and deduplicated — the chain's
+// record of what a landing touched, not the order paths happened to change
+// in.
+func landedSections(changed []string, sections []forge.Section) []string {
+	seen := make(map[string]bool, len(changed))
+	var names []string
+	for _, p := range changed {
+		name, ok := sectionOfPath(p, sections)
+		if !ok {
+			name = unsectionedLanding
+		}
+		if !seen[name] {
+			seen[name] = true
+			names = append(names, name)
+		}
+	}
+	slices.Sort(names)
+	return names
+}
+
+// sectionOfPath answers the first declared section whose Paths cover path,
+// matched by prefix at a path-segment boundary: "internal/loop" matches
+// "internal/loop" and "internal/loop/x.go", never "internal/loopy".
+func sectionOfPath(changed string, sections []forge.Section) (string, bool) {
+	for _, s := range sections {
+		for _, p := range s.Paths {
+			if changed == p || strings.HasPrefix(changed, p+"/") {
+				return s.Name, true
+			}
+		}
+	}
+	return "", false
+}
+
+// recordLanding sets [queue.WorkItem.LandedSections] and LandedPaths from
+// the paths base..head actually changed, mapped through the repository's
+// declared sections. A [git.ChangedPaths] error leaves both fields unset:
+// a recording failure must not unsettle a landed change, and unknown never
+// reads as "touched nothing".
+func (l *Loop) recordLanding(ctx context.Context, item *queue.WorkItem, ws forge.Workspace, base, head forge.Commit) {
+	changed, err := git.ChangedPaths(ctx, ws.Dir, base, head)
+	if err != nil {
+		return
+	}
+	item.LandedPaths = changed
+	item.LandedSections = landedSections(changed, l.Repo.Sections)
 }
 
 // leaseSections takes the section leases a unit needs, in one order for every

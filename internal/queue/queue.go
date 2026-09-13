@@ -192,6 +192,19 @@ type WorkItem struct {
 	// section, so a unit that names none and a unit that names one can
 	// never run at once.
 	Sections []string `json:"sections,omitempty"`
+	// LandedSections names the declared sections the landing actually
+	// touched, computed from the changed paths at Done — never from
+	// Sections, which is what the unit HELD, not what it TOUCHED. A changed
+	// path outside every declared section adds "unsectioned" rather than
+	// nothing, so a repository with no declared sections, or a change that
+	// strays from its own, is recorded rather than silently matching
+	// nothing. Unset (rather than empty) when the changed paths could not be
+	// computed: unknown never reads as "touched nothing".
+	LandedSections []string `json:"landed_sections,omitempty"`
+	// LandedPaths is the changed paths a landing produced, the input
+	// [LandedSections] was mapped from. Unset alongside it when the change
+	// could not be computed.
+	LandedPaths []string `json:"landed_paths,omitempty"`
 	// Model is the tier the plan chose for this unit, when it chose one;
 	// empty inherits the section's, then the role's, then the box's.
 	Model string `json:"model,omitempty"`
