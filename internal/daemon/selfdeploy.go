@@ -34,6 +34,15 @@ const selfDeployRun = "self-deploy"
 // the clock.
 const selfDeployTTL = 30 * time.Minute
 
+// Kinds recorded on selfDeployScope. Named rather than inlined at each call
+// site so [Daemon.selfDeployRefused] and the room's fold (internal/control)
+// name the exact same strings a typo in an inline literal could silently
+// drift from.
+const (
+	kindSelfDeployed      = "self-deployed"
+	kindSelfDeployRefused = "self-deploy-refused"
+)
+
 // ErrSelfDeployed is Run's sentinel: the chore replaced the binary on disk
 // and the process needs to re-exec. Run returns it so its own deferred
 // httpSrv.Shutdown still runs; the caller (cmd/boxd) is the one that closes
@@ -150,7 +159,11 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 	if string(head) == build.Commit {
 		return nil // the common case: already running what the branch names
 	}
-	if d.selfDeploy.isRefused(head) {
+	refused, err := d.selfDeployRefused(ctx, head)
+	if err != nil {
+		return fmt.Errorf("box %s: checking refusal history: %w", t.box, err)
+	}
+	if refused {
 		return nil // already tried this commit; the refusal is on the chain
 	}
 
@@ -192,10 +205,10 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 		return nil
 	}
 
-	if err := d.selfDeployBuild(ctx, t, repo, head); err != nil {
+	if err := d.selfDeployBuild(ctx, t, repo, head, why); err != nil {
 		d.selfDeploy.refuse(head)
 		if _, aerr := d.store.Log().Append(ctx, evidence.Record{
-			Tenant: d.tenant, Scope: selfDeployScope, Kind: "self-deploy-refused",
+			Tenant: d.tenant, Scope: selfDeployScope, Kind: kindSelfDeployRefused,
 			Subject: string(head), Actor: d.cfgRunner(), Body: []byte(err.Error()),
 		}); aerr != nil {
 			slog.Error("self-deploy: recording refusal", "box", t.box, "err", aerr)
@@ -208,7 +221,7 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 	}
 
 	if _, err := d.store.Log().Append(ctx, evidence.Record{
-		Tenant: d.tenant, Scope: selfDeployScope, Kind: "self-deployed",
+		Tenant: d.tenant, Scope: selfDeployScope, Kind: kindSelfDeployed,
 		Subject: string(head), Actor: d.cfgRunner(), Body: []byte(why),
 	}); err != nil {
 		slog.Error("self-deploy: recording success", "box", t.box, "err", err)
@@ -219,11 +232,47 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 	return fmt.Errorf("%w: %s", ErrSelfDeployed, head)
 }
 
+// selfDeployRefused reports whether head has already been decided against,
+// either in this process's own memory or, durably, on the chain: the
+// standing record [Daemon.recordRolledBack] or a refusal in selfDeployOne
+// itself already wrote. The chain read matters most exactly when the
+// in-memory map cannot: a binary [RecoverFromFailedStart] just restored
+// boots with an empty refused map, and without this a bad head that has not
+// moved would be retried every housekeeping pass, forever.
+func (d *Daemon) selfDeployRefused(ctx context.Context, head forge.Commit) (bool, error) {
+	if d.selfDeploy.isRefused(head) {
+		return true, nil
+	}
+	var latest evidence.Record
+	for rec, err := range d.store.Log().BySubject(ctx, d.tenant, string(head)) {
+		if err != nil {
+			return false, err
+		}
+		if rec.Scope != selfDeployScope {
+			continue
+		}
+		if latest.Seq == 0 || rec.Seq > latest.Seq {
+			latest = rec
+		}
+	}
+	refused := latest.Kind == kindSelfDeployRefused || latest.Kind == kindSelfDeployRolledBack
+	if refused {
+		d.selfDeploy.refuse(head)
+	}
+	return refused, nil
+}
+
 // selfDeployBuild checks out the target commit, runs the repo's own check in
 // that tree, and — only if it passes — builds the daemon binary and installs
 // it over the running executable's path. Any failure here is a refusal:
 // the running binary is never touched.
-func (d *Daemon) selfDeployBuild(ctx context.Context, t selfDeployTarget, repo forge.Repo, at forge.Commit) error {
+//
+// Before the install rename, it preserves the running executable as
+// exe+".prev" and writes a marker naming the head it is about to install —
+// [Daemon.resolveSelfDeployMarker] is what tells "I was just self-deployed"
+// from an ordinary start, and [RecoverFromFailedStart] is what a process
+// that never gets that far falls back to.
+func (d *Daemon) selfDeployBuild(ctx context.Context, t selfDeployTarget, repo forge.Repo, at forge.Commit, why string) error {
 	leaser := d.store.Leaser(d.cfgRunner())
 	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
 		Tenant: d.tenant, Repo: repo.Name, Ref: "run/" + selfDeployRun, Run: selfDeployRun, TTL: selfDeployTTL,
@@ -254,6 +303,16 @@ func (d *Daemon) selfDeployBuild(ctx context.Context, t selfDeployTarget, repo f
 	out, err := build.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("build failed: %w: %s", err, firstLine(string(out)))
+	}
+	// Preserve what is running now and say what is about to replace it —
+	// both before the install, so a refusal here (nothing written yet) still
+	// leaves the running binary untouched, same as every earlier refusal in
+	// this function.
+	if err := preserveRunning(exe); err != nil {
+		return fmt.Errorf("preserving the running binary: %w", err)
+	}
+	if err := writeSelfDeployMarker(d.stateRoot(), selfDeployMarker{Head: string(at), Reason: why, At: time.Now()}); err != nil {
+		return fmt.Errorf("writing self-deploy marker: %w", err)
 	}
 	// Rename, never a write in place: Linux keeps the old inode open under
 	// this process's own mapped pages, so the daemon serving right now is

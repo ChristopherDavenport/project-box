@@ -417,7 +417,7 @@ func TestSelfDeploySettlesBeforeCheckingAndSucceeds(t *testing.T) {
 	cfgPath := filepath.Join(dir, "box.yaml")
 	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
 	workRem := bare(t, "work")
-	appRem, _ := deployRepo(t, "app", validBoxdMain)
+	appRem, appHead := deployRepo(t, "app", validBoxdMain)
 	started := filepath.Join(dir, "started")
 	checked := filepath.Join(dir, "checked")
 	slowBuild := fmt.Sprintf("touch %s && sleep 0.4 && echo done > out.txt && git add -A && git -c user.name=b -c user.email=b@i commit -m work", started)
@@ -430,6 +430,9 @@ func TestSelfDeploySettlesBeforeCheckingAndSucceeds(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	d.build = func() version.Build { return version.Build{Commit: fakeBuildCommit, Known: true} }
 	exe := filepath.Join(dir, "boxd-exe")
+	if err := os.WriteFile(exe, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	d.exePath = func() (string, error) { return exe, nil }
 
 	ts := httptest.NewServer(d.API.Handler())
@@ -467,6 +470,25 @@ func TestSelfDeploySettlesBeforeCheckingAndSucceeds(t *testing.T) {
 
 	if _, serr := os.Stat(exe); serr != nil {
 		t.Fatalf("the new binary was never installed: %v", serr)
+	}
+
+	prev, perr := os.ReadFile(exe + ".prev")
+	if perr != nil {
+		t.Fatalf("the running binary was not preserved as .prev: %v", perr)
+	}
+	if string(prev) != "old binary" {
+		t.Fatalf(".prev = %q, want the binary that was running before install", prev)
+	}
+
+	marker, ok, merr := readSelfDeployMarker(root)
+	if merr != nil {
+		t.Fatalf("reading self-deploy marker: %v", merr)
+	}
+	if !ok {
+		t.Fatal("no self-deploy marker written for the installed head")
+	}
+	if marker.Head != string(appHead) {
+		t.Fatalf("marker head = %q, want %q", marker.Head, appHead)
 	}
 
 	kinds := selfDeployChain(t, d, ctx)

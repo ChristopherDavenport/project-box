@@ -785,6 +785,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The listener is bound: this process has come up. A marker left by a
+	// self-deploy that installed THIS binary is settled here, on the one
+	// path [RecoverFromFailedStart] never reaches — that seam only runs when
+	// startup fails before this point, and this only runs when it does not.
+	d.resolveSelfDeployMarker(ctx)
 	httpSrv := &http.Server{Handler: d.API.Handler()}
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {

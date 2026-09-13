@@ -139,6 +139,22 @@ func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
 			continue
 		}
 		seen[rec.Subject] = true
+		if head, ok := strings.CutPrefix(rec.Subject, selfDeploySubjectPrefix); ok {
+			// A self-deploy that installed but never came up — see
+			// internal/daemon's rollback marker, the only writer of this
+			// subject shape. Folded from the standing control/self-deploy
+			// chain rather than this index record's own body, so the item
+			// drops out the moment a later record for the same head
+			// supersedes the rollback.
+			ex, live, err := r.selfDeployException(ctx, head, now, objective, told)
+			if err != nil {
+				return nil, err
+			}
+			if live {
+				out = append(out, ex)
+			}
+			continue
+		}
 		if ingress.IsID(rec.Subject) {
 			// An origination whose judgement failed before it had any item.
 			// Listed like an item — same columns, same verbs — because to
@@ -823,4 +839,70 @@ func (r *Room) failedPlan(ctx context.Context, id string, now time.Time, objecti
 		Escalations: countAfter(told[id], st.At),
 		Overdue:     age >= objective,
 	}, true, nil
+}
+
+// selfDeploySubjectPrefix marks an index/exceptions record as a self-deploy
+// rollback rather than an ingress origination or a work item. The value is
+// duplicated from internal/daemon rather than imported — daemon already
+// imports control, so the reverse would cycle — the same informal sharing
+// "index/exceptions" and "control/self-deploy" already get across the two
+// packages.
+const selfDeploySubjectPrefix = "self-deploy/"
+
+// selfDeployScope and selfDeployRolledBackKind name the chain
+// internal/daemon's self-deploy chore writes to and the kind it uses for a
+// head that was installed but never came up — duplicated for the same
+// reason as selfDeploySubjectPrefix above.
+const (
+	selfDeployScope          = "control/self-deploy"
+	selfDeployRolledBackKind = "self-deploy-rolled-back"
+)
+
+// selfDeployException folds one rollback into the exception shape the room
+// already renders, reading the standing control/self-deploy chain for head
+// rather than trusting the index record's own body — so the item drops out
+// the moment a later record for the same head (a fixed build, redeployed)
+// supersedes the rollback, exactly like a work item that moved past parked.
+//
+// The synthetic id this produces is not a work item: [Room]'s Resolve verb
+// (driven through [queue.Queue.Resolve] by id) will error looking it up.
+// That is acceptable for now — nothing routes a resolve at a self-deploy
+// exception yet.
+func (r *Room) selfDeployException(ctx context.Context, head string, now time.Time, objective time.Duration, told map[string][]time.Time) (Exception, bool, error) {
+	var latest evidence.Record
+	for rec, err := range r.Store.Log().BySubject(ctx, r.Tenant, head) {
+		if err != nil {
+			return Exception{}, false, err
+		}
+		if rec.Scope != selfDeployScope {
+			continue
+		}
+		if latest.Seq == 0 || rec.Seq > latest.Seq {
+			latest = rec
+		}
+	}
+	if latest.Kind != selfDeployRolledBackKind {
+		return Exception{}, false, nil
+	}
+	subject := selfDeploySubjectPrefix + head
+	age := now.Sub(latest.At)
+	return Exception{
+		WorkItem: queue.WorkItem{
+			ID: selfDeploySubjectPrefix + shortCommit(head), Tenant: r.Tenant,
+			Kind: "self-deploy", State: queue.StateParked,
+			Note: string(latest.Body), Severity: queue.SeverityHigh,
+		},
+		Parked: latest.At, AgeSec: int64(age.Seconds()),
+		Escalations: countAfter(told[subject], latest.At),
+		Overdue:     age >= objective,
+	}, true, nil
+}
+
+// shortCommit renders a commit for the synthetic exception id: distinct
+// enough to eyeball, at a fraction of the width.
+func shortCommit(c string) string {
+	if len(c) > 12 {
+		return c[:12]
+	}
+	return c
 }
