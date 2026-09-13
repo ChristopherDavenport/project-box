@@ -1618,14 +1618,25 @@ func interlopeMsg(t *testing.T, remote, file, body, msg string) {
 	mustSh(t, other, "git", "push", "origin", "HEAD:refs/heads/main")
 }
 
-// TestRebaseBoundParkNamesTheLandingsThatMovedTheBranch extends issue #95's
-// bound (TestRebaseCounterOverItsBoundParksInsteadOfChasingTheBranch): the
-// park note must not just say a count and a budget, it must name the
-// landings that moved the branch while this candidate sat waiting — the
-// range between the base it was last kept against and the base it would
-// have rebased onto next. An operator retrying blind, with no idea what
-// landed underneath the parked candidate, is exactly the gap this closes.
-func TestRebaseBoundParkNamesTheLandingsThatMovedTheBranch(t *testing.T) {
+// TestRebaseBoundParkKeepsTheTreeAndNotesWhenLandingsCannotBeListed extends
+// issue #95's bound (TestRebaseCounterOverItsBoundParksInsteadOfChasingTheBranch)
+// with the finding from this unit's review of an earlier attempt: naming the
+// landings that moved the branch must never cost the resume point it is
+// naming them beside. That attempt listed them by checking out the new base
+// fresh — which destroys a leftover tree by design (git.go's Checkout doc
+// comment) — so the workspace holding item.Built was gone before ParkKeeping
+// ever recorded it as the resume point, and a retry found nothing to adopt.
+//
+// The bound is what stops this claim short of calling git.Rebase, the one
+// place that fetches, so the adopted workspace on disk cannot actually
+// contain the very landing that tripped the bound — it was only just
+// discovered by the mirror's own fetch, this same tick. Reading the range
+// from that workspace as it stands is therefore expected to fail here, and
+// this test is exactly that: the note says the landings could not be listed
+// (unknown never reads as zero, and an error must never read as "nothing
+// landed"), and the kept commit is still present in the workspace afterward
+// — nothing was checked out over it.
+func TestRebaseBoundParkKeepsTheTreeAndNotesWhenLandingsCannotBeListed(t *testing.T) {
 	e := setup(t, []string{"true"}) // Attempts: 1, so the bound is one rebase
 	ctx := context.Background()
 	approved := false // never answers: every tick stays pending
@@ -1658,9 +1669,8 @@ func TestRebaseBoundParkNamesTheLandingsThatMovedTheBranch(t *testing.T) {
 	if item.State != queue.StateWaiting {
 		t.Fatalf("expected still waiting after the first rebase, got %s (%s)", item.State, item.Note)
 	}
+	keptCommit := item.Built
 
-	// This is the landing between the rebased-onto base and the next one —
-	// the range the park note below must name.
 	interlopeMsg(t, e.remote, "far2.txt", "moved twice\n", "landing the second fix")
 	loaded, _ = q.Load(ctx, tn, "wi-carry-f")
 	item, err = e.loop.Run(ctx, loaded)
@@ -1670,11 +1680,62 @@ func TestRebaseBoundParkNamesTheLandingsThatMovedTheBranch(t *testing.T) {
 	if item.State != queue.StateParked {
 		t.Fatalf("expected the second rebase to park at the bound, got %s (%s)", item.State, item.Note)
 	}
-	if !strings.Contains(item.Note, "landing the second fix") {
-		t.Fatalf("park note should name the landing that moved the branch past the bound: %q", item.Note)
+	if !strings.Contains(item.Note, "the landings that moved the branch could not be listed") {
+		t.Fatalf("park note should say the landings could not be listed, not stay silent about it: %q", item.Note)
 	}
-	if strings.Contains(item.Note, "landing the first fix") {
-		t.Fatalf("park note should only name landings since the last kept base, not the whole history: %q", item.Note)
+	if item.Built != keptCommit {
+		t.Fatalf("parking at the bound should keep the last rebased commit as the resume point: got %q, want %q", item.Built, keptCommit)
+	}
+	ws, ok := e.loop.Mirror.HeldWorkspace(item.ID, e.repo.Name, "")
+	if !ok {
+		t.Fatalf("workspace for %s missing after the park", item.ID)
+	}
+	if _, err := sh(ws.Dir, "git", "cat-file", "-e", keptCommit); err != nil {
+		t.Fatalf("kept commit %s no longer present in the workspace — the resume point was destroyed: %v", keptCommit, err)
+	}
+}
+
+// TestLandingsClauseNamesShasAndSubjectsWhenTheWorkspaceHasThem is the other
+// side of the test above: when the range IS present in the given directory —
+// which happens whenever a workspace's own git already holds both ends, as
+// opposed to the common case the loop-level test covers — the note names
+// each landing's short sha and subject, newest first, exactly as git.Commits
+// returns them.
+func TestLandingsClauseNamesShasAndSubjectsWhenTheWorkspaceHasThem(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustSh(t, dir, "git", "init")
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSh(t, dir, "git", "add", ".")
+	mustSh(t, dir, "git", "commit", "-m", "base")
+	from := forge.Commit(strings.TrimSpace(mustSh(t, dir, "git", "rev-parse", "HEAD")))
+
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nfirst\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSh(t, dir, "git", "commit", "-am", "landing the first fix")
+	if err := os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nfirst\nsecond\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSh(t, dir, "git", "commit", "-am", "landing the second fix")
+	to := forge.Commit(strings.TrimSpace(mustSh(t, dir, "git", "rev-parse", "HEAD")))
+	firstSha := strings.TrimSpace(mustSh(t, dir, "git", "rev-parse", "--short", "HEAD~1"))
+	secondSha := strings.TrimSpace(mustSh(t, dir, "git", "rev-parse", "--short", "HEAD"))
+
+	l := &Loop{}
+	got := l.landingsClause(ctx, dir, from, to)
+	for _, want := range []string{
+		firstSha, "landing the first fix",
+		secondSha, "landing the second fix",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("landingsClause = %q, want it to contain %q", got, want)
+		}
+	}
+	if strings.Index(got, secondSha) > strings.Index(got, firstSha) {
+		t.Fatalf("landingsClause = %q, want the second (newer) landing listed before the first", got)
 	}
 }
 

@@ -612,7 +612,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 				note := fmt.Sprintf(
 					"rebased onto a moving branch %d times, at the attempt budget of %d — parking rather than chasing it again",
 					item.RebaseCount, budget)
-				return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, note+l.landingsClause(ctx, wsLease, forge.Commit(item.BuiltBase), base))
+				return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, note+l.landingsClause(ctx, adopted.Dir, forge.Commit(item.BuiltBase), base))
 			}
 			// The OLD patch-id, read while item.Built is still HEAD in this
 			// tree and its objects are certainly reachable: git.Rebase is
@@ -1716,18 +1716,16 @@ const maxLandingsListed = 10
 // that errors is never silence: unknown never reads as zero, so the note
 // says the landings could not be listed rather than implying none did.
 //
-// It checks out `to` fresh rather than reading the adopted workspace as it
-// stands: Adopt only reattaches to a leftover tree, and the one place this
-// clause is called is exactly the one that never calls Rebase — the bound
-// is what stopped it — so that tree may hold nothing past the base it was
-// last kept against. A fresh checkout comes straight from the mirror, which
-// Fetch has already advanced, and carries the whole range by construction.
-func (l *Loop) landingsClause(ctx context.Context, wsLease forge.Lease, from, to forge.Commit) string {
-	ws, err := l.Mirror.Checkout(ctx, wsLease, to)
-	if err != nil {
-		return "; the landings that moved the branch could not be listed: " + err.Error()
-	}
-	commits, err := git.Commits(ctx, ws.Dir, from, to)
+// It reads the adopted workspace exactly as it stands, at dir — never
+// Checkout, which destroys a leftover tree on purpose (git.go's doc comment
+// on Checkout says so) and would take the very tree ParkKeeping is about to
+// record as the resume point out from under it, before it is recorded. The
+// bound is what stopped this claim short of calling Rebase, the one place
+// that fetches, so dir will often lack the objects past the base it was
+// last kept against; that is exactly the case the error branch below is
+// for, and it must never block the park on that account.
+func (l *Loop) landingsClause(ctx context.Context, dir string, from, to forge.Commit) string {
+	commits, err := git.Commits(ctx, dir, from, to)
 	switch {
 	case err != nil:
 		return "; the landings that moved the branch could not be listed: " + err.Error()
