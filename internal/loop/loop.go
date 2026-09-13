@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"regexp"
 	"slices"
@@ -498,13 +499,24 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	// under, the claim Checkout renews, and what lets Prune reap the trees of
 	// a runner that died. It is keyed by run, so nothing contends for it —
 	// which is the point: it protects a tree, and trees were never shared.
-	wsLease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+	wsReq := forge.LeaseRequest{
 		Tenant: item.Tenant, Repo: l.Repo.Name, Ref: "run/" + item.ID, Run: item.ID, TTL: l.TTL,
-	})
+	}
+	wsLease, err := leaser.Acquire(ctx, wsReq)
+	if errors.Is(err, forge.ErrHeld) {
+		// Keyed by this item's own ID, so the only holder that can ever
+		// exist here is a leaked grant of this same item's earlier attempt
+		// — reapGhost's self-leak case.
+		if fresh, _, note, ok := l.reapGhost(ctx, item, wsReq); ok {
+			wsLease, err = fresh, nil
+		} else if note != "" {
+			return q.Wait(ctx, item, claim, fmt.Sprintf("workspace for %s is %s", item.ID, note))
+		}
+	}
 	if err != nil {
 		return q.Wait(ctx, item, claim, fmt.Sprintf("workspace for %s is leased: %v", item.ID, err))
 	}
-	defer leaser.Release(ctx, wsLease)
+	defer l.release(ctx, wsLease, item.ID)
 
 	if err := l.Mirror.Fetch(ctx, l.Repo); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
@@ -1075,7 +1087,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		item.KeepCandidate(head, base, passedNow)
 		return q.Wait(ctx, item, claim, notOurTurn)
 	}
-	defer leaser.Release(ctx, landLease)
+	defer l.release(ctx, landLease, item.ID)
 	cs.Members[0].Lease = landLease
 	var landing forge.Landing
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
@@ -1171,25 +1183,36 @@ func (l *Loop) recordIssueClosed(ctx context.Context, item queue.WorkItem, cs fo
 func (l *Loop) openLandWindow(ctx context.Context, item queue.WorkItem, base forge.Commit) (forge.Lease, string, error) {
 	leaser := l.Store.Leaser(l.Runner)
 	ref := "refs/heads/" + l.Branch
-	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+	req := forge.LeaseRequest{
 		Tenant: item.Tenant, Repo: l.Repo.Name, Ref: ref, Run: item.ID, TTL: l.TTL,
-	})
+	}
+	lease, err := leaser.Acquire(ctx, req)
+	if errors.Is(err, forge.ErrHeld) {
+		// Same rule as leaseSections: a branch lease is only ever a ghost
+		// when it is this item's own leaked land-window grant, or when its
+		// holder's run is no longer claimed — see reapGhost.
+		if fresh, _, note, ok := l.reapGhost(ctx, item, req); ok {
+			lease, err = fresh, nil
+		} else if note != "" {
+			return forge.Lease{}, fmt.Sprintf("branch %s is %s", l.Branch, note), nil
+		}
+	}
 	if err != nil {
 		return forge.Lease{}, fmt.Sprintf("branch %s is landing another change: %v", l.Branch, err), nil
 	}
 	// The mirror's own ref does not move when the lander pushes, so it has to
 	// be asked again before it can be trusted as the expected old value.
 	if err := l.Mirror.Fetch(ctx, l.Repo); err != nil {
-		leaser.Release(ctx, lease)
+		l.release(ctx, lease, item.ID)
 		return forge.Lease{}, "", err
 	}
 	now, err := l.Mirror.Resolve(ctx, l.Repo, ref)
 	if err != nil {
-		leaser.Release(ctx, lease)
+		l.release(ctx, lease, item.ID)
 		return forge.Lease{}, "", err
 	}
 	if now != base {
-		leaser.Release(ctx, lease)
+		l.release(ctx, lease, item.ID)
 		return forge.Lease{}, fmt.Sprintf("branch %s moved from %s to %s while this change was building",
 			l.Branch, short(base), short(now)), nil
 	}
@@ -1298,7 +1321,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		item.KeepCandidate(head, base, nil)
 		return q.Wait(ctx, item, claim, notOurTurn)
 	}
-	defer l.Store.Leaser(l.Runner).Release(ctx, landLease)
+	defer l.release(ctx, landLease, item.ID)
 	cs.Members[0].Lease = landLease
 	var landing forge.Landing
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
@@ -1998,6 +2021,111 @@ func indexByte(s string, b byte) int {
 // SectionRef is the lease ref a section of a repository is held under.
 func SectionRef(name string) string { return "section/" + name }
 
+// releaseTimeout bounds a detached release: long enough for a healthy store
+// to answer, short enough that a dead one does not hang a claim that is
+// already on its way out.
+const releaseTimeout = 5 * time.Second
+
+// release drops a lease a claim owes — every one of them, whether the claim
+// finished, parked, or is unwinding after an error — under a context immune
+// to the stage's own cancellation or deadline. context.WithoutCancel(ctx)
+// keeps the ctx's values (telemetry, tenant) while detaching cancellation,
+// because a release lost to a ctx that died with the stage is exactly the
+// ghost-lease incident this exists to close (issue #162): three units
+// parked at a GitHub 500 and every lease they held sat at claim-time+TTL,
+// never released, because nothing ran the release under a context immune to
+// the stage's own death. A release that fails is logged, never swallowed —
+// the ref and the run it belonged to are what an operator needs to find it
+// by hand, and reapGhost is the other half that recovers when logging
+// was not enough.
+func (l *Loop) release(ctx context.Context, lease forge.Lease, run string) {
+	rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	if err := l.Store.Leaser(l.Runner).Release(rctx, lease); err != nil {
+		slog.ErrorContext(ctx, "loop: lease release failed", "ref", lease.Ref, "run", run, "err", err)
+	}
+}
+
+// reapGhost is called right after an Acquire on req has returned
+// [forge.ErrHeld]. It inspects the current holder and, when that holder is
+// provably not running, frees the lease and re-Acquires once so the caller
+// can proceed in the same tick instead of waiting out a TTL on a run that
+// will never renew it (issue #162's dogfood-launcher starving on exactly
+// that).
+//
+// A holder is provably gone in exactly two cases: its Run is req.Run
+// itself — this item's own leaked earlier attempt, since the retry never
+// inherits a lease from the attempt that parked — or a queue.Load of its
+// Run reports a state other than [queue.StateClaimed] (parked, pending,
+// waiting, done, failed, resolved, handedoff: none of those is a run in
+// flight, so nothing is protected). Anything else — Inspect erroring,
+// queue.Load erroring, or a holder genuinely [queue.StateClaimed] — leaves
+// the lease exactly as held: unknown never reads as zero, and a reap must
+// never happen on a lease nobody proved abandoned.
+//
+// Safety: sqlite's Release is token-guarded (matches token AND held=1, a
+// no-op otherwise) and any concurrent re-acquire bumps the token, so this
+// can never drop a lease its holder just retook; and because a reap always
+// ends in a fresh Acquire, [forge.Leaser.Inspect]'s contract — "those still
+// Acquire, because... only the acquisition settles it" — is honored rather
+// than second-guessed.
+//
+// holder names whoever Inspect found, live or ghost, so a caller whose reap
+// did not happen can still build today's plain busy message. note is set
+// only once a ghost was identified and acted on, naming the holder, that it
+// is not running, and whether the release that was meant to free it
+// succeeded. ok reports whether req is held under a fresh lease when this
+// returns.
+func (l *Loop) reapGhost(ctx context.Context, item queue.WorkItem, req forge.LeaseRequest) (lease forge.Lease, holder, note string, ok bool) {
+	leaser := l.Store.Leaser(l.Runner)
+	cur, found, err := leaser.Inspect(ctx, item.Tenant, req.Repo, req.Ref)
+	if err != nil || !found {
+		return forge.Lease{}, "", "", false
+	}
+	holder = cur.Run
+
+	var state string
+	if cur.Run == req.Run {
+		// A grant this same item already holds, surviving a lost release
+		// (restart, a cancelled ctx) — a leak, not a live claim to
+		// disqualify by state, since this run's own item is claimed right
+		// now, by definition, in the caller that is asking.
+		state = "self-leak"
+	} else {
+		q := &queue.Queue{Store: l.Store, Runner: l.Runner, TTL: l.TTL}
+		w, lerr := q.Load(ctx, item.Tenant, cur.Run)
+		if lerr != nil {
+			return forge.Lease{}, holder, "", false
+		}
+		if w.State == queue.StateClaimed {
+			return forge.Lease{}, holder, "", false
+		}
+		state = string(w.State)
+	}
+
+	note = fmt.Sprintf("held by %s, which is not running", cur.Run)
+	if relErr := leaser.Release(ctx, cur); relErr != nil {
+		note += fmt.Sprintf("; release failed: %v", relErr)
+		slog.ErrorContext(ctx, "loop: ghost lease release failed",
+			"ref", req.Ref, "ghost_run", cur.Run, "state", state, "run", item.ID, "err", relErr)
+		return forge.Lease{}, holder, note, false
+	}
+	note += "; released"
+	body, _ := json.Marshal(struct {
+		Ref      string `json:"ref"`
+		GhostRun string `json:"ghost_run"`
+		State    string `json:"state"`
+		ReapedBy string `json:"reaped_by"`
+	}{req.Ref, cur.Run, state, item.ID})
+	l.record(ctx, item, "lease-reaped", req.Ref, string(body))
+
+	fresh, aerr := leaser.Acquire(ctx, req)
+	if aerr != nil {
+		return forge.Lease{}, holder, note, false
+	}
+	return fresh, holder, note, true
+}
+
 // HoldsSection reports whether item's own run already holds any section
 // lease it would need to proceed — an in-flight rebase, re-gate, or push
 // still finishing, or a stale grant surviving a lost release (restart,
@@ -2064,51 +2192,44 @@ func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release 
 	release = func() {
 		// Released under a context that survives this claim's cancellation:
 		// a release lost to a cancelled ctx (restart, deadline) is exactly
-		// the stale-grant state the self-takeover below exists to recover
-		// from, so closing that gap at the source is worth the belt and
-		// suspenders.
-		rctx := context.WithoutCancel(ctx)
+		// the ghost-lease state reapGhost exists to recover from, so closing
+		// that gap at the source is worth the belt and suspenders. See
+		// [Loop.release].
 		for _, h := range held {
-			leaser.Release(rctx, h)
+			l.release(ctx, h, item.ID)
 		}
 	}
 	for _, n := range names {
-		lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+		req := forge.LeaseRequest{
 			Tenant: item.Tenant, Repo: l.Repo.Name, Ref: SectionRef(n), Run: item.ID, TTL: l.TTL,
-		})
+		}
+		lease, err := leaser.Acquire(ctx, req)
 		if errors.Is(err, forge.ErrHeld) {
-			cur, ok, ierr := leaser.Inspect(ctx, item.Tenant, l.Repo.Name, SectionRef(n))
-			if ierr == nil && ok && cur.Run == item.ID {
-				// The sqlite leaser refuses a same-run re-acquire by design
-				// (sqlite.go), so ErrHeld naming this item's own run means the
-				// grant is this run's own, surviving a lost release rather
-				// than another unit's claim. A unit must never wait on
-				// itself — a re-claim that only finishes a landing on
-				// leases it already holds (rebase, re-gate, push) must never
-				// be told busy. Preempt takes the grant over rather than
-				// waiting on it; this is not breaking a holder's lease out
-				// from under it, since the holder and the taker are the same
-				// run.
-				taken, perr := leaser.Preempt(ctx, forge.LeaseRequest{
-					Tenant: item.Tenant, Repo: l.Repo.Name, Ref: SectionRef(n), Run: item.ID, TTL: l.TTL,
-				})
-				if perr != nil {
-					release()
-					return nil, "", perr
-				}
-				held = append(held, taken)
+			// This item's own leaked grant (a lost release surviving a
+			// restart or a cancelled ctx) and a section genuinely held by a
+			// run that is no longer claimed are the same fact — nobody is
+			// protected by waiting — so reapGhost covers both: the retry
+			// never inherits a lease from the attempt that parked, and the
+			// fairness head never waits out a TTL on a run that will never
+			// renew it (issue #162).
+			fresh, holder, note, ok := l.reapGhost(ctx, item, req)
+			if ok {
+				held = append(held, fresh)
 				continue
 			}
-			holder := ""
-			if ierr == nil && ok {
-				holder = " by " + cur.Run
-			}
 			release()
-			note := fmt.Sprintf("section %s of %s is held%s", n, l.Repo.Name, holder)
-			if item.SectionWaits > 0 {
-				note += fmt.Sprintf("; waited %d turns", item.SectionWaits)
+			reason := note
+			if reason == "" {
+				reason = "held"
+				if holder != "" {
+					reason += " by " + holder
+				}
 			}
-			return nil, note, nil
+			result := fmt.Sprintf("section %s of %s is %s", n, l.Repo.Name, reason)
+			if item.SectionWaits > 0 {
+				result += fmt.Sprintf("; waited %d turns", item.SectionWaits)
+			}
+			return nil, result, nil
 		}
 		if err != nil {
 			release()
