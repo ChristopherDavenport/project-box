@@ -38,6 +38,9 @@ func Items(ing ingress.Ingress, p Plan) []queue.WorkItem {
 			// does. A fanned-out repair gives every node the same predecessor,
 			// which is correct: they are all following the one attempt.
 			Prior: ing.Prior,
+			// The delivery key is the origination's, copied never derived;
+			// see loop.drivingIssue for the only reader that interprets it.
+			OriginKey: ing.Key,
 		})
 	}
 	return out
