@@ -2,6 +2,7 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"slices"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
@@ -222,10 +224,13 @@ func TestEscalationWidenNoneOrEmptyParksExactlyAsToday(t *testing.T) {
 	}
 }
 
-// TestEscalationWidenTestsNoPathsParks: a NeedsSections with no Paths is not
-// readable as test-only by omission — this repository's rule that unknown
-// never reads as zero — so it parks exactly as today, unwidened.
-func TestEscalationWidenTestsNoPathsParks(t *testing.T) {
+// TestEscalationWidenTestsNoPathsAsksThePlanner: a NeedsSections with no
+// Paths is not readable as test-only by omission — this repository's rule
+// that unknown never reads as zero — so it is not grantable in place. Every
+// named section is declared, though, so issue #182 part 2 routes it to the
+// planner rather than a person: no in-place widening, and a replan-requested
+// record rather than a park.
+func TestEscalationWidenTestsNoPathsAsksThePlanner(t *testing.T) {
 	e := widened(t)
 	e.loop.Widen = WidenTests
 	e.loop.Attempts = 2
@@ -241,13 +246,7 @@ func TestEscalationWidenTestsNoPathsParks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.State != queue.StateParked || !strings.Contains(item.Note, "escalated by mason") {
-		t.Fatalf("expected a park attributed to the seat, got %s: %s", item.State, item.Note)
-	}
-	if want := []string{"loop"}; !slices.Equal(item.Sections, want) {
-		t.Fatalf("sections widened anyway: %v", item.Sections)
-	}
-	assertNoPlanAmended(t, e, item.ID)
+	assertReplanRequested(t, e, item, []string{"agent"}, nil)
 }
 
 // TestEscalationWidenTestsUndeclaredSectionParks: a NeedsSections name the
@@ -279,11 +278,11 @@ func TestEscalationWidenTestsUndeclaredSectionParks(t *testing.T) {
 	assertNoPlanAmended(t, e, item.ID)
 }
 
-// TestEscalationWithANonTestPathParks: one path outside test shape means
-// the need is not provably test-files-only, so this parks exactly as today
-// — part 2 of issue #182 moves this case to the planner instead; this unit
-// only has to leave it parking.
-func TestEscalationWithANonTestPathParks(t *testing.T) {
+// TestEscalationWithANonTestPathAsksThePlanner: one path outside test shape
+// means the need is not provably test-files-only, so this is not grantable
+// in place either — issue #182 part 2 routes it to the planner instead of
+// parking it for a person.
+func TestEscalationWithANonTestPathAsksThePlanner(t *testing.T) {
 	e := widened(t)
 	e.loop.Widen = WidenTests
 	e.loop.Attempts = 2
@@ -300,13 +299,7 @@ func TestEscalationWithANonTestPathParks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.State != queue.StateParked || !strings.Contains(item.Note, "escalated by mason") {
-		t.Fatalf("expected a park attributed to the seat, got %s: %s", item.State, item.Note)
-	}
-	if want := []string{"loop"}; !slices.Equal(item.Sections, want) {
-		t.Fatalf("sections widened anyway: %v", item.Sections)
-	}
-	assertNoPlanAmended(t, e, item.ID)
+	assertReplanRequested(t, e, item, []string{"agent"}, []string{"internal/agent/foo.go"})
 }
 
 func assertNoPlanAmended(t *testing.T, e *env, id string) {
@@ -318,6 +311,76 @@ func assertNoPlanAmended(t *testing.T, e *env, id string) {
 		}
 		if r.Kind == "plan-amended" {
 			t.Fatalf("plan-amended record exists though the guard should have refused to widen: %s", r.Body)
+		}
+	}
+}
+
+// assertReplanRequested is issue #182 part 2's shape for a structured
+// escalation [widenAsksPlanner] answers: no in-place widening (Sections
+// untouched), a held wait rather than a park, and a "replan-requested"
+// record naming the escalation exactly — the pump's own half (part 3) is
+// what a fake [plan.Replanner] answers next, not this package's concern.
+func assertReplanRequested(t *testing.T, e *env, item queue.WorkItem, wantNeeds, wantPaths []string) {
+	t.Helper()
+	ctx := context.Background()
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected the item to wait on a replan rather than park, got %s: %s", item.State, item.Note)
+	}
+	if !item.AwaitingReplan {
+		t.Fatalf("item does not carry AwaitingReplan: %+v", item)
+	}
+	if !strings.Contains(item.Note, "awaiting replan") || !strings.Contains(item.Note, "escalated by mason") {
+		t.Fatalf("wait note does not name the replan or the seat's escalation: %q", item.Note)
+	}
+	if want := []string{"loop"}; !slices.Equal(item.Sections, want) {
+		t.Fatalf("sections widened despite going to the planner: %v", item.Sections)
+	}
+	var esc *plan.ReplanEscalation
+	for r, err := range e.store.Log().Since(ctx, tn, "workitem/"+item.ID, 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind != "replan-requested" {
+			continue
+		}
+		var parsed plan.ReplanEscalation
+		if uerr := json.Unmarshal(r.Body, &parsed); uerr != nil {
+			t.Fatalf("replan-requested record does not parse: %v (%s)", uerr, r.Body)
+		}
+		esc = &parsed
+	}
+	if esc == nil {
+		t.Fatalf("no replan-requested record on %s's chain", item.ID)
+	}
+	if !strings.Contains(esc.Reason, "escalated by mason") {
+		t.Fatalf("replan-requested reason does not name the seat: %q", esc.Reason)
+	}
+	if !slices.Equal(esc.NeedsSections, wantNeeds) {
+		t.Fatalf("replan-requested needs_sections = %v, want %v", esc.NeedsSections, wantNeeds)
+	}
+	if !slices.Equal(esc.Paths, wantPaths) {
+		t.Fatalf("replan-requested paths = %v, want %v", esc.Paths, wantPaths)
+	}
+	assertNoPlanAmended(t, e, item.ID)
+
+	found := false
+	for r, err := range e.store.Log().Since(ctx, tn, "index/replans", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Subject == item.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("index/replans does not list %s", item.ID)
+	}
+	for r, err := range e.store.Log().Since(ctx, tn, "index/exceptions", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Subject == item.ID {
+			t.Fatalf("a replan wait was indexed as an exception too: %+v", r)
 		}
 	}
 }

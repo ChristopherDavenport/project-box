@@ -332,6 +332,16 @@ type WorkItem struct {
 	// json:"-" tag keeps it off every record, since a hint that survived into
 	// the chain could be replayed onto a fold that never made the decision.
 	YieldTo string `json:"-"`
+	// AwaitingReplan marks a unit whose builder escalated for a need
+	// [loop.WidenTests] could not grant in place, waiting on
+	// [plan.Replanner] rather than a person (issue #182). State is
+	// [StateWaiting] the same as any other pending gate, but this bit is
+	// what tells the two apart: [Pump.Drain]'s candidate collection skips a
+	// unit carrying it — asking the planner is not a build to dispatch — and
+	// [Pump.Replan] is the separate step that folds it back in, the same
+	// way intake is separate from drain. Persists through record() marshaling
+	// the whole item, exactly as every other in-claim flag here does.
+	AwaitingReplan bool `json:"awaiting_replan,omitempty"`
 }
 
 // ErrStopped reports that the stop button is down: no new claims, tenant-wide,
@@ -383,6 +393,7 @@ var stateKinds = map[string]bool{
 	"resolved":  true,
 	"retried":   true,
 	"recovered": true,
+	"replanned": true,
 }
 
 // StateRecord reports whether a record kind carries the whole work item and
@@ -652,6 +663,42 @@ func (q *Queue) Wait(ctx context.Context, w WorkItem, lease forge.Lease, reason 
 	err := q.record(ctx, w, "waiting", w.ID, reason)
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
+}
+
+// AwaitReplan is [Queue.Wait] for one specific gate: a builder escalated for
+// a need [loop.WidenTests] could not grant in place, and this unit waits on
+// [plan.Replanner] rather than a person (issue #182). It keeps the resume
+// point exactly as Wait does, and it is deliberately NOT an exception: it
+// writes to "index/replans", never "index/exceptions", so a unit pacing on
+// the planner never shows up in the control room's exception listing the way
+// [Queue.Park] would have it. AwaitingReplan is what [Pump.Drain] reads to
+// skip it and [Pump.Replan] to find it — the same item, told apart from an
+// ordinary waiting gate by the one bit a "waiting" record alone could not
+// carry.
+func (q *Queue) AwaitReplan(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
+	w.AwaitingReplan = true
+	w, err := q.Wait(ctx, w, lease, "awaiting replan: "+reason)
+	if err != nil {
+		return w, err
+	}
+	return w, q.index(ctx, w.Tenant, "replans", w.ID, reason)
+}
+
+// AnswerReplan returns a unit [Queue.AwaitReplan] parked on the planner back
+// to a claimable state, once the planner has answered. It touches no resume
+// point — a replan answers WHERE and WHAT a unit works, never buys back a
+// build the way [Queue.Done] or a park's retry would — so whatever Built and
+// BuiltBase already said, the caller's amendments to Sections and Task
+// notwithstanding, rides through unchanged. The caller amends the item and
+// clears whatever else the answer changed before calling this; this only
+// turns the state back to pending and re-seeds the drain's index, the same
+// two things [Queue.Recover] does for a reclaimed claim.
+func (q *Queue) AnswerReplan(ctx context.Context, w WorkItem, note string) (WorkItem, error) {
+	w.State, w.Note, w.AwaitingReplan = StatePending, note, false
+	if err := q.record(ctx, w, "replanned", w.ID, note); err != nil {
+		return w, err
+	}
+	return w, q.index(ctx, w.Tenant, "pending", w.ID, note)
 }
 
 // HandOff ends a session without settling the item: the agent asked for a

@@ -849,7 +849,8 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 						Trace: telemetry.TraceID(ctx),
 					})
 					if attempt < budget {
-						if widened, ok := l.widenGrant(item, esc); ok {
+						switch widened, answer := l.widenGrant(item, esc); answer {
+						case widenGranted:
 							missing := missingSections(item.Sections, widened)
 							releaseExtra, busy, aerr := l.acquireSections(ctx, item, missing)
 							if aerr != nil {
@@ -887,6 +888,26 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 								return q.Fail(ctx, item, claim, fmt.Sprintf("retaining attempt %d of %d: %v", next, budget, rerr))
 							}
 							continue
+						case widenAsksPlanner:
+							// The need is named and every section it asks for is
+							// declared, but it cannot be proven test-files-only —
+							// production paths, or needs_sections with no paths
+							// at all. That is not a person's problem the way a
+							// free-text decline is: the decomposition itself may
+							// be wrong about where this unit works, and the
+							// planner is who can say. Recorded on the item's own
+							// chain, structured exactly as a grant's plan-amended
+							// record would have been, so a replan that lands
+							// later names what it is answering.
+							replanBody, _ := json.Marshal(plan.ReplanEscalation{
+								Reason: esc.Error(), NeedsSections: esc.NeedsSections, Paths: esc.Paths,
+							})
+							l.record(ctx, item, "replan-requested", item.ID, string(replanBody))
+							item, werr := q.AwaitReplan(ctx, item, claim, esc.Error())
+							if werr != nil {
+								return item, fmt.Errorf("loop: awaiting replan: %w", werr)
+							}
+							return l.settle(ctx, item), nil
 						}
 					}
 					// An agent declining is a considered act, not an emergency:
@@ -1715,8 +1736,9 @@ func (l *Loop) authorize(ctx context.Context, item queue.WorkItem, action authz.
 // Escalation is an agent declining or escalating instead of grinding: a
 // recorded act with the agent's own reason, not a contrived failure. The
 // loop parks the item with the reason attributed to the seat — unless
-// [Loop.Widen] says the need can be granted in-claim instead; see
-// [Loop.RunHolding].
+// [Loop.Widen] says the need can be granted in-claim instead, or the need is
+// named and declared but not provably test-only, in which case the loop asks
+// the planner instead of a person; see [Loop.RunHolding].
 type Escalation struct {
 	Seat   string
 	Reason string
@@ -2559,45 +2581,72 @@ func (l *Loop) TakeSections(ctx context.Context, item queue.WorkItem) (grant *Se
 	return &SectionGrant{release: release}, busy, err
 }
 
-// widenGrant decides whether esc may be granted in-claim under l.Widen and,
-// when it may, the sections item.Sections would become. It never leases
-// anything and never blocks — see the escalation branch in
-// [Loop.RunHolding] for what happens once this says yes.
+// widenAnswer is what [Loop.widenGrant] decided about a structured
+// escalation.
+type widenAnswer int
+
+const (
+	// widenParks means [Loop.RunHolding] leaves the escalation to park,
+	// unwidened — the wrong policy, a free-text escalation, an undeclared
+	// section, or an item with no Sections to widen from.
+	widenParks widenAnswer = iota
+	// widenGranted means the returned sections may be granted in-claim.
+	widenGranted
+	// widenAsksPlanner means [WidenTests] is in force and every named
+	// section is declared, but the need cannot be proven test-files-only —
+	// production paths, or needs_sections stated with no paths at all — so
+	// [Loop.RunHolding] asks the planner instead of parking (issue #182).
+	widenAsksPlanner
+)
+
+// widenGrant decides whether esc may be granted in-claim under l.Widen, or
+// failing that, whether it is a named-and-declared need the planner should
+// see rather than a person. It never leases anything and never blocks — see
+// the escalation branch in [Loop.RunHolding] for what happens with each
+// answer.
 //
 // An item with no Sections is already the whole repository — every section
 // it could ask for it already holds — so that is refused here rather than
 // read as "nothing to widen, proceed": [Loop.RunHolding] parks it exactly as
 // it always has.
-func (l *Loop) widenGrant(item queue.WorkItem, esc *Escalation) (sections []string, ok bool) {
+func (l *Loop) widenGrant(item queue.WorkItem, esc *Escalation) (sections []string, answer widenAnswer) {
 	if len(item.Sections) == 0 {
-		return nil, false
+		return nil, widenParks
 	}
-	// The policy and the shape of the ask: [WidenTests] only ever grants a
-	// need the agent named sections for AND named paths for. An escalation
-	// with needed sections but no paths is not test-only by omission — this
-	// repository's rule is that unknown never reads as zero — so it is
-	// refused here, not guessed at.
-	widen := l.Widen == WidenTests &&
-		len(esc.NeedsSections) > 0 &&
-		len(esc.Paths) > 0
-	if !widen {
-		return nil, false
+	// [WidenTests] is the only policy that ever widens or replans, and both
+	// require the agent to have named sections at all — a free-text
+	// escalation carries neither a grant nor a replan for the planner to
+	// answer, so it parks exactly as it always has.
+	if l.Widen != WidenTests || len(esc.NeedsSections) == 0 {
+		return nil, widenParks
 	}
 	for _, n := range esc.NeedsSections {
 		if _, ok := l.Repo.Section(n); !ok {
 			// The plan and the repository disagree about a section that
 			// does not exist here — parks exactly as a declared-but-busy
 			// miss elsewhere in this file does, not a hard error: nothing
-			// about the item is wrong, only what it asked for.
-			return nil, false
+			// about the item is wrong, only what it asked for. The planner
+			// cannot fix a name the repository never declared either, so
+			// this is not a replan candidate.
+			return nil, widenParks
 		}
+	}
+	// The shape of the ask: [WidenTests] only ever GRANTS a need the agent
+	// named paths for, every one of them test-only. An escalation with
+	// needed sections but no paths is not test-only by omission — this
+	// repository's rule is that unknown never reads as zero — and neither is
+	// one naming a path outside test shape. Both are provably not grantable
+	// in place, not merely unproven, so both go to the planner instead of a
+	// person (issue #182 part 2).
+	if len(esc.Paths) == 0 {
+		return nil, widenAsksPlanner
 	}
 	for _, p := range esc.Paths {
 		if !isTestOnlyPath(p) {
-			return nil, false
+			return nil, widenAsksPlanner
 		}
 	}
-	return unionSections(item.Sections, esc.NeedsSections), true
+	return unionSections(item.Sections, esc.NeedsSections), widenGranted
 }
 
 // isTestOnlyPath reports whether p can only ever be test surface: it ends in

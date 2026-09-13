@@ -11,12 +11,15 @@ package pump
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
+	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/kind"
@@ -67,6 +70,13 @@ type Pump struct {
 	Kinds       kind.Sets
 	Decomposers *plan.Registry
 	Plans       *plan.Store
+	// Replanner asks the planner to revise a unit whose builder escalation
+	// [loop.WidenTests] could not grant in place — see [plan.Replanner] and
+	// issue #182. Nil-safe: a nil Replanner means [Pump.Replan] parks a
+	// unit awaiting one as an exception, exactly as an unwidenable
+	// escalation always has, so a Box with no planner configured sees
+	// nothing new.
+	Replanner plan.Replanner
 
 	mu sync.RWMutex // guards Loops swaps against in-flight drains
 	// inflight tracks running item executions for graceful drain: on
@@ -486,7 +496,13 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		// Handed off is claimable too, and this is the re-dispatch the verb
 		// promises: a session that asked for a fresh one gets one on the next
 		// tick, from the same executor and therefore the same seat.
-		if queue.Claimable(item.State) {
+		//
+		// AwaitingReplan is claimable by state (StateWaiting) but is not
+		// this loop's business: it is waiting on [plan.Replanner], not a
+		// build to dispatch, and [Pump.Replan] is the separate step — like
+		// intake — that folds it back in once the planner (or the lack of
+		// one) has answered.
+		if queue.Claimable(item.State) && !item.AwaitingReplan {
 			candidates = append(candidates, item)
 		}
 	}
@@ -617,17 +633,24 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 	return settled, errors.Join(unreadable, firstErr)
 }
 
-// Tick is one heartbeat: feed, then drain.
+// Tick is one heartbeat: feed, answer replans, then drain.
 //
 // Intake's error no longer short-circuits the drain. An intake that could not
 // read one chain has still fed every other ingress, and the work already in
 // the queue is owed its tick regardless — the alternative is what happened in
 // practice, a factory that stopped doing anything because one item's chain
-// had a record in it nobody could parse.
+// had a record in it nobody could parse. Replan is the same posture: one
+// unreadable replan wait must not stop the drain either.
+//
+// Replan runs as its own step, between intake and drain, never inside
+// Drain's own candidate loop (see [Pump.Replan]'s doc for why): a unit it
+// answers this tick is pending again in time for this same tick's Drain to
+// claim it, the same ordering intake's newly-submitted items already get.
 func (p *Pump) Tick(ctx context.Context) (int, error) {
 	_, intakeErr := p.Intake(ctx)
+	_, replanErr := p.Replan(ctx)
 	settled, drainErr := p.Drain(ctx)
-	return settled, errors.Join(intakeErr, drainErr)
+	return settled, errors.Join(intakeErr, replanErr, drainErr)
 }
 
 func (p *Pump) findIngress(ctx context.Context, id string) (ingress.Ingress, bool, error) {
@@ -798,4 +821,240 @@ func (p *Pump) dispatchJudgement(ctx context.Context, ing ingress.Ingress, decl 
 		_, _ = p.Plans.Record(ctx, ing, pl)
 	}()
 	return nil
+}
+
+// replanClaimRepo is the pseudo-repository a replan dispatch is leased
+// under — a namespace of its own, distinct from [planClaimRepo] and
+// [queue.ClaimRepo], so a replan dispatch can never contend with a judgement
+// dispatch or a work item's own claim for the same (repo, ref) pair.
+const replanClaimRepo = "_replan"
+
+// Replan is intake's counterpart for issue #182's other pacing gate: every
+// unit [loop.Loop.RunHolding] left [queue.WorkItem.AwaitingReplan] gets one
+// answer attempt per tick, off the drain's own dispatch loop exactly as a
+// judgement decomposition is off the intake tick (see [Pump.dispatchJudgement]).
+//
+// Folding "index/replans" rather than filtering [Pump.Drain]'s own
+// "index/pending" fold is deliberate: a unit answering the planner is not a
+// build to dispatch, and mixing the two folds would put a step that can
+// call a model on the same critical path as #109/#143's fairness ordering —
+// exactly the coupling issue #50 already paid to take a judgement
+// decomposer off of. One unreadable wait must not stop the rest, the same
+// posture [Pump.Intake] and [Pump.Drain] already take.
+func (p *Pump) Replan(ctx context.Context) (int, error) {
+	dispatched := 0
+	var unreadable error
+	seen := map[string]bool{}
+	for rec, err := range p.Store.Log().Since(ctx, p.Tenant, "index/replans", 1) {
+		if err != nil {
+			return dispatched, err
+		}
+		if seen[rec.Subject] {
+			continue
+		}
+		seen[rec.Subject] = true
+		item, err := p.Queue.Load(ctx, p.Tenant, rec.Subject)
+		if err != nil {
+			unreadable = errors.Join(unreadable, err)
+			continue
+		}
+		if !item.AwaitingReplan {
+			continue // already answered or parked by an earlier tick
+		}
+		if err := p.dispatchReplan(ctx, item); err != nil {
+			unreadable = errors.Join(unreadable, err)
+			continue
+		}
+		dispatched++
+	}
+	return dispatched, unreadable
+}
+
+// dispatchReplan answers, or dispatches asking, one unit's replan wait.
+//
+// With no [Pump.Replanner] configured this settles synchronously: the unit
+// parks as an exception with the builder's own escalation reason, exactly
+// as an unwidenable escalation always has before replanning existed —
+// [plan.Replanner] being unconfigured must never silently strand a unit in
+// its wait forever.
+//
+// With one configured, dispatch mirrors [Pump.dispatchJudgement]: a lease
+// over (p.Tenant, replanClaimRepo, item.ID) is the one-replan-per-unit
+// mutual exclusion — [forge.ErrHeld] means a replan for this unit is already
+// in flight, this runner or another, so dispatch skips silently and the next
+// tick tries again, and a lapsed lease is recovered by the same
+// taking-the-lease-is-the-proof doctrine [queue.Queue.Recover] uses. The
+// meter is acquired next with [capacity.Meter.Acquire], never
+// [capacity.Meter.Start] — a planner run is not a build, and billing it a
+// start here would reopen issue #45's double-count exactly as
+// dispatchJudgement's own doc explains. A pacing refusal releases the lease
+// and skips silently; the next tick's Acquire is the retry.
+func (p *Pump) dispatchReplan(ctx context.Context, item queue.WorkItem) error {
+	esc, err := latestReplanEscalation(ctx, p.Store.Log(), p.Tenant, item.ID)
+	if err != nil {
+		return err
+	}
+	if p.Replanner == nil {
+		return p.parkReplanWait(ctx, item, esc.Reason)
+	}
+	leaser := p.Store.Leaser(p.Runner)
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+		Tenant: p.Tenant, Repo: replanClaimRepo, Ref: item.ID, Run: "replan-" + item.ID, TTL: p.Queue.TTL,
+	})
+	if errors.Is(err, forge.ErrHeld) {
+		return nil // a replan for this unit is already in flight; the next tick tries again
+	}
+	if err != nil {
+		return err
+	}
+	release, err := p.Meter.Acquire(ctx, "replan-"+item.ID)
+	if err != nil {
+		leaser.Release(ctx, lease)
+		if meterPacing(err) {
+			return nil // pacing, not failure — the same posture Drain takes at claim
+		}
+		return err
+	}
+	p.inflight.Add(1)
+	go func() {
+		defer p.inflight.Done()
+		defer release()
+		defer leaser.Release(ctx, lease)
+		p.runReplan(ctx, item, esc)
+	}()
+	return nil
+}
+
+// parkReplanWait reopens a replan wait as an exception, carrying reason —
+// the builder's own escalation alone when nothing else went wrong, or that
+// plus the planner's own failure when it answered with one. The unit has no
+// active claim at this point ([queue.Queue.AwaitReplan] already released
+// it), so the lease [queue.Queue.Park] releases is the zero value — a
+// no-op release, matching every leaser's own contract for a token that
+// names no held lease.
+func (p *Pump) parkReplanWait(ctx context.Context, item queue.WorkItem, reason string) error {
+	q := &queue.Queue{Store: p.Store, Runner: p.Runner, TTL: p.Queue.TTL}
+	item.AwaitingReplan = false
+	_, err := q.Park(ctx, item, forge.Lease{}, queue.SeverityMedium, reason)
+	return err
+}
+
+// runReplan is dispatchReplan's async half: it asks [Pump.Replanner], and
+// either amends the unit and returns it to a claimable state, or parks it as
+// an exception carrying both the builder's escalation and whatever went
+// wrong asking the planner. Nothing here has anywhere synchronous to report
+// an error to, the same posture [Pump.dispatchJudgement]'s own goroutine
+// takes — a write failure surfaces only in whatever it left on the chain.
+func (p *Pump) runReplan(ctx context.Context, item queue.WorkItem, esc plan.ReplanEscalation) {
+	fail := func(reason string) { _ = p.parkReplanWait(ctx, item, esc.Reason+"; "+reason) }
+
+	ing, ok, err := p.findIngress(ctx, item.Ingress)
+	if err != nil {
+		fail(fmt.Sprintf("replan failed: reading origination %s: %s", item.Ingress, err))
+		return
+	}
+	if !ok {
+		fail(fmt.Sprintf("replan failed: origination %s no longer exists", item.Ingress))
+		return
+	}
+	pl, ok, err := p.Plans.ByRef(ctx, p.Tenant, item.Plan)
+	if err != nil {
+		fail(fmt.Sprintf("replan failed: reading plan %s: %s", item.Plan, err))
+		return
+	}
+	if !ok {
+		fail(fmt.Sprintf("replan failed: plan %s no longer exists", item.Plan))
+		return
+	}
+	revised, err := p.Replanner.Replan(ctx, ing, pl,
+		plan.ReplanUnit{ID: item.ID, Task: item.Task, Sections: item.Sections}, esc)
+	if err != nil {
+		fail("replan failed: " + err.Error())
+		return
+	}
+	amended, err := amendPlanNode(pl, item.Node, revised)
+	if err != nil {
+		fail("replan failed: " + err.Error())
+		return
+	}
+	if _, err := p.Plans.Record(ctx, ing, amended); err != nil {
+		fail("replan failed: recording the revised plan: " + err.Error())
+		return
+	}
+
+	before := item.Sections
+	item.Sections = revised.Sections
+	if revised.Task != "" {
+		item.Task = revised.Task
+	}
+	body, _ := json.Marshal(struct {
+		Reason         string   `json:"reason"`
+		NeedsSections  []string `json:"needs_sections"`
+		Paths          []string `json:"paths"`
+		SectionsBefore []string `json:"sections_before"`
+		SectionsAfter  []string `json:"sections_after"`
+	}{esc.Reason, esc.NeedsSections, esc.Paths, before, item.Sections})
+	if _, err := p.Store.Log().Append(ctx, evidence.Record{
+		Tenant: item.Tenant, Scope: "workitem/" + item.ID,
+		Kind: "plan-amended", Subject: item.ID, Actor: p.Runner, OnBehalfOf: item.Requester,
+		Body: body,
+	}); err != nil {
+		fail("replan failed: recording plan-amended: " + err.Error())
+		return
+	}
+
+	q := &queue.Queue{Store: p.Store, Runner: p.Runner, TTL: p.Queue.TTL}
+	_, _ = q.AnswerReplan(ctx, item, "plan amended: "+esc.Reason)
+}
+
+// amendPlanNode returns p with unit's node replaced by what the planner
+// revised, re-sealed under a fresh content address: a node's Sections or
+// Task changed is a different plan, by the same rule any other change to
+// WHERE or WHAT a node does is (see [Plan.Seal]).
+func amendPlanNode(p plan.Plan, nodeID string, revised plan.ReplanNode) (plan.Plan, error) {
+	idx := slices.IndexFunc(p.Nodes, func(n plan.Node) bool { return n.ID == nodeID })
+	if idx == -1 {
+		return plan.Plan{}, fmt.Errorf("pump: replan: plan %s names no node %q", p.Ref, nodeID)
+	}
+	amended := p
+	amended.Nodes = slices.Clone(p.Nodes)
+	amended.Nodes[idx].Sections = revised.Sections
+	if revised.Task != "" {
+		amended.Nodes[idx].Task = revised.Task
+	}
+	amended.Ref = ""
+	if err := amended.Seal(); err != nil {
+		return plan.Plan{}, err
+	}
+	return amended, nil
+}
+
+// latestReplanEscalation reads the newest "replan-requested" record off a
+// unit's own chain — the builder's structured escalation
+// [loop.Loop.RunHolding] recorded the moment it put the unit into its
+// replan wait. There is exactly one live wait per unit at a time (a unit
+// answered or parked leaves [queue.WorkItem.AwaitingReplan] false, which
+// keeps it out of [Pump.Replan]'s fold entirely), so "newest" and "the one
+// this wait is about" are the same record; reading the newest rather than
+// requiring exactly one is what lets a unit replan more than once across
+// its life without this needing to change.
+func latestReplanEscalation(ctx context.Context, log evidence.Log, t tenant.ID, id string) (plan.ReplanEscalation, error) {
+	var esc plan.ReplanEscalation
+	found := false
+	for rec, err := range log.Since(ctx, t, "workitem/"+id, 1) {
+		if err != nil {
+			return plan.ReplanEscalation{}, err
+		}
+		if rec.Kind != "replan-requested" {
+			continue
+		}
+		if err := json.Unmarshal(rec.Body, &esc); err != nil {
+			return plan.ReplanEscalation{}, fmt.Errorf("pump: replan: reading %s's escalation: %w", id, err)
+		}
+		found = true
+	}
+	if !found {
+		return plan.ReplanEscalation{}, fmt.Errorf("pump: replan: %s carries AwaitingReplan but has no replan-requested record", id)
+	}
+	return esc, nil
 }

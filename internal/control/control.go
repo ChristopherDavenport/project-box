@@ -745,6 +745,8 @@ func stageOf(kind string) string {
 		return "recovered"
 	case "retried":
 		return "retried"
+	case "replanned":
+		return "replanned"
 	case "resolved":
 		return "resolved"
 	}
