@@ -1411,7 +1411,9 @@ export class BoxPlan extends LitElement {
         <div class="ntask">${n.task}</div>
         <dl class="facts">
           <dt>Repo</dt><dd>${n.repo || html`<span class="muted">inherits the origination's</span>`}</dd>
-          <dt>Depends on</dt><dd>${n.depends_on?.length ? n.depends_on.join(', ') : html`<span class="muted">nothing</span>`}</dd>
+          <dt>Depends on</dt><dd>${n.depends_on?.length
+            ? n.depends_on.map((depId) => n.edge_reasons?.[depId] ? `${depId} — ${n.edge_reasons[depId]}` : depId).join(', ')
+            : html`<span class="muted">nothing</span>`}</dd>
           <dt>Sections</dt><dd>${n.sections?.length ? n.sections.join(', ') : html`<span class="muted">whole repository</span>`}</dd>
           <dt>Model</dt><dd>${n.model || html`<span class="muted">default</span>`}</dd>
         </dl>
@@ -1451,7 +1453,7 @@ export class BoxPlan extends LitElement {
       error: failed,
       complete: ({ plan, previous, diff }) => html`
         <jh-card header-title="Plan" header-subtitle=${plan.ref} padding="medium">
-          <p class="fanout">${plan.fan_out} unit(s)</p>
+          <p class="fanout">${plan.fan_out} unit(s)${plan.width && plan.depth ? html` · width ${plan.width} · depth ${plan.depth}` : nothing}</p>
           <div class="meta">
             <jh-tag size="small" label=${plan.decomposer}></jh-tag>
             <jh-tag size="small" class=${plan.replayable ? 'positive' : 'neutral'} label=${plan.replayable ? 'replayable' : 'judgement'}></jh-tag>
