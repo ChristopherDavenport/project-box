@@ -135,6 +135,24 @@ func (m *Mirror) Resolve(ctx context.Context, repo forge.Repo, ref string) (forg
 	return forge.Commit(strings.TrimSpace(out)), nil
 }
 
+// ChangedPaths reports the repo-relative paths that differ between two
+// commits, via `git diff --name-only`. It errors — never returning an empty
+// list — when either commit is unknown to the mirror or git fails: an
+// unanswered "what changed" must not be mistaken for "nothing changed" (this
+// repo's unknown-never-reads-as-zero rule). It does not fetch: it reads what
+// the mirror already has, and callers fetch first.
+func (m *Mirror) ChangedPaths(ctx context.Context, repo forge.Repo, from, to forge.Commit) ([]string, error) {
+	out, err := run(ctx, m.mirrorDir(repo.Name), "diff", "--name-only", string(from), string(to))
+	if err != nil {
+		return nil, fmt.Errorf("git: changed paths %s..%s in %s: %w", from, to, repo.Name, err)
+	}
+	out = strings.TrimSpace(out)
+	if out == "" {
+		return nil, nil
+	}
+	return strings.Split(out, "\n"), nil
+}
+
 // Checkout materializes a workspace at a commit. It presents the lease's
 // token by renewing it — the leaser is the only authority on whether the
 // claim survived, so a runner that stalled past its deadline is refused a

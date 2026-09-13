@@ -476,6 +476,61 @@ func TestMaterializeContextIsPinnedNarrowAndReadOnly(t *testing.T) {
 	}
 }
 
+func TestChangedPathsReportsTheFileThatDiffers(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+	leaser := f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := m.Checkout(ctx, lease, f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+	// The mirror only has what Fetch or a land's collection gave it; pull the
+	// new commit in the same way Land's push step does, without landing.
+	if _, err := run2(ctx, m.mirrorDir(f.repo.Name), "fetch", ws.Dir, string(head)); err != nil {
+		t.Fatalf("collect head into mirror: %v", err)
+	}
+
+	got, err := m.ChangedPaths(ctx, f.repo, f.base, head)
+	if err != nil {
+		t.Fatalf("changed paths: %v", err)
+	}
+	if len(got) != 1 || got[0] != "change.txt" {
+		t.Fatalf("changed paths = %v, want [change.txt]", got)
+	}
+}
+
+func TestChangedPathsOfIdenticalCommitsIsEmptyNotError(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+
+	got, err := m.ChangedPaths(ctx, f.repo, f.base, f.base)
+	if err != nil {
+		t.Fatalf("changed paths: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("changed paths of identical commits = %v, want empty", got)
+	}
+}
+
+func TestChangedPathsOfAnUnknownCommitErrors(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+
+	unknown := forge.Commit(strings.Repeat("a", 40))
+	if _, err := m.ChangedPaths(ctx, f.repo, f.base, unknown); err == nil {
+		t.Fatal("changed paths against an unknown commit: want error, got nil")
+	}
+}
+
 func TestPatchIDIsStableAcrossARebaseAndDiffersForADifferentPatch(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
