@@ -551,6 +551,9 @@ func TestSelfDeployDeploysWhenDiffTouchesANamedSection(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	d.build = func() version.Build { return version.Build{Commit: string(base), Known: true} }
 	exe := filepath.Join(dir, "boxd-exe")
+	if err := os.WriteFile(exe, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	d.exePath = func() (string, error) { return exe, nil }
 
 	err = d.selfDeployChore(ctx)
@@ -584,6 +587,9 @@ func TestSelfDeployDeploysWhenDiffTouchesPathInNoDeclaredSection(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	d.build = func() version.Build { return version.Build{Commit: string(base), Known: true} }
 	exe := filepath.Join(dir, "boxd-exe")
+	if err := os.WriteFile(exe, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	d.exePath = func() (string, error) { return exe, nil }
 
 	err = d.selfDeployChore(ctx)
@@ -616,6 +622,9 @@ func TestSelfDeployEmptySectionsDeploysOnAnyMovement(t *testing.T) {
 	t.Cleanup(func() { d.Close() })
 	d.build = func() version.Build { return version.Build{Commit: string(base), Known: true} }
 	exe := filepath.Join(dir, "boxd-exe")
+	if err := os.WriteFile(exe, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	d.exePath = func() (string, error) { return exe, nil }
 
 	err = d.selfDeployChore(ctx)

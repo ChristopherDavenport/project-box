@@ -920,13 +920,30 @@ func (d *Daemon) PollRoutes(ctx context.Context, now time.Time) {
 // a different problem — a per-tenant archive of settled work — and it wants
 // an enumerator and a policy of its own rather than this list growing a
 // wildcard.
+//
+// control/self-deploy is deliberately NOT here, unlike the other standing
+// chains. [Compactor.CompactScope] prunes a scope's cold prefix by count and
+// age alone, scope-wide across every subject at once — it has no notion of
+// subject and [evidence.Summarize] leaves Subject empty on the record that
+// replaces what it folds. selfDeployRefused and selfDeployException both
+// depend on reading back the LATEST record for one specific head via
+// BySubject, indefinitely, for as long as that head remains the target
+// branch's tip — a bad head that a human has not yet fixed forward from can
+// sit refused for longer than any Keep/KeepFor an operator would set. A
+// scope-wide compaction cannot tell that head's record apart from one it is
+// safe to fold, so folding it away would silently turn a durable refusal
+// back into an unmemoried one, retried every housekeeping pass forever —
+// exactly the failure the durable refusal exists to prevent. This chain's
+// volume is bounded by how often boxes actually self-deploy, which is
+// orders of magnitude below control/claims or index/ingress, so leaving it
+// out costs unbounded-but-slow growth in exchange for a correctness
+// property compaction cannot currently preserve.
 var StandingScopes = []string{
 	"control/capacity",
 	"control/claims",
 	"control/config",
 	"control/escalations",
 	"control/review",
-	"control/self-deploy",
 	"index/ingress",
 	"index/pending",
 }
