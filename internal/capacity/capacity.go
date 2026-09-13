@@ -298,6 +298,21 @@ type Meter struct {
 	// mismatching run closes only the window it happened in — the next
 	// window is a clean read on whether the box is still misconfigured.
 	mismatch CredentialKind
+	// The boot-scoped twins of spent, cost, split, unmetered, unpriced and
+	// aborted: the same facts, accumulated since this process's Meter came
+	// up and never cleared by resetWindow (see [Meter.accrueBoot]). Folding
+	// the control/capacity chain instead would look like the same number —
+	// until the compactor swept it (daemon.StandingScopes), at which point
+	// the fold would silently undercount, the exact unknown-reads-as-smaller
+	// failure this package refuses. An in-memory total kept since the
+	// process started is the honest figure, and it shares /v1/status's
+	// uptime_sec's epoch for that reason.
+	bootTokens    int64
+	bootCost      int64
+	bootSplit     Spend
+	bootUnmetered int
+	bootUnpriced  int
+	bootAborted   int
 	// limit is the account's window as the last run reported it. Not reset
 	// with the meter's window: the account's clock is its own, and the report
 	// says when it turns.
@@ -582,6 +597,11 @@ func (m *Meter) Charge(ctx context.Context, what string, s Spend) {
 		m.resetWindow(w)
 	}
 	m.accrue(s)
+	// Boot totals accrue only on the live path. Restore calls accrue directly
+	// (below) to refold the window from records that already happened before
+	// this boot — folding them in here too would count pre-boot spend as
+	// though it were spent since the process came up.
+	m.accrueBoot(s)
 	// `tokens` on the record is what this charge was ACCOUNTED at, never the
 	// agent's tally as distinct from the sum of its parts. The distinction
 	// matters in memory, where a tally the agent stands behind beats a sum of
@@ -650,6 +670,33 @@ func (m *Meter) accrue(s Spend) {
 	}
 }
 
+// accrueBoot folds one spend into the boot-scoped totals — the same rule as
+// accrue, kept as a separate call rather than a branch inside it. accrue is
+// shared by the live Charge path and by Restore's replay of records from
+// before this boot; a flag threaded through accrue would make it easy for a
+// future caller to forget which of those two callers it is. Called only from
+// [Meter.Charge], never from [Meter.Restore].
+func (m *Meter) accrueBoot(s Spend) {
+	if s.Aborted {
+		m.bootAborted++
+	}
+	if !s.Reported {
+		if !s.Aborted {
+			m.bootUnmetered++
+		}
+		return
+	}
+	m.bootTokens += s.Tokens()
+	m.bootCost += s.CostMicros
+	m.bootSplit.Input += s.Input
+	m.bootSplit.Output += s.Output
+	m.bootSplit.CacheRead += s.CacheRead
+	m.bootSplit.CacheWrite += s.CacheWrite
+	if m.Budget.MaxCostPerWindow > 0 && !s.Priced() {
+		m.bootUnpriced++
+	}
+}
+
 // Report is the window's account as an operator reads it.
 //
 // Unmetered travels beside the total on purpose: the total alone is a lie
@@ -703,6 +750,32 @@ type Report struct {
 	// reader any more than an absent Spend reads as free.
 	Credential     CredentialKind `json:"credential,omitempty"`
 	LastCredential CredentialKind `json:"last_credential,omitempty"`
+	// BootTokens, the split beside it, BootCostMicros, BootUnpriced,
+	// BootUnmetered and BootAborted are the same shape as the window figures
+	// above but scoped to this process's Meter rather than to a window: never
+	// cleared by a rollover, accumulated from the moment this boot came up.
+	//
+	// Boot-scoped and not all-time on purpose. All-time would mean folding
+	// the control/capacity chain, and that chain is swept by the compactor
+	// (daemon.StandingScopes) — a fold across a sweep silently undercounts,
+	// which is the unknown-reads-as-smaller failure this package exists to
+	// refuse. An in-memory total kept since the process started is the
+	// honest figure instead, and it sits beside /v1/status's uptime_sec,
+	// which shares the same epoch.
+	//
+	// Unpriced and unmetered travel beside the boot total for the reason
+	// they travel beside the window total: a money figure whose unpriced
+	// count is nonzero is incomplete, and a reader must be able to see that
+	// rather than trust a number that looks whole.
+	BootTokens     int64 `json:"boot_tokens"`
+	BootInput      int64 `json:"boot_input"`
+	BootOutput     int64 `json:"boot_output"`
+	BootCacheRead  int64 `json:"boot_cache_read"`
+	BootCacheWrite int64 `json:"boot_cache_write"`
+	BootCostMicros int64 `json:"boot_cost_micros"`
+	BootUnpriced   int   `json:"boot_unpriced"`
+	BootUnmetered  int   `json:"boot_unmetered"`
+	BootAborted    int   `json:"boot_aborted"`
 }
 
 // Window returns a copy of the account window this meter last heard about
@@ -754,6 +827,10 @@ func (m *Meter) Report() Report {
 		Refusing:      m.wouldRefuse(),
 		AccountWindow: m.limit, AccountReserve: m.Budget.WindowReserve,
 		Credential: m.Budget.Credential, LastCredential: m.lastCredential,
+		BootTokens: m.bootTokens, BootCostMicros: m.bootCost,
+		BootInput: m.bootSplit.Input, BootOutput: m.bootSplit.Output,
+		BootCacheRead: m.bootSplit.CacheRead, BootCacheWrite: m.bootSplit.CacheWrite,
+		BootUnpriced: m.bootUnpriced, BootUnmetered: m.bootUnmetered, BootAborted: m.bootAborted,
 	}
 }
 
