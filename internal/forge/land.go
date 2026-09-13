@@ -57,4 +57,12 @@ type Placement struct {
 	// (git.PRLander) handled the land — so a caller reads the PR URL
 	// straight off the returned Landing without a second query.
 	PRURL string
+	// IssueClosed reports whether a Lander that talks to a code host
+	// (git.PRLander) confirmed GitHub actually answered a request to close
+	// this ChangeSet's DrivingIssue for this placement. It is never set
+	// merely because a close was attempted: an unanswered request, an
+	// erroring one, or a plain git.Lander with no such capability at all all
+	// leave it false, so a caller deciding whether to record the close never
+	// reads unknown as done.
+	IssueClosed bool
 }

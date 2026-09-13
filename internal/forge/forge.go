@@ -137,8 +137,14 @@ type ChangeSet struct {
 	// caller wiring an issue-driven route populates it; a PR opened for the
 	// change (see git.PRLander) links it with "Fixes #<n>" in the PR body.
 	DrivingIssue string
-	Members      []Member
-	Created      time.Time
+	// CompletesPlan is an assertion the LOOP makes, never derived here: that
+	// this landing settles the last unsettled unit of DrivingIssue's plan, so
+	// a Lander that talks to a code host (git.PRLander) may close the issue
+	// rather than merely comment on it. This package has no notion of a plan
+	// or a sibling unit — it only carries what the loop already worked out.
+	CompletesPlan bool
+	Members       []Member
+	Created       time.Time
 	// Verdicts is the gate decision that cleared this ChangeSet to land,
 	// carried from the loop's gate resolution into Land so a Lander that
 	// talks to a code host (git.PRLander) can publish it there — a reader on

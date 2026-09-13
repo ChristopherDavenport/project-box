@@ -24,6 +24,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/plan"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store"
 	"github.com/ChristopherDavenport/project-box/internal/telemetry"
@@ -854,6 +855,11 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	// Lander that publishes it (git.PRLander's GitHub check) reads it off
 	// the ChangeSet rather than a second, out-of-band channel.
 	cs.Verdicts = verdicts
+	// CompletesPlan is computed here and nowhere else: after gates resolve
+	// pass, immediately before Land. Nothing sets it on a refusal, park,
+	// wait, or partial landing path above, and the optimistic lane (which
+	// lands before its gates run) never reaches this line at all.
+	cs.CompletesPlan = l.completesPlan(ctx, item)
 
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
@@ -873,8 +879,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	}
 	defer leaser.Release(ctx, landLease)
 	cs.Members[0].Lease = landLease
+	var landing forge.Landing
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
-		_, err := l.lander(git.NewLander(l.Mirror, l.Store.Log())).Land(ctx, cs)
+		var err error
+		landing, err = l.lander(git.NewLander(l.Mirror, l.Store.Log())).Land(ctx, cs)
 		if err == nil {
 			telemetry.Outcome(ctx, queue.StateDone, string(head))
 		}
@@ -895,7 +903,57 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
 		checks.Status{Green: true, Lane: string(forge.LaneGated)}, l.Runner)
 	item, err = q.Done(ctx, item, claim, head)
+	l.recordIssueClosed(ctx, item, cs, landing)
 	return l.settle(ctx, item), err
+}
+
+// completesPlan reports whether every OTHER item of item's plan has already
+// settled [queue.StateDone] — the loop's own assertion, carried onto
+// [forge.ChangeSet.CompletesPlan], that lets a Lander talking to a code host
+// (git.PRLander) close the driving issue only once the whole plan is done,
+// not merely this one unit of it.
+//
+// item.Plan == "" means the item is the whole graph ([ItemFor] builds
+// exactly such items), which is trivially complete. A plan or sibling load
+// that errors leaves the graph unknown, and unknown never reads as
+// complete: this reports false rather than risk closing an issue over work
+// that has not actually finished.
+func (l *Loop) completesPlan(ctx context.Context, item queue.WorkItem) bool {
+	if item.Plan == "" {
+		return true
+	}
+	pl, ok, err := (&plan.Store{Log: l.Store.Log()}).ByRef(ctx, item.Tenant, item.Plan)
+	if err != nil || !ok {
+		return false
+	}
+	sq := &queue.Queue{Store: l.Store, Runner: l.Runner, TTL: l.TTL}
+	for _, n := range pl.Nodes {
+		id := pl.ItemID(n.ID)
+		if id == item.ID {
+			continue
+		}
+		sib, err := sq.Load(ctx, item.Tenant, id)
+		if err != nil || sib.State != queue.StateDone {
+			return false
+		}
+	}
+	return true
+}
+
+// recordIssueClosed writes the item chain's own "issue-closed" record when
+// landing confirms a Lander (git.PRLander) actually closed cs.DrivingIssue —
+// never when the close was merely attempted: [forge.Placement.IssueClosed]
+// stays false for an unanswered close, an errored one, or a plain
+// git.Lander with no such capability at all, and an unanswered close records
+// nothing here either.
+func (l *Loop) recordIssueClosed(ctx context.Context, item queue.WorkItem, cs forge.ChangeSet, landing forge.Landing) {
+	for _, pl := range landing.Landed {
+		if !pl.IssueClosed {
+			continue
+		}
+		l.record(ctx, item, "issue-closed", string(pl.Now),
+			fmt.Sprintf(`{"issue":%q,"commit":%q,"pr_url":%q}`, cs.DrivingIssue, pl.Now, pl.PRURL))
+	}
 }
 
 // openLandWindow takes the branch for the length of a landing and confirms it

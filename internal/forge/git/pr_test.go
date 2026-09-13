@@ -72,6 +72,35 @@ type fakeGitHub struct {
 	// a test can assert the scope probe was never sent for a change that
 	// never touched .github/workflows/.
 	requests []string
+	// issues backs the issues API's get/comment/close endpoints, keyed
+	// "owner/repo#number". Missing means an issue nobody has touched yet:
+	// open, no comments.
+	issues map[string]*ghIssueState
+	// issueGet500 makes GET .../issues/{n} answer 500, for the "an issues
+	// API failure must not fail the landing" test.
+	issueGet500 bool
+}
+
+// ghIssueState is one issue's mutable state, as [PRLander.closeDrivingIssue]
+// would observe and change it on the real GitHub REST API.
+type ghIssueState struct {
+	State    string
+	Comments []string
+	Patches  int
+}
+
+// issue returns key's state, creating it open with no comments the first
+// time it is asked about — callers already hold g.mu.
+func (g *fakeGitHub) issue(key string) *ghIssueState {
+	if g.issues == nil {
+		g.issues = map[string]*ghIssueState{}
+	}
+	st, ok := g.issues[key]
+	if !ok {
+		st = &ghIssueState{State: "open"}
+		g.issues[key] = st
+	}
+	return st
 }
 
 type ghPR struct {
@@ -219,6 +248,45 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 			out = []ghReview{}
 		}
 		json.NewEncoder(w).Encode(out)
+	case len(parts) == 5 && parts[3] == "issues" && r.Method == http.MethodGet:
+		if g.issueGet500 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		st := g.issue(owner + "/" + repo + "#" + parts[4])
+		json.NewEncoder(w).Encode(map[string]string{"state": st.State})
+	case len(parts) == 5 && parts[3] == "issues" && r.Method == http.MethodPatch:
+		var in struct {
+			State       string `json:"state"`
+			StateReason string `json:"state_reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		st := g.issue(owner + "/" + repo + "#" + parts[4])
+		st.State = in.State
+		st.Patches++
+		json.NewEncoder(w).Encode(map[string]string{"state": st.State})
+	case len(parts) == 6 && parts[3] == "issues" && parts[5] == "comments" && r.Method == http.MethodGet:
+		st := g.issue(owner + "/" + repo + "#" + parts[4])
+		out := make([]map[string]string, 0, len(st.Comments))
+		for _, c := range st.Comments {
+			out = append(out, map[string]string{"body": c})
+		}
+		json.NewEncoder(w).Encode(out)
+	case len(parts) == 6 && parts[3] == "issues" && parts[5] == "comments" && r.Method == http.MethodPost:
+		var in struct {
+			Body string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		st := g.issue(owner + "/" + repo + "#" + parts[4])
+		st.Comments = append(st.Comments, in.Body)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{})
 	default:
 		http.Error(w, "method", http.StatusMethodNotAllowed)
 	}
@@ -1297,5 +1365,188 @@ func TestPRRefusesWorkflowChangeWhenTokenReportsNoScopes(t *testing.T) {
 	}
 	if remoteHasBranch(t, x.f.remote, "box/run-1") {
 		t.Fatal("run branch was pushed despite being unable to assert the scope")
+	}
+}
+
+// landForIssueClose builds and lands one changeset naming issue "9", so
+// each of the issue-closing tests below can vary only cs.CompletesPlan (or
+// the fake GitHub server's behavior) and read the result back off the
+// returned Landing.
+func landForIssueClose(t *testing.T, x *prFix, completesPlan bool, verdicts []forge.Verdict) (forge.Landing, forge.Commit) {
+	t.Helper()
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		DrivingIssue: "9", CompletesPlan: completesPlan,
+		Members:  []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+		Verdicts: verdicts,
+	}
+	landing, err := x.pr.Land(ctx, cs)
+	if err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	return landing, head
+}
+
+// TestPRClosesIssueOnlyWhenCompletesPlanAndDrivingIssueSet is issue #108:
+// closing the driving issue is the loop's own assertion, carried onto
+// cs.CompletesPlan, and PRLander must never act on it unless both that AND
+// DrivingIssue are set.
+func TestPRClosesIssueOnlyWhenCompletesPlanAndDrivingIssueSet(t *testing.T) {
+	t.Run("completes plan with driving issue closes and comments", func(t *testing.T) {
+		x := fixPR(t)
+		landing, head := landForIssueClose(t, x, true, []forge.Verdict{
+			{Gate: "build-and-test", Decision: forge.DecisionPass, Reason: "all green",
+				Evidence: []forge.EvidenceRef{{Kind: forge.EvidenceKindRecord, URI: "rec-xyz"}}},
+		})
+		if !landing.Landed[0].IssueClosed {
+			t.Fatal("Landed[0].IssueClosed = false, want true")
+		}
+		st := x.gh.issue("acme/app#9")
+		if st.State != "closed" {
+			t.Fatalf("issue state = %q, want closed", st.State)
+		}
+		if st.Patches != 1 {
+			t.Fatalf("issue patched %d times, want 1", st.Patches)
+		}
+		if len(st.Comments) != 1 {
+			t.Fatalf("issue has %d comments, want 1", len(st.Comments))
+		}
+		if !strings.Contains(st.Comments[0], string(head)) {
+			t.Fatalf("comment %q does not name the landed sha %s", st.Comments[0], head)
+		}
+		if !strings.Contains(st.Comments[0], landing.Landed[0].PRURL) {
+			t.Fatalf("comment %q does not name the pull request URL %s", st.Comments[0], landing.Landed[0].PRURL)
+		}
+		if !strings.Contains(st.Comments[0], "rec-xyz") {
+			t.Fatalf("comment %q does not name the verdict's evidence id", st.Comments[0])
+		}
+	})
+
+	t.Run("completes plan without driving issue does nothing", func(t *testing.T) {
+		x := fixPR(t)
+		ctx := context.Background()
+		leaser := x.f.store.Leaser("runner-a")
+		lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+		if err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		ws, err := x.m.Checkout(ctx, lease, x.f.base)
+		if err != nil {
+			t.Fatalf("checkout: %v", err)
+		}
+		head := buildOn(t, ws, "feature")
+		cs := forge.ChangeSet{
+			ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "routine change", CompletesPlan: true,
+			Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+		}
+		landing, err := x.pr.Land(ctx, cs)
+		if err != nil {
+			t.Fatalf("land: %v", err)
+		}
+		if landing.Landed[0].IssueClosed {
+			t.Fatal("Landed[0].IssueClosed = true, want false with no DrivingIssue")
+		}
+		for _, req := range x.gh.requests {
+			if strings.Contains(req, "/issues/") {
+				t.Fatalf("no issues API call expected without a driving issue, got %v", x.gh.requests)
+			}
+		}
+	})
+
+	t.Run("driving issue without completing the plan does nothing", func(t *testing.T) {
+		x := fixPR(t)
+		landing, _ := landForIssueClose(t, x, false, nil)
+		if landing.Landed[0].IssueClosed {
+			t.Fatal("Landed[0].IssueClosed = true, want false: this landing did not complete the plan")
+		}
+		for _, req := range x.gh.requests {
+			if strings.Contains(req, "/issues/") {
+				t.Fatalf("no issues API call expected when CompletesPlan is false, got %v", x.gh.requests)
+			}
+		}
+	})
+}
+
+// TestPRClosesIssueIdempotentlyAlreadyClosed is issue #108's idempotence
+// half: an issue a person (or an earlier retried tick) already closed stays
+// closed, but the trail comment still lands exactly once.
+func TestPRClosesIssueIdempotentlyAlreadyClosed(t *testing.T) {
+	x := fixPR(t)
+	x.gh.issue("acme/app#9").State = "closed"
+	landing, _ := landForIssueClose(t, x, true, nil)
+	if !landing.Landed[0].IssueClosed {
+		t.Fatal("Landed[0].IssueClosed = false, want true: GitHub answered and confirmed the issue is closed")
+	}
+	st := x.gh.issue("acme/app#9")
+	if st.Patches != 0 {
+		t.Fatalf("issue patched %d times, want 0: it was already closed", st.Patches)
+	}
+	if len(st.Comments) != 1 {
+		t.Fatalf("issue has %d comments, want 1", len(st.Comments))
+	}
+}
+
+// TestPRClosesIssueCommentNotDuplicatedOnRetry is issue #108's other
+// idempotence half: a retried tick landing the SAME commit again must not
+// post a second comment naming a sha the issue already carries.
+func TestPRClosesIssueCommentNotDuplicatedOnRetry(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		DrivingIssue: "9", CompletesPlan: true,
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	// Seed the issue with a comment already naming this exact sha, as if an
+	// earlier retried tick had already landed and closed it.
+	x.gh.issue("acme/app#9").Comments = append(x.gh.issue("acme/app#9").Comments, fmt.Sprintf("Landed as %s via https://example.invalid/pull/1.", head))
+	landing, err := x.pr.Land(ctx, cs)
+	if err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	if !landing.Landed[0].IssueClosed {
+		t.Fatal("Landed[0].IssueClosed = false, want true")
+	}
+	st := x.gh.issue("acme/app#9")
+	if len(st.Comments) != 1 {
+		t.Fatalf("issue has %d comments, want exactly the one seeded, not a duplicate: %v", len(st.Comments), st.Comments)
+	}
+}
+
+// TestPRIssuesAPIFailureDoesNotFailLandingOrCloseIssue is issue #108's
+// failure-isolation requirement: the commit is already on the branch by the
+// time the issues API is ever asked about, so a 500 there must not fail the
+// landing, and must leave IssueClosed false — an unanswered close records
+// nothing.
+func TestPRIssuesAPIFailureDoesNotFailLandingOrCloseIssue(t *testing.T) {
+	x := fixPR(t)
+	x.gh.issueGet500 = true
+	landing, _ := landForIssueClose(t, x, true, nil)
+	if !landing.Complete() {
+		t.Fatalf("landing incomplete despite the issues API failing: %+v", landing)
+	}
+	if landing.Landed[0].IssueClosed {
+		t.Fatal("Landed[0].IssueClosed = true, want false: the issues API never answered")
 	}
 }

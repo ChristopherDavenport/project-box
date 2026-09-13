@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -157,7 +158,104 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 		p.inner.record(ctx, cs, "pr-opened", string(pl.Now),
 			fmt.Sprintf(`{"pr_url":%q,"issue":%q}`, prURL, cs.DrivingIssue))
 	}
+	if err == nil && cs.DrivingIssue != "" && cs.CompletesPlan {
+		p.closeDrivingIssue(ctx, cs, &landing, prURLs)
+	}
 	return landing, err
+}
+
+// closeDrivingIssue closes cs.DrivingIssue on GitHub once cs.CompletesPlan —
+// the loop's own assertion that this landing settled the last unsettled unit
+// of the issue's plan, never derived here — and only after inner.Land has
+// already pushed the commit: the first member's Repo names the issue, the
+// same convention [PRLander.prBody]'s "Fixes #<n>" relies on.
+//
+// Every failure here is reported to stderr and swallowed rather than
+// propagated: the commit is already on the branch, so a landing must never
+// fail over a comment or a close that GitHub refused. landing.Landed's
+// IssueClosed is left false in every such case — set true only once GitHub
+// has actually answered — so a caller (internal/loop) never records a close
+// that did not happen.
+func (p *PRLander) closeDrivingIssue(ctx context.Context, cs forge.ChangeSet, landing *forge.Landing, prURLs map[string]string) {
+	mem := cs.Members[0]
+	placementIdx := -1
+	var sha string
+	for i, pl := range landing.Landed {
+		if pl.Repo == mem.Repo {
+			placementIdx, sha = i, string(pl.Now)
+			break
+		}
+	}
+	if placementIdx == -1 {
+		// The member naming the issue never reached its remote — a partial
+		// landing stopped before it, which CompletesPlan cannot be true for.
+		return
+	}
+	repo, ok := p.inner.m.Repo(mem.Repo)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "git: close issue #%s: repo %q not established\n", cs.DrivingIssue, mem.Repo)
+		return
+	}
+	owner, name, err := parseGitHubRemote(repo.Remote)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "git: close issue #%s: %v\n", cs.DrivingIssue, err)
+		return
+	}
+	tok, err := p.token(ctx)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "git: close issue #%s: token: %v\n", cs.DrivingIssue, err)
+		return
+	}
+
+	issueEndpoint := fmt.Sprintf("%s/repos/%s/%s/issues/%s", p.apiBase, owner, name, cs.DrivingIssue)
+	var issue struct {
+		State string `json:"state"`
+	}
+	if err := p.call(ctx, http.MethodGet, issueEndpoint, tok, nil, &issue); err != nil {
+		fmt.Fprintf(os.Stderr, "git: close issue #%s: get: %v\n", cs.DrivingIssue, err)
+		return
+	}
+
+	commentsEndpoint := issueEndpoint + "/comments"
+	var comments []struct {
+		Body string `json:"body"`
+	}
+	if err := p.call(ctx, http.MethodGet, commentsEndpoint, tok, nil, &comments); err != nil {
+		fmt.Fprintf(os.Stderr, "git: close issue #%s: list comments: %v\n", cs.DrivingIssue, err)
+		return
+	}
+	alreadyCommented := false
+	for _, c := range comments {
+		if strings.Contains(c.Body, sha) {
+			alreadyCommented = true
+			break
+		}
+	}
+	if !alreadyCommented {
+		body := fmt.Sprintf("Landed as %s via %s.", sha, prURLs[mem.Repo])
+		if ev := verdictText(cs.Verdicts); ev != "" {
+			body += "\n\n" + ev
+		}
+		in := struct {
+			Body string `json:"body"`
+		}{Body: body}
+		if err := p.call(ctx, http.MethodPost, commentsEndpoint, tok, in, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "git: close issue #%s: comment: %v\n", cs.DrivingIssue, err)
+			return
+		}
+	}
+
+	if issue.State == "open" {
+		in := struct {
+			State       string `json:"state"`
+			StateReason string `json:"state_reason"`
+		}{State: "closed", StateReason: "completed"}
+		if err := p.call(ctx, http.MethodPatch, issueEndpoint, tok, in, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "git: close issue #%s: patch: %v\n", cs.DrivingIssue, err)
+			return
+		}
+	}
+	landing.Landed[placementIdx].IssueClosed = true
 }
 
 // prTitle computes the single title used for every per-member PR a ChangeSet
