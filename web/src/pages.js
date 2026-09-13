@@ -15,6 +15,7 @@ import {
   age, title, taskURL, short, sameCommit, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, place, hold, why,
   describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail,
 } from './format.js';
+import { settled, orderList, planeOrder } from './order.js';
 import { base, toast, focusInto } from './ui.js';
 import { icon } from './icons.js';
 
@@ -225,11 +226,14 @@ export class BoxDashboard extends LitElement {
       </jh-list-group>`;
   }
 
+  // Always newest first, and only ever that: this is an SSE stream with no
+  // stored state to settle into, so there is no branch to add — see
+  // order.js and issue #205 for the surfaces that do have one.
   _feed(titles) {
     const evs = this._activity.events.slice().reverse();
     if (evs.length === 0) return html`<p class="empty">Nothing yet.</p>`;
     return html`
-      <ol class="feed" aria-label="Activity feed">
+      <ol class="feed" aria-label="Activity feed, newest first">
         ${evs.map((a) => {
           const item = itemOf(a);
           return html`
@@ -521,12 +525,15 @@ export function sessionForest(sessions, frames) {
 
 /** frameList is the ol.frames markup itself, factored out so a session
  *  section and the flat pages that came before it render one agent's
- *  timeline identically: newest first, a call folded to one row by
- *  `collapse`, denials and escalations picked out by FRAME_APPEARANCE. */
-function frameList(frames, emptyMessage) {
+ *  timeline identically: a call folded to one row by `collapse`, denials and
+ *  escalations picked out by FRAME_APPEARANCE. `frames` must already be in
+ *  render order — callers get that from `planeOrder`/`orderList` (see
+ *  order.js) — this only renders it and labels which order is in force, per
+ *  issue #205: live reads newest first, settled reads from the start. */
+function frameList(frames, emptyMessage, live) {
   return frames.length === 0
     ? html`<p class="empty">${emptyMessage}</p>`
-    : html`<ol class="frames" aria-label="Agent timeline, newest first">${frames.slice().reverse().map((f) => html`
+    : html`<ol class="frames" aria-label=${live ? 'Agent timeline, newest first' : 'Agent timeline, from the start'}>${frames.map((f) => html`
         <li class=${FRAME_APPEARANCE[f.kind] ?? ''}>
           <span class="t"><box-when .at=${f.at}></box-when></span>
           <span class="k">${f.kind}</span>
@@ -651,20 +658,31 @@ export class BoxSessions extends LitElement {
     </span>`;
   }
 
-  _sessionRow(s, byRef, childrenOf) {
-    const frames = byRef.get(s.agentref) ?? [];
+  _sessionRow(s, childrenOf, framesOf, live) {
+    const frames = framesOf(s.agentref);
     const children = childrenOf.get(s.agentref) ?? [];
     return html`
       <details class="session" ?open=${!s.finished}>
         <summary>${this._sessionMeta(s)}</summary>
-        ${frameList(frames, 'Nothing said yet.')}
-        ${children.map((c) => this._sessionRow(c, byRef, childrenOf))}
+        ${frameList(frames, 'Nothing said yet.', live)}
+        ${children.map((c) => this._sessionRow(c, childrenOf, framesOf, live))}
       </details>`;
   }
 
   _card(s) {
     const frames = this._liveFrames(s);
     const { unattributed, byRef, roots, childrenOf } = sessionForest(s.agent_sessions, frames);
+    // Every row here is a unit the sessions page is showing because it is
+    // running, but the flip is the shared predicate, not that assumption —
+    // a judgement row carries no `state` at all, and `settled(undefined, …)`
+    // correctly reads that as live rather than needing its own branch.
+    const live = !settled(s.state, s.agent_sessions);
+    const order = planeOrder(live, roots, childrenOf, (ref) => byRef.get(ref) ?? []);
+    const earlier = unattributed.length ? html`
+      <details class="session" open>
+        <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
+        ${frameList(orderList(live, unattributed), 'Nothing here.', live)}
+      </details>` : nothing;
     return html`
       <jh-card header-title=${title(s) || s.id} header-subtitle=${origin(s) || place(s)} padding="medium">
         <div class="meta">
@@ -686,19 +704,16 @@ export class BoxSessions extends LitElement {
           ? html`<div class="layers" aria-label="Agent layers">${s.layers.map((l) => html`
               <span class="layer" title=${`${l.source} ${l.digest}`}>${l.scope}:${l.name}</span>`)}</div>`
           : nothing}
-        <h4>Agent sessions <span class="helper">— chain order, newest first inside each</span></h4>
-        ${unattributed.length === 0 && roots.length === 0
+        <h4>Agent sessions <span class="helper">— ${live ? 'live, newest first' : 'finished, from the start'}</span></h4>
+        ${unattributed.length === 0 && order.roots.length === 0
           ? (s.watching
               ? html`<p class="empty">Started; nothing said yet.</p>`
               : html`<p class="blind">No live stream here — another runner holds this, or the window has rolled.
                      Silence about the run, not an idle agent.</p>`)
           : html`
-            ${unattributed.length ? html`
-              <details class="session" open>
-                <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
-                ${frameList(unattributed, 'Nothing here.')}
-              </details>` : nothing}
-            ${roots.map((row) => this._sessionRow(row, byRef, childrenOf))}`}
+            ${live ? nothing : earlier}
+            ${order.roots.map((row) => this._sessionRow(row, order.childrenOf, order.framesOf, live))}
+            ${live ? earlier : nothing}`}
       </jh-card>`;
   }
 }
@@ -980,39 +995,41 @@ export class BoxItem extends LitElement {
   // One session's own section, recursing into whatever continued it — see
   // continuationTree — so a rebuild's second attempt nests under the first
   // instead of reading as an unrelated card below it.
-  _sessionCard(s, byRef, childrenOf, promptRefs) {
-    const frames = byRef.get(s.agentref) ?? [];
+  _sessionCard(s, childrenOf, framesOf, promptRefs, live) {
+    const frames = framesOf(s.agentref);
     const children = childrenOf.get(s.agentref) ?? [];
     return html`
       <details class="session" ?open=${!s.finished}>
         <summary>${this._sessionSummary(s, promptRefs)}</summary>
-        ${frameList(frames, 'Nothing said yet.')}
-        ${children.map((c) => this._sessionCard(c, byRef, childrenOf, promptRefs))}
+        ${frameList(frames, 'Nothing said yet.', live)}
+        ${children.map((c) => this._sessionCard(c, childrenOf, framesOf, promptRefs, live))}
       </details>`;
   }
 
-  _sessions(item, kept, evidence) {
+  _sessions(item, kept, evidence, live) {
     const frames = this._frames(kept);
     const { unattributed, byRef, roots, childrenOf } = sessionForest(item.agent_sessions, frames);
     const promptRefs = new Set((evidence ?? []).filter((r) => r.Kind === 'agent-prompt').map((r) => r.Subject));
-    const running = item.state === 'claimed';
-    const subtitle = running
-      ? 'One section per agent session, chain order — newest first inside each'
-      : 'One section per agent session, chain order, from the run log — newest first inside each';
-    const empty = unattributed.length === 0 && roots.length === 0;
+    const order = planeOrder(live, roots, childrenOf, (ref) => byRef.get(ref) ?? []);
+    const subtitle = live
+      ? 'One section per agent session — live, newest first'
+      : 'One section per agent session — finished, from the start';
+    const empty = unattributed.length === 0 && order.roots.length === 0;
+    const earlier = unattributed.length ? html`
+      <details class="session" open>
+        <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
+        ${frameList(orderList(live, unattributed), 'Nothing here.', live)}
+      </details>` : nothing;
     return html`
       <jh-card header-title="Agent" header-subtitle=${subtitle} padding="medium">
         ${empty
-          ? html`<p class="empty">${running
+          ? html`<p class="empty">${live
               ? 'Nothing streamed yet. The first frame is the agent starting.'
               : 'Nothing was kept for this run — it ran before the run log existed, or its frames were pruned.'}</p>`
           : html`
-            ${unattributed.length ? html`
-              <details class="session" open>
-                <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
-                ${frameList(unattributed, 'Nothing here.')}
-              </details>` : nothing}
-            ${roots.map((s) => this._sessionCard(s, byRef, childrenOf, promptRefs))}`}
+            ${live ? nothing : earlier}
+            ${order.roots.map((s) => this._sessionCard(s, order.childrenOf, order.framesOf, promptRefs, live))}
+            ${live ? earlier : nothing}`}
       </jh-card>`;
   }
 
@@ -1102,11 +1119,11 @@ export class BoxItem extends LitElement {
       </jh-card>`;
   }
 
-  _chain(evidence) {
+  _chain(evidence, live) {
     if ((evidence?.length ?? 0) === 0) return html`<p class="empty">Nothing recorded yet.</p>`;
     return html`
-      <ol class="chain" aria-label="Run timeline">
-        ${evidence.map((r) => html`
+      <ol class="chain" aria-label=${live ? 'Run timeline, newest first' : 'Run timeline, from the start'}>
+        ${orderList(live, evidence).map((r) => html`
           <li id=${r.Kind === 'agent-prompt' ? 'agent-prompt-' + r.Subject : nothing}>
             ${kindTag(r.Kind)}
             <div>
@@ -1122,12 +1139,17 @@ export class BoxItem extends LitElement {
     return this._task.render({
       pending: () => loading('item'),
       error: failed,
-      complete: ({ item, evidence, kept }) => html`
-        ${this._head(item)}
-        ${this._sessions(item, kept, evidence)}
-        <jh-card header-title="Timeline" header-subtitle="What this unit did, in order, from its own evidence chain" padding="medium">
-          ${this._chain(evidence)}
-        </jh-card>`,
+      complete: ({ item, evidence, kept }) => {
+        const live = !settled(item.state, item.agent_sessions);
+        return html`
+          ${this._head(item)}
+          ${this._sessions(item, kept, evidence, live)}
+          <jh-card header-title="Timeline" header-subtitle=${live
+              ? 'What this unit did — live, newest first'
+              : 'What this unit did — finished, from the start'} padding="medium">
+            ${this._chain(evidence, live)}
+          </jh-card>`;
+      },
     });
   }
 }
@@ -1208,36 +1230,44 @@ export class BoxIngress extends LitElement {
   // none either) — so every section here is the synthesized kind
   // sessionForest builds from a frame's own `session` field alone: an
   // agentref and nothing else. Same grouping box-item and box-sessions use,
-  // at the fidelity a judgement's evidence actually supports.
-  _sessionCard(s, byRef) {
-    const frames = byRef.get(s.agentref) ?? [];
+  // at the fidelity a judgement's evidence actually supports. That fidelity
+  // is also why the settled/live split here is `!ing.standing` alone rather
+  // than the shared `settled()` predicate: a synthesized row carries no
+  // `finished` for that predicate's second half to read, and a judgement
+  // stops producing sessions the moment it gets a standing — the standing
+  // itself already says whether there is more to come.
+  _sessionCard(s, framesOf, live) {
+    const frames = framesOf(s.agentref);
     return html`
       <details class="session" open>
         <summary><span class="session-meta"><b>agent</b> <box-hash label="agentref" .value=${s.agentref}></box-hash></span></summary>
-        ${frameList(frames, 'Nothing said yet.')}
+        ${frameList(frames, 'Nothing said yet.', live)}
       </details>`;
   }
 
   _agent(ing, kept) {
     const frames = this._frames(kept);
-    const { unattributed, byRef, roots } = sessionForest([], frames);
-    const running = !ing.standing;
-    const subtitle = running
-      ? 'One section per agent session — newest first inside each'
-      : 'One section per agent session, from the run log — newest first inside each';
+    const { unattributed, byRef, roots, childrenOf } = sessionForest([], frames);
+    const live = !ing.standing;
+    const order = planeOrder(live, roots, childrenOf, (ref) => byRef.get(ref) ?? []);
+    const subtitle = live
+      ? 'One section per agent session — live, newest first'
+      : 'One section per agent session — finished, from the start';
+    const earlier = unattributed.length ? html`
+      <details class="session" open>
+        <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
+        ${frameList(orderList(live, unattributed), 'Nothing here.', live)}
+      </details>` : nothing;
     return html`
       <jh-card header-title="Agent" header-subtitle=${subtitle} padding="medium">
-        ${unattributed.length === 0 && roots.length === 0
-          ? html`<p class="empty">${running
+        ${unattributed.length === 0 && order.roots.length === 0
+          ? html`<p class="empty">${live
               ? 'Nothing streamed yet. The first frame is the agent starting.'
               : 'Nothing was kept for this run — it ran before the run log existed, or its frames were pruned.'}</p>`
           : html`
-            ${unattributed.length ? html`
-              <details class="session" open>
-                <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
-                ${frameList(unattributed, 'Nothing here.')}
-              </details>` : nothing}
-            ${roots.map((s) => this._sessionCard(s, byRef))}`}
+            ${live ? nothing : earlier}
+            ${order.roots.map((s) => this._sessionCard(s, order.framesOf, live))}
+            ${live ? earlier : nothing}`}
       </jh-card>`;
   }
 
