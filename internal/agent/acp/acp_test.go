@@ -1157,6 +1157,18 @@ func fakeAgent(scenario string) {
 						"content": map[string]any{"type": "text", "text": "starting the widget..."}},
 				})
 				os.Exit(1)
+			case "windowspent":
+				// The account's own report that the window is exhausted, met
+				// mid-run: a rejected usage_update, then the transport drops
+				// the same way "aborted" does. Nobody judged this run either
+				// (issue #112) — it just named why, which "aborted" never
+				// does.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "usage_update", "used": 200000, "size": 200000,
+						"_meta": map[string]any{"_claude/rateLimit": map[string]any{
+							"status": "rejected", "rateLimitType": "five_hour",
+							"utilization": 1.0, "resetsAt": 1788491400}}}})
+				os.Exit(1)
 			}
 		}
 	}

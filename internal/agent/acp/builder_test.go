@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -214,6 +215,52 @@ func TestAbortedRunStillRecordsAndCharges(t *testing.T) {
 	}
 	if !strings.Contains(body, "unexpected EOF") {
 		t.Fatalf("agent-result did not carry the transport's own reason: %s", body)
+	}
+}
+
+// TestWindowSpentRefusalIsClassified: the run's own account report that the
+// window is exhausted — a rejected usage_update, then the transport drops —
+// comes back from Build as *loop.WindowSpent, not the raw transport error,
+// so the loop defers to the reset rather than merely retrying a drop it
+// cannot explain (issue #112).
+func TestWindowSpentRefusalIsClassified(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "windowspent")
+	ctx := context.Background()
+	item := submitSectioned(t, ctx, s, router, "issue-window", "add the widget package", nil)
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	b := lp.Builder.(*Builder)
+	_, err := b.Build(ctx, ws, item.Task)
+	var spent *loop.WindowSpent
+	if !errors.As(err, &spent) {
+		t.Fatalf("a rejected window was not classified as *loop.WindowSpent: %v", err)
+	}
+	if spent.Window != "five_hour" {
+		t.Fatalf("the window name did not survive: %+v", spent)
+	}
+	if want := time.Unix(1788491400, 0); !spent.ResetsAt.Equal(want) {
+		t.Fatalf("the reset did not survive: got %v want %v", spent.ResetsAt, want)
+	}
+}
+
+// TestAbortedRunIsNotWindowSpent: a transport drop that never named the
+// account window at all — no rejected report, no session-limit wording —
+// must not be classified as one; it stays *loop.Aborted exactly as before
+// this unit. Unknown never reads as zero, including here: absence of a
+// window report is not itself grounds to invent one.
+func TestAbortedRunIsNotWindowSpent(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "aborted")
+	ctx := context.Background()
+	item := submitSectioned(t, ctx, s, router, "issue-abort-direct", "add the widget package", nil)
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	b := lp.Builder.(*Builder)
+	_, err := b.Build(ctx, ws, item.Task)
+	var spent *loop.WindowSpent
+	if errors.As(err, &spent) {
+		t.Fatalf("a plain transport drop must not read as a window refusal: %+v", spent)
+	}
+	var ab *loop.Aborted
+	if !errors.As(err, &ab) {
+		t.Fatalf("a plain transport drop must still be loop.Aborted: %v", err)
 	}
 }
 

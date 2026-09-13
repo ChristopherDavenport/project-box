@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
+	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/seat"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
@@ -288,6 +290,26 @@ func TestTheGateFailsWithItsReason(t *testing.T) {
 	}
 	if !strings.Contains(v.Reason, "db/schema.sql") {
 		t.Fatalf("the reason did not survive: %+v", v)
+	}
+}
+
+// TestTheGateWindowSpentRefusalCarriesTheReset: the run's own account report
+// that the window is exhausted, met at the gate rather than at a build, comes
+// back from Evaluate as *loop.WindowSpent — loop.evaluateGate errors.As-matches
+// this to defer the gate to the reset rather than failing it outright
+// (issue #112).
+func TestTheGateWindowSpentRefusalCarriesTheReset(t *testing.T) {
+	rv, cs, _, _ := reviewerRig(t, "windowspent")
+	_, err := rv.Evaluate(context.Background(), cs)
+	var spent *loop.WindowSpent
+	if !errors.As(err, &spent) {
+		t.Fatalf("a rejected window was not classified as *loop.WindowSpent: %v", err)
+	}
+	if spent.Window != "five_hour" {
+		t.Fatalf("the window name did not survive: %+v", spent)
+	}
+	if want := time.Unix(1788491400, 0); !spent.ResetsAt.Equal(want) {
+		t.Fatalf("the reset did not survive: got %v want %v", spent.ResetsAt, want)
 	}
 }
 

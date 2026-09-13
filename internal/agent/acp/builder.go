@@ -318,6 +318,14 @@ func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, c
 	ws := rc.Workspace
 	res, err := b.runOnce(ctx, rc, sent, resume, continues)
 	if err != nil {
+		if spent := windowSpent(res, err); spent != nil {
+			// Checked before ErrAborted: a session-limit refusal on
+			// session/prompt arrives wrapped in ErrAborted exactly like any
+			// other dropped call (acp.go's Run does not distinguish them),
+			// but this one names why, so it defers to the reset rather than
+			// merely being retried as an unexplained drop.
+			return "", spent
+		}
 		if errors.Is(err, ErrAborted) {
 			// The loop gets a typed error so it can retry rather than park —
 			// see loop.Aborted. runOnce already recorded what the dropped
@@ -714,6 +722,39 @@ func handoffNotes(text string) []string {
 		}
 	}
 	return out
+}
+
+// windowSpentText is the adapter's own wording for a session or prompt
+// refused because the account's window is exhausted — acp_test.go's
+// planner-noanswer scenario reproduces it verbatim, the same refusal
+// issue #112 traces to a real incident.
+const windowSpentText = "You've hit your session limit"
+
+// windowSpent classifies a run-end error as the run's own account-window
+// report, shared by every role's run-end site (builder, planner, reviewer):
+// either the RateLimit report the run itself gave read exhausted (Status
+// "rejected"), or the adapter's own session-limit wording survived into the
+// error a refused session/prompt returned — the shape a run refused before
+// any usage_update carries, which is why that path names no window.
+//
+// Nil when neither is true: unknown never reads as zero, so an error that
+// says nothing about the window is left for the caller to return unchanged,
+// never defaulted into a window refusal nobody actually reported.
+func windowSpent(res Result, err error) *loop.WindowSpent {
+	if err == nil {
+		return nil
+	}
+	if rl := res.Usage.RateLimit; rl != nil && rl.Status == "rejected" {
+		ws := &loop.WindowSpent{Window: rl.Window, Reason: err.Error()}
+		if rl.ResetsAt != 0 {
+			ws.ResetsAt = time.Unix(rl.ResetsAt, 0)
+		}
+		return ws
+	}
+	if strings.Contains(err.Error(), windowSpentText) {
+		return &loop.WindowSpent{Reason: err.Error()}
+	}
+	return nil
 }
 
 // tally counts each name once per appearance. Nil for an empty list, so the

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
@@ -230,6 +231,40 @@ func TestAPlannerThatNeverAnsweredIsErrNoAnswer(t *testing.T) {
 	var esc *loop.Escalation
 	if errors.As(err, &esc) {
 		t.Fatalf("a never-answered run was mistaken for an escalation: %v", err)
+	}
+	// The adapter's own session-limit wording, met on session/prompt itself
+	// rather than on a usage_update — no RateLimit report ever arrived, so
+	// the window it names and the reset it names are both unknown, and
+	// unknown never reads as zero (issue #112).
+	var spent *loop.WindowSpent
+	if !errors.As(err, &spent) {
+		t.Fatalf("a session-limit refusal was not classified as *loop.WindowSpent: %v", err)
+	}
+	if spent.Window != "" || !spent.ResetsAt.IsZero() {
+		t.Fatalf("a refusal naming no reset must not invent one: %+v", spent)
+	}
+}
+
+// TestAPlannerWindowSpentRefusalCarriesTheReset: a run's own rejected
+// RateLimit report, met mid-run rather than at session/prompt, still
+// classifies as *loop.WindowSpent and still satisfies plan.ErrNoAnswer — the
+// window and the reset it named both survive so pump.dispatchJudgement can
+// defer to it instead of failing the origination outright (issue #112).
+func TestAPlannerWindowSpentRefusalCarriesTheReset(t *testing.T) {
+	p, ing, _ := plannerRig(t, "windowspent")
+	_, err := p.Decompose(context.Background(), ing, plannerDecl())
+	if err == nil || !errors.Is(err, plan.ErrNoAnswer) {
+		t.Fatalf("a window-spent refusal is still a run nobody judged: %v", err)
+	}
+	var spent *loop.WindowSpent
+	if !errors.As(err, &spent) {
+		t.Fatalf("a rejected window was not classified as *loop.WindowSpent: %v", err)
+	}
+	if spent.Window != "five_hour" {
+		t.Fatalf("the window name did not survive: %+v", spent)
+	}
+	if want := time.Unix(1788491400, 0); !spent.ResetsAt.Equal(want) {
+		t.Fatalf("the reset did not survive: got %v want %v", spent.ResetsAt, want)
 	}
 }
 

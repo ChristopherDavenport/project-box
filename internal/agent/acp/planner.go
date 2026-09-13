@@ -207,7 +207,17 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 		// transport failure, a limit refusal, a mid-response server error. The
 		// loop side (pump.intakeOne) retries and defers on [plan.ErrNoAnswer]
 		// rather than parking an exception for a run nobody judged.
-		return plan.Result{}, fmt.Errorf("acp: planner: %w: %w", plan.ErrNoAnswer, err)
+		//
+		// A session-limit refusal additionally carries *loop.WindowSpent
+		// (issue #112): both wrap into the same error tree, via Go's
+		// multi-%w, so plan.Make's caller can still errors.Is its way to
+		// plan.ErrNoAnswer while pump.dispatchJudgement errors.As its way to
+		// the typed window and defers to the reset instead of failing.
+		werr := error(err)
+		if spent := windowSpent(res, err); spent != nil {
+			werr = spent
+		}
+		return plan.Result{}, fmt.Errorf("acp: planner: %w: %w", plan.ErrNoAnswer, werr)
 	}
 	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed)))
 	rec.json(ctx, "agent-text", bundle.Ref, textRecord{AgentRef: bundle.Ref, Text: res.Text, StopReason: res.StopReason})

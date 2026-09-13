@@ -264,6 +264,12 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 		r.Spend(ctx, run, res.Usage)
 	}
 	if err != nil {
+		if spent := windowSpent(res, err); spent != nil {
+			// The run's own account report, met at the gate rather than the
+			// build: loop.evaluateGate errors.As-matches this and defers to
+			// the reset instead of failing the gate outright (issue #112).
+			return forge.Verdict{}, fmt.Errorf("acp: reviewer: %w", spent)
+		}
 		return forge.Verdict{}, fmt.Errorf("acp: reviewer: %w", err)
 	}
 	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed)))
