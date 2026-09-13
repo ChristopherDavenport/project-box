@@ -26,6 +26,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store/sqlite"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
+	"github.com/ChristopherDavenport/project-box/internal/version"
 )
 
 const tn = tenant.ID("acme")
@@ -712,5 +713,99 @@ func TestExceptionQueueOverTheWire(t *testing.T) {
 	}
 	if !st.ExceptionQueue.Met || st.ExceptionQueue.Oldest == "" {
 		t.Fatalf("exception health: %+v", st.ExceptionQueue)
+	}
+}
+
+// statusOnly dials a bare Server over a unix socket — every test below only
+// cares about /v1/status, not a working queue.
+func statusOnly(t *testing.T, srv *Server) *Client {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "boxd.sock")
+	ln, err := Listen("unix:" + sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &http.Server{Handler: srv.Handler()}
+	go hs.Serve(ln)
+	t.Cleanup(func() { hs.Close() })
+	c, err := Dial("unix:"+sock, "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// TestStatusReportsAKnownBuild: a Build seam that reports a known commit
+// surfaces on /v1/status verbatim, dirty bit included.
+func TestStatusReportsAKnownBuild(t *testing.T) {
+	w := rig(t)
+	w.srv.Build = func() version.Build { return version.Build{Commit: "deadbeefcafe", Dirty: true, Known: true} }
+	st, err := statusOnly(t, w.srv).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.BuildCommit != "deadbeefcafe" || !st.BuildDirty {
+		t.Fatalf("status = %+v, want commit deadbeefcafe dirty true", st)
+	}
+}
+
+// TestStatusOmitsAnUnknownBuild: unknown never reads as zero. With no Build
+// seam wired, the handler falls back to version.ThisBuild directly — which a
+// `go test` binary (never stamped with vcs.revision the way `go build` is)
+// reports as unknown — and the fields must be absent, not an empty commit
+// beside a false dirty bit that would read as "clean".
+func TestStatusOmitsAnUnknownBuild(t *testing.T) {
+	w := rig(t)
+	st, err := statusOnly(t, w.srv).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.BuildCommit != "" || st.BuildDirty {
+		t.Fatalf("status = %+v, want build fields absent for an unknown build", st)
+	}
+}
+
+// TestStatusReportsTheFollowBranchSeam: when the daemon wires FollowBranch,
+// /v1/status carries the branch and the commit it resolved to.
+func TestStatusReportsTheFollowBranchSeam(t *testing.T) {
+	w := rig(t)
+	w.srv.FollowBranch = func(context.Context) (string, string, error) {
+		return "main", "cafefeed0000", nil
+	}
+	st, err := statusOnly(t, w.srv).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FollowBranch != "main" || st.FollowHead != "cafefeed0000" {
+		t.Fatalf("status = %+v, want follow_branch main / follow_head cafefeed0000", st)
+	}
+}
+
+// TestStatusOmitsFollowBranchWhenUnwired: no self_deploy configured means no
+// FollowBranch seam, which must read as the fields simply being absent —
+// the nil-means-unwired shape every other optional Server dependency uses.
+func TestStatusOmitsFollowBranchWhenUnwired(t *testing.T) {
+	w := rig(t)
+	st, err := statusOnly(t, w.srv).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FollowBranch != "" || st.FollowHead != "" {
+		t.Fatalf("status = %+v, want follow branch fields absent", st)
+	}
+}
+
+// TestStatusFailsWhenFollowBranchCannotResolve: self_deploy configured but
+// the branch not resolvable (never fetched, say) is a real problem, not a
+// quiet omission that would look identical to self_deploy never having been
+// turned on — it must fail the request the same way a Backlog or
+// ExceptionHealth failure already does.
+func TestStatusFailsWhenFollowBranchCannotResolve(t *testing.T) {
+	w := rig(t)
+	w.srv.FollowBranch = func(context.Context) (string, string, error) {
+		return "", "", fmt.Errorf("resolving main: unknown revision")
+	}
+	if _, err := statusOnly(t, w.srv).Status(context.Background()); err == nil {
+		t.Fatal("status should have failed when the followed branch could not resolve")
 	}
 }

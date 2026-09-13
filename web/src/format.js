@@ -44,6 +44,16 @@ export function short(h, n = 10) {
   return /^[0-9a-f]{16,}$/i.test(s) ? s.slice(0, n) : s;
 }
 
+/** sameCommit compares a running build's commit against a resolved branch
+ *  head: the two are not guaranteed to be the same length (an ldflags-stamped
+ *  build may be abbreviated where a mirror's rev-parse is not), so equality
+ *  is prefix agreement, not string identity. */
+export function sameCommit(a, b) {
+  a = String(a ?? '');
+  b = String(b ?? '');
+  return !!a && !!b && (a === b || a.startsWith(b) || b.startsWith(a));
+}
+
 const ABS = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'medium' });
 
 /** when renders a timestamp as how long ago, with the absolute form beside it. */

@@ -12,7 +12,7 @@ import {
 } from './api.js';
 import { ActivityController } from './sse.js';
 import {
-  age, title, taskURL, short, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, place, hold, why,
+  age, title, taskURL, short, sameCommit, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, place, hold, why,
   describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail,
 } from './format.js';
 import { base, toast, focusInto } from './ui.js';
@@ -173,7 +173,12 @@ export class BoxDashboard extends LitElement {
           ? html`<jh-tag-group>${s.routes.map((r) => html`<jh-tag size="small" label=${r} href="/submit"></jh-tag>`)}</jh-tag-group>`
           : html`<span class="muted">none configured — nothing can be submitted</span>`}</dd>
         <dt>Daemon</dt>
-        <dd>${s.runner} ${s.version}, up ${age(s.uptime_sec)}, serving tenant <b>${s.tenant}</b> box <b>${s.box}</b></dd>
+        <dd>${s.runner} ${s.version}, up ${age(s.uptime_sec)}, serving tenant <b>${s.tenant}</b> box <b>${s.box}</b>
+          ${s.build_commit ? html` · runs <b>${short(s.build_commit)}</b>${s.build_dirty ? ' (dirty)' : ''}` : nothing}
+          ${s.follow_branch ? html` · <b>${s.follow_branch}</b> at <b>${short(s.follow_head)}</b>${
+            s.build_commit && !sameCommit(s.build_commit, s.follow_head)
+              ? html` <span class="muted">(behind)</span>` : nothing}` : nothing}
+        </dd>
       </dl>
       ${/* The alerts sit in the flow, below the numbers they qualify. A
            banner breaks out of the flow and covered the navigation. */ ''}

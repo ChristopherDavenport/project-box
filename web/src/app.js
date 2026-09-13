@@ -12,7 +12,7 @@ import { ActivityController } from './sse.js';
 import { THEMES, getTheme, setTheme } from './theme.js';
 import { icon } from './icons.js';
 import { base, toast } from './ui.js';
-import { age } from './format.js';
+import { age, short, sameCommit } from './format.js';
 
 // JH components used anywhere in the app — imported once, for their side
 // effect of defining the custom elements.
@@ -182,6 +182,11 @@ export class BoxClaims extends LitElement {
             <span>box <b>${s.box}</b></span>
             <span>runner <b>${s.runner}</b></span>
             <span>version <b>${s.version}</b></span>
+            ${s.build_commit ? html`
+              <span>runs <b>${short(s.build_commit)}</b>${s.build_dirty ? ' (dirty)' : ''}</span>` : nothing}
+            ${s.follow_branch ? html`
+              <span>${s.follow_branch} at <b>${short(s.follow_head)}</b>${
+                s.build_commit && !sameCommit(s.build_commit, s.follow_head) ? ' — behind' : ''}</span>` : nothing}
             <span>up <b>${age(s.uptime_sec)}</b></span>
           </div>` : nothing}
       </div>`;

@@ -280,6 +280,12 @@ func New(path string) (*Daemon, error) {
 		Live:    d.live,
 		Started: time.Now(),
 		Reload:  d.reloadForAPI,
+		// A closure rather than d.build directly: the latter would capture
+		// today's function value, so a later swap of d.build (only ever done
+		// by a test) would leave the API reporting the production seam
+		// forever.
+		Build:        func() version.Build { return d.build() },
+		FollowBranch: d.followBranchForAPI,
 		// A person resolving an escalation and a runner landing a plan's
 		// last unit are the two ways an issue closes; this is the seam for
 		// the first, invoked only once Plans.Resolve itself has succeeded.

@@ -676,3 +676,103 @@ func TestReexecIsNilSafeWithNoExec(t *testing.T) {
 		t.Fatalf("Reexec with nil Exec: %v", err)
 	}
 }
+
+// TestStatusReportsTheFollowedBranchHead: self_deploy set means /v1/status
+// carries the followed branch and the commit this daemon's own mirror
+// resolves it to — the mirror's own record, populated by assemble's fetch at
+// New, not a fresh look the status handler takes itself.
+func TestStatusReportsTheFollowedBranchHead(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, appHead := deployRepo(t, "app", validBoxdMain)
+	writeSelfDeployCfg(t, cfgPath, db, root, workRem, buildCmd, appRem, "true")
+
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	ts := httptest.NewServer(d.API.Handler())
+	t.Cleanup(ts.Close)
+	c, err := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FollowBranch != "main" || st.FollowHead != string(appHead) {
+		t.Fatalf("status = branch %q head %q, want main %s", st.FollowBranch, st.FollowHead, appHead)
+	}
+}
+
+// TestStatusOmitsTheFollowedBranchWithoutSelfDeploy: a box that never turned
+// self-deploy on has nothing to compare a build against, and /v1/status must
+// say so by leaving the fields absent rather than naming a branch nobody
+// configured.
+func TestStatusOmitsTheFollowedBranchWithoutSelfDeploy(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	writeCfg(t, cfgPath, db, root, map[string]string{"work": workRem})
+
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+
+	ts := httptest.NewServer(d.API.Handler())
+	t.Cleanup(ts.Close)
+	c, err := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.FollowBranch != "" || st.FollowHead != "" {
+		t.Fatalf("status = branch %q head %q, want both absent", st.FollowBranch, st.FollowHead)
+	}
+}
+
+// TestStatusReportsTheRunningBuild: the daemon threads its own build seam —
+// the same one the self-deploy chore compares against — into /v1/status,
+// rather than the API reading version.ThisBuild on its own.
+func TestStatusReportsTheRunningBuild(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	writeCfg(t, cfgPath, db, root, map[string]string{"work": workRem})
+
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.build = func() version.Build { return version.Build{Commit: fakeBuildCommit, Dirty: true, Known: true} }
+
+	ts := httptest.NewServer(d.API.Handler())
+	t.Cleanup(ts.Close)
+	c, err := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.BuildCommit != fakeBuildCommit || !st.BuildDirty {
+		t.Fatalf("status = commit %q dirty %v, want %s true", st.BuildCommit, st.BuildDirty, fakeBuildCommit)
+	}
+}

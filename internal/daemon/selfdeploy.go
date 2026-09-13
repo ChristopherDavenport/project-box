@@ -106,6 +106,29 @@ func (d *Daemon) selfDeployTargets() []selfDeployTarget {
 	return out
 }
 
+// followBranchForAPI answers /v1/status's followed-branch fields: the box's
+// self_deploy.from branch and the commit this daemon's own mirror last
+// recorded for it. It resolves, never fetches — the status handler shows the
+// mirror's own record, not a fresh look at the branch — and returns
+// ("", "", nil) when no box has self_deploy configured, which the API reads
+// as the fields being absent, not an error.
+//
+// A daemon with more than one self_deploy box has no single-box answer here
+// either, the same way its Box field already picks Boxes[0]: this reports
+// the first target [Daemon.selfDeployTargets] finds.
+func (d *Daemon) followBranchForAPI(ctx context.Context) (string, string, error) {
+	targets := d.selfDeployTargets()
+	if len(targets) == 0 {
+		return "", "", nil
+	}
+	t := targets[0]
+	head, err := d.mirror.Resolve(ctx, t.repo.ForgeRepo(), "refs/heads/"+t.from)
+	if err != nil {
+		return "", "", fmt.Errorf("resolving self_deploy branch %s: %w", t.from, err)
+	}
+	return t.from, string(head), nil
+}
+
 // selfDeployChore is one housekeeping pass. It does nothing, silently, in
 // the overwhelmingly common case: no box has turned it on, this binary's own
 // build commit is not knowable, or no target's branch has moved past it.

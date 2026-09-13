@@ -90,6 +90,19 @@ type Server struct {
 	// UI, when set, is served at / with SPA fallback: a path that is not a
 	// file gets index.html, so the router's deep links work on refresh.
 	UI fs.FS
+	// Build, when set, reports this daemon's own running build for
+	// /v1/status. Nil defaults to version.ThisBuild directly — the production
+	// behavior; a test substitutes a fixed fact the same way internal/daemon's
+	// own build field does, rather than depending on how the test binary
+	// itself happened to be built.
+	Build func() version.Build
+	// FollowBranch, when set, resolves the box's self_deploy.from branch to
+	// the commit this daemon's own mirror last recorded for it —
+	// mirror.Resolve is a local git rev-parse in the mirror directory, never
+	// a fetch, so /v1/status shows the box's own record of the branch rather
+	// than a fresh look at it. Nil when no box has self_deploy configured,
+	// which /v1/status reads as "these fields are absent," not an error.
+	FollowBranch func(ctx context.Context) (branch, head string, err error)
 
 	mu sync.RWMutex // guards Routes and Token swaps
 }
@@ -214,6 +227,20 @@ type Status struct {
 	// without a meter; absent rather than zero, because a zero here would
 	// read as "nothing spent" when it means "nobody asked".
 	Spend *capacity.Report `json:"spend,omitempty"`
+	// BuildCommit and BuildDirty are this daemon's own running build, from
+	// version.ThisBuild: the commit the binary was actually compiled from,
+	// and whether its tree had uncommitted changes. Both omitted when the
+	// build is not knowable — an unstamped `go test` binary, an unstamped
+	// build outside a VCS checkout — because a zero value here would read as
+	// "clean, no commit" when the honest answer is "unknown."
+	BuildCommit string `json:"build_commit,omitempty"`
+	BuildDirty  bool   `json:"build_dirty,omitempty"`
+	// FollowBranch and FollowHead are self_deploy's followed branch and the
+	// commit this daemon's own mirror last recorded for it — the mirror's own
+	// record, not a fresh fetch. Both absent when the box has no self_deploy
+	// configured.
+	FollowBranch string `json:"follow_branch,omitempty"`
+	FollowHead   string `json:"follow_head,omitempty"`
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
@@ -252,6 +279,23 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	if s.Meter != nil {
 		rep := s.Meter.Report()
 		st.Spend = &rep
+	}
+	build := version.ThisBuild()
+	if s.Build != nil {
+		build = s.Build()
+	}
+	if build.Known {
+		st.BuildCommit = build.Commit
+		st.BuildDirty = build.Dirty
+	}
+	if s.FollowBranch != nil {
+		branch, head, err := s.FollowBranch(ctx)
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		st.FollowBranch = branch
+		st.FollowHead = head
 	}
 	writeJSON(w, st)
 }
