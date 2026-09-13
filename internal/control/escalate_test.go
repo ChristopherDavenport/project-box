@@ -242,6 +242,47 @@ func TestStaleExceptionGoesOutOfBand(t *testing.T) {
 	}
 }
 
+// TestFailedItemEscalatesAtTheDefaultThreshold: queue.Fail states no
+// severity, so a failed item's Severity is empty. Empty is not a quiet
+// severity in this factory — queue.Severity.OrDefault resolves it to Medium,
+// and the room's own default escalation threshold is also Medium — so once a
+// failed item has gone stale it escalates exactly like a park a stage
+// explicitly called Medium. Nobody had to declare a floor for this; it falls
+// out of the same defaults every other exception already uses.
+func TestFailedItemEscalatesAtTheDefaultThreshold(t *testing.T) {
+	w := clockedSetup(t, time.Hour)
+	ctx := context.Background()
+	told := &recorder{}
+	esc := &Escalator{Room: w.room, Notify: told}
+
+	item, err := w.queue.Submit(ctx, queue.WorkItem{ID: "wi-fail", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: "t"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, lease, err := w.queue.Claim(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.queue.Fail(ctx, item, lease, "build panicked"); err != nil {
+		t.Fatal(err)
+	}
+
+	if sent, err := esc.Sweep(ctx); err != nil || len(sent) != 0 {
+		t.Fatalf("escalated before the objective: %d %v", len(sent), err)
+	}
+	w.advance(61 * time.Minute)
+	sent, err := esc.Sweep(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sent) != 1 || told.count() != 1 {
+		t.Fatalf("a stale failed item was not escalated: sent=%d told=%d", len(sent), told.count())
+	}
+	if n := sent[0]; n.Item != "wi-fail" || n.Severity != queue.SeverityMedium {
+		t.Fatalf("notice: %+v", n)
+	}
+}
+
 // TestReescalationIsBounded. An exception nobody answers must not become an
 // alarm nobody can silence — that is how a page gets muted, and a muted page
 // is worse than no page because it looks like coverage.

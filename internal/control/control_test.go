@@ -105,6 +105,143 @@ func TestExceptionsListsOnlyWhatStillNeedsEyes(t *testing.T) {
 	}
 }
 
+// TestFailedItemsListBesideParkedOnes: queue.Fail has never written an
+// index/exceptions record, so an item it settles is reachable only through
+// index/pending — the same listing Backlog counts from (issue #111).
+func TestFailedItemsListBesideParkedOnes(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	parked := submit(t, q, "wi-parked")
+	_, lease, err := q.Claim(ctx, parked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Park(ctx, parked, lease, queue.SeverityMedium, "gate failed"); err != nil {
+		t.Fatal(err)
+	}
+
+	failed := submit(t, q, "wi-failed")
+	failed, lease2, err := q.Claim(ctx, failed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Fail(ctx, failed, lease2, "build panicked"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.Exceptions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want the parked item and the failed one, got %+v", got)
+	}
+	byID := map[string]Exception{}
+	for _, x := range got {
+		byID[x.ID] = x
+	}
+	if x, ok := byID["wi-parked"]; !ok || x.State != queue.StateParked {
+		t.Fatalf("parked item missing or wrong state: %+v", byID["wi-parked"])
+	}
+	fx, ok := byID["wi-failed"]
+	if !ok || fx.State != queue.StateFailed {
+		t.Fatalf("failed item missing or wrong state: %+v", fx)
+	}
+	if fx.Parked.IsZero() {
+		t.Fatal("failed item's clock (Parked) is zero — it should be when it entered failed")
+	}
+	// No index/exceptions record was ever written for it — this item is
+	// found purely via index/pending.
+	found := false
+	for rec, err := range r.Store.Log().Since(ctx, tn, "index/exceptions", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Subject == "wi-failed" {
+			found = true
+		}
+	}
+	if found {
+		t.Fatal("test setup drifted: wi-failed unexpectedly has an index/exceptions record")
+	}
+}
+
+// TestFailedCountAgreesWithBacklog: the status line's failed= count and the
+// exception queue's page must fold the same rows — a count that is a second
+// reading of the queue is a count that can disagree with it.
+func TestFailedCountAgreesWithBacklog(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"wi-f1", "wi-f2"} {
+		w := submit(t, q, id)
+		w, lease, err := q.Claim(ctx, w)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.Fail(ctx, w, lease, "failed"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	submit(t, q, "wi-pending")
+
+	exceptions, err := r.Exceptions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	failedInExceptions := 0
+	for _, x := range exceptions {
+		if x.State == queue.StateFailed {
+			failedInExceptions++
+		}
+	}
+	backlog, err := r.Backlog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failedInExceptions != backlog.ByState[queue.StateFailed] {
+		t.Fatalf("exceptions had %d failed, backlog says %d", failedInExceptions, backlog.ByState[queue.StateFailed])
+	}
+	if backlog.ByState[queue.StateFailed] != 2 {
+		t.Fatalf("want 2 failed in backlog, got %d", backlog.ByState[queue.StateFailed])
+	}
+}
+
+// TestResolvedParkedItemDropsOutOfExceptions: an operator resolving an
+// exception — no landing, just a judgement that there is nothing to build —
+// takes it out of the room the same way a retry-to-done does.
+func TestResolvedParkedItemDropsOutOfExceptions(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	w := submit(t, q, "wi-parked")
+	w, lease, err := q.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Park(ctx, w, lease, queue.SeverityMedium, "gate failed"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Exceptions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("before resolve: %+v", got)
+	}
+	if _, err := q.Resolve(ctx, tn, "wi-parked", "chris", "nothing to build, closing"); err != nil {
+		t.Fatal(err)
+	}
+	got, err = r.Exceptions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("resolved item still listed: %+v", got)
+	}
+}
+
 func TestSampleIsDeterministicAndRecorded(t *testing.T) {
 	r, q := setup(t)
 	ctx := context.Background()

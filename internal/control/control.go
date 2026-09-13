@@ -91,7 +91,10 @@ type Exception struct {
 	queue.WorkItem
 	// Parked is when the item LAST entered the exception queue. A retry that
 	// parks again restarts the clock, because the wait a person owes this
-	// item began then and not at the first attempt.
+	// item began then and not at the first attempt. A failed item — settled
+	// by [queue.Queue.Fail], which never visits Park — counts from when it
+	// became failed instead: the exception queue is where both land, and an
+	// item that never parked still needs its own clock.
 	Parked time.Time `json:"parked"`
 	AgeSec int64     `json:"age_sec"`
 	// Escalations counts the out-of-band notices this parking has produced.
@@ -101,10 +104,16 @@ type Exception struct {
 	Overdue bool `json:"overdue"`
 }
 
-// Exceptions lists items currently parked: everything the factory decided a
-// person has to look at. Items whose state moved on since parking drop out —
-// the index remembers every parking, the fold shows only what still needs
-// eyes.
+// Exceptions lists items currently parked or failed: everything the factory
+// decided a person has to look at. Items whose state moved on since parking
+// drop out — the index remembers every parking, the fold shows only what
+// still needs eyes.
+//
+// A failed item has no index/exceptions record at all: [queue.Queue.Fail]
+// settles an item straight from claimed, never through Park, so the only
+// index that ever heard of it is index/pending. This walks that listing too,
+// deduped against the same seen set, so a failed item lists exactly once and
+// a retried-then-reopened one is not double-counted between the two walks.
 //
 // Loudest first, then oldest. Arrival order is the order the factory would
 // take work in and exactly the wrong order for a person clearing a queue,
@@ -155,6 +164,37 @@ func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
 			Overdue:     age >= objective,
 		})
 	}
+	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/pending", 1) {
+		if err != nil {
+			return nil, err
+		}
+		if seen[rec.Subject] {
+			continue
+		}
+		seen[rec.Subject] = true
+		item, failed, err := r.parked(ctx, rec.Subject)
+		if err != nil {
+			return nil, err
+		}
+		if item.State != queue.StateFailed {
+			continue
+		}
+		age := now.Sub(failed)
+		// item.Severity is empty here — [queue.Queue.Fail] states none — so
+		// it sorts with the existing Rank (below High/Critical, tied with
+		// Medium) without this package inventing one. It is not quiet by the
+		// same stroke: [Escalator.Sweep] reads severity through
+		// [queue.Severity.OrDefault], which resolves empty to
+		// [queue.SeverityMedium], and the room's own default threshold is
+		// also Medium — so a failed item DOES escalate once it goes stale,
+		// same as a park a stage explicitly called Medium. See
+		// TestFailedItemEscalatesAtTheDefaultThreshold.
+		out = append(out, Exception{
+			WorkItem: item, Parked: failed, AgeSec: int64(age.Seconds()),
+			Escalations: countAfter(told[rec.Subject], failed),
+			Overdue:     age >= objective,
+		})
+	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i].Severity.Rank(), out[j].Severity.Rank()
 		if a != b {
@@ -166,11 +206,14 @@ func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
 }
 
 // parked folds one item's chain into the item and the moment it last entered
-// the exception queue. One walk for both, for the reason [Room.entry] gives:
-// Load would produce the first and throw the second away.
+// the exception queue — parked, or, for an item [queue.Queue.Fail] settled
+// without ever parking, failed. One walk for both, for the reason
+// [Room.entry] gives: Load would produce the first and throw the second
+// away. The caller picks the timestamp that matches the item's current
+// state; the other is returned zero.
 func (r *Room) parked(ctx context.Context, id string) (queue.WorkItem, time.Time, error) {
 	var w queue.WorkItem
-	var at time.Time
+	var parkedAt, failedAt time.Time
 	found := false
 	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "workitem/"+id, 1) {
 		if err != nil {
@@ -186,14 +229,20 @@ func (r *Room) parked(ctx context.Context, id string) (queue.WorkItem, time.Time
 			return queue.WorkItem{}, time.Time{}, fmt.Errorf("control: item %s record %d (%s): %w", id, rec.Seq, rec.Kind, err)
 		}
 		found = true
-		if w.State == queue.StateParked {
-			at = rec.At
+		switch w.State {
+		case queue.StateParked:
+			parkedAt = rec.At
+		case queue.StateFailed:
+			failedAt = rec.At
 		}
 	}
 	if !found {
 		return queue.WorkItem{}, time.Time{}, fmt.Errorf("%w: %s", queue.ErrNoItem, id)
 	}
-	return w, at, nil
+	if w.State == queue.StateFailed {
+		return w, failedAt, nil
+	}
+	return w, parkedAt, nil
 }
 
 // ExceptionHealth is the exception queue measured against its objective —
