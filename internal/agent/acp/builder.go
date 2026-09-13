@@ -311,10 +311,94 @@ type attemptCtx struct {
 
 // runAttempt sends one prompt to one agent process — cold, or continuing a
 // resumed session when resume is set — and writes THIS attempt's own
-// complete record: its own agentref, agent-run, agent-prompt, agent-session,
-// result, text, and cost. continues names the session this attempt
-// continues, so that fact is stated on the record rather than left to be
-// inferred from an agent-session carrying the same id twice.
+// complete record via [Builder.runOnce], then interprets the result:
+// escalation, handoff, a nudge for a dirty tree the agent forgot to commit,
+// and finally the adapter's own commit.
+func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, continues string) (forge.Commit, error) {
+	ws := rc.Workspace
+	res, err := b.runOnce(ctx, rc, sent, resume, continues)
+	if err != nil {
+		if errors.Is(err, ErrAborted) {
+			// The loop gets a typed error so it can retry rather than park —
+			// see loop.Aborted. runOnce already recorded what the dropped
+			// call cost.
+			return "", &loop.Aborted{Reason: res.AbortReason}
+		}
+		return "", err
+	}
+	// Escalation first: it is the stronger claim of the two. An agent that
+	// both declines and asks for a fresh session is stuck, and a fresh session
+	// will be stuck in the same place.
+	if reason := escalation(res); reason != "" {
+		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason}
+	}
+	if reason, notes := handoff(res); reason != "" {
+		// The session's account goes to the seat NOW rather than on the settle
+		// path, because the item does not settle — it goes back to the queue
+		// for a successor of itself, which wakes from this seat's scope. A
+		// note deferred to settle is a note that successor never sees, and
+		// carrying it is the entire point of the verb.
+		if b.Seat != nil {
+			if err := b.Seat.RecordMidRun(ctx, ws.Run, notes); err != nil {
+				return "", fmt.Errorf("acp: recording the handoff: %w", err)
+			}
+		}
+		// What the session got to, committed, so the successor continues it
+		// rather than being bought a second time. No "changed nothing" check
+		// here: a session may legitimately spend its whole context reading and
+		// hand off with only an account of what it found. No nudge either — a
+		// session that handed off already said it is out of room, and one
+		// more prompt to the same session would only confirm that again.
+		left, cerr := b.commit(ctx, ws, rc.Task, wipTrailer)
+		if cerr != nil {
+			return "", cerr
+		}
+		return "", &loop.Handoff{Seat: b.seatName(), Reason: reason, Commit: left}
+	}
+	b.stashNotes(ws.Run, handoffNotes(res.Text))
+
+	// One turn is cheaper than a whole rebuild: a dirty tree with no
+	// escalation and no handoff is a builder that simply stopped short, and
+	// the session it just ran is still there to ask. The nudge runs through
+	// [Builder.runOnce] directly rather than back through this function, so
+	// its own escalation or handoff text is never interpreted and it can
+	// never summon a nudge of its own. Its outcome is never checked here
+	// either: [Builder.commit] below re-reads the tree regardless, so a
+	// commit the nudge actually made is picked up the same way a commit the
+	// original turn made always has been, and a nudge that answered without
+	// committing — or never got to run at all — falls straight through to
+	// the placeholder that follows.
+	if res.Session.ID != "" {
+		if dirty, derr := gitforge.Dirty(ctx, ws.Dir); derr == nil && dirty {
+			b.runOnce(ctx, rc, nudgePrompt, res.Session.ID, res.Session.ID)
+		}
+	}
+
+	// The working contract's teeth: the agent commits, or the adapter
+	// commits what it left, and a run that changed nothing is an error —
+	// "done" with an untouched tree is the silent failure mode agents
+	// default to when confused, and it must never look like success.
+	head, err := b.commit(ctx, ws, rc.Task, doneTrailer)
+	if err != nil {
+		return "", err
+	}
+	if head == ws.Base {
+		return "", fmt.Errorf("acp: agent finished without changing anything — no commit, no escalation (stop=%q, %d tool calls)", res.StopReason, len(res.ToolCalls))
+	}
+	return head, nil
+}
+
+// runOnce sends one prompt to one agent process — cold, or continuing a
+// resumed session when resume is set — and writes THIS attempt's own
+// complete wire-level record: its own agentref, agent-run, agent-prompt,
+// agent-session, result, text, and cost. continues names the session this
+// attempt continues, so that fact is stated on the record rather than left
+// to be inferred from an agent-session carrying the same id twice.
+//
+// It stops there — no escalation, handoff, or commit interpretation — so
+// [Builder.runAttempt] can call it once for an ordinary attempt and again,
+// directly, for the one-shot nudge that follows a dirty tree without either
+// of those interpretations applying to the nudge's own answer.
 //
 // The agentref goes on the record BEFORE the agent runs: if the run is
 // disowned mid-flight, the evidence still says exactly which agent was
@@ -324,7 +408,7 @@ type attemptCtx struct {
 // agent was actually given, and re-resolving the bundle to find out needs
 // the same material still on disk at the same commits — exactly the thing
 // the record exists so nobody has to have.
-func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, continues string) (forge.Commit, error) {
+func (b *Builder) runOnce(ctx context.Context, rc attemptCtx, sent, resume, continues string) (Result, error) {
 	ws, bundle := rc.Workspace, rc.Bundle
 	envelope := "(none declared)"
 	if bundle.Envelope != nil {
@@ -385,7 +469,9 @@ func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, c
 	// successes is a meter that undercounts exactly when things go wrong.
 	// A run that never sent a prompt is the one exception: it spent nothing,
 	// knowably, and charging it as unknown would close the window over a
-	// refused model or a session that would not open.
+	// refused model or a session that would not open. The nudge is charged
+	// by this exact same test — a resume refused before a prompt went out
+	// costs nothing, one that reached session/prompt costs whatever it cost.
 	if b.Spend != nil && res.Prompted {
 		b.Spend(ctx, ws.Run, res.Usage)
 	}
@@ -395,12 +481,9 @@ func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, c
 			// its result record now rather than never: a dropped call still
 			// answers "what did this run cost and how did it end", which is
 			// exactly what a bare error return here has always thrown away.
-			// The loop gets a typed error so it can retry rather than park —
-			// see loop.Aborted.
 			b.record(ctx, ws.Run, "agent-result", bundle.Ref, resultBody(res, elapsed))
-			return "", &loop.Aborted{Reason: res.AbortReason}
 		}
-		return "", err
+		return res, err
 	}
 	// The run's shape on the record: what it cost and how it ended, for the
 	// capacity plane and for experiments that compare runs. Unknown dialect
@@ -428,47 +511,7 @@ func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, c
 	b.recordJSON(ctx, ws.Run, "agent-text", bundle.Ref, textRecord{
 		AgentRef: bundle.Ref, Text: res.Text, StopReason: res.StopReason,
 	})
-	// Escalation first: it is the stronger claim of the two. An agent that
-	// both declines and asks for a fresh session is stuck, and a fresh session
-	// will be stuck in the same place.
-	if reason := escalation(res); reason != "" {
-		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason}
-	}
-	if reason, notes := handoff(res); reason != "" {
-		// The session's account goes to the seat NOW rather than on the settle
-		// path, because the item does not settle — it goes back to the queue
-		// for a successor of itself, which wakes from this seat's scope. A
-		// note deferred to settle is a note that successor never sees, and
-		// carrying it is the entire point of the verb.
-		if b.Seat != nil {
-			if err := b.Seat.RecordMidRun(ctx, ws.Run, notes); err != nil {
-				return "", fmt.Errorf("acp: recording the handoff: %w", err)
-			}
-		}
-		// What the session got to, committed, so the successor continues it
-		// rather than being bought a second time. No "changed nothing" check
-		// here: a session may legitimately spend its whole context reading and
-		// hand off with only an account of what it found.
-		left, cerr := b.commit(ctx, ws, rc.Task, wipTrailer)
-		if cerr != nil {
-			return "", cerr
-		}
-		return "", &loop.Handoff{Seat: b.seatName(), Reason: reason, Commit: left}
-	}
-	b.stashNotes(ws.Run, handoffNotes(res.Text))
-
-	// The working contract's teeth: the agent commits, or the adapter
-	// commits what it left, and a run that changed nothing is an error —
-	// "done" with an untouched tree is the silent failure mode agents
-	// default to when confused, and it must never look like success.
-	head, err := b.commit(ctx, ws, rc.Task, doneTrailer)
-	if err != nil {
-		return "", err
-	}
-	if head == ws.Base {
-		return "", fmt.Errorf("acp: agent finished without changing anything — no commit, no escalation (stop=%q, %d tool calls)", res.StopReason, len(res.ToolCalls))
-	}
-	return head, nil
+	return res, nil
 }
 
 // priorBuilderSession finds the newest builder-role agent-session record on
@@ -697,6 +740,13 @@ const (
 	doneTrailer = "(committed by the adapter: the agent made the change and left the ceremony)"
 	wipTrailer  = "(work in progress, committed by the adapter: the session handed off before finishing)"
 )
+
+// nudgePrompt is the one follow-up a session gets when its turn ends with a
+// dirty tree and neither an escalation nor a handoff: continuing the same
+// session costs one turn, where the adapter's placeholder commit — the
+// fallback this asks for one chance to avoid — costs the change its own
+// voice.
+const nudgePrompt = "This turn ended with uncommitted changes in the workspace, and no escalation or handoff. Commit your change with a message in this repository's voice."
 
 func commitMessage(task, trailer string) string {
 	line := task

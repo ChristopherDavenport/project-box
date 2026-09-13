@@ -519,12 +519,19 @@ func fakeAgent(scenario string) {
 	// assert against — the same convention "session"'s prompt reply uses for
 	// model/effort/fast/mode.
 	var loadedID, loadedCwd string
+	// resumed is true once session/load has actually opened this process's
+	// session — as against "resume-load-fails", which is asked but never
+	// gets there. The dirty-resume scenarios below use it to answer
+	// differently on the nudge than they did on the cold turn, the same way
+	// two separate ACP_FAKE processes would.
+	var resumed bool
 	// resumeScenarios advertise the loadSession capability at initialize:
 	// every scenario in this file that exercises session/load. A scenario
 	// absent from this set is what "the agent does not advertise resume" is
 	// tested against, without needing a scenario of its own.
 	resumeScenarios := map[string]bool{
 		"resume": true, "resume-load-fails": true, "resume-mode-refused": true,
+		"dirty-resume": true, "dirty-resume-nocommit": true,
 	}
 	// The session configuration the fake exposes, shaped like the real
 	// adapter's: a model option tagged with the protocol's model category
@@ -596,6 +603,7 @@ func fakeAgent(scenario string) {
 				break
 			}
 			sessionID = loadedID
+			resumed = true
 			// The protocol replays the conversation as notifications rather
 			// than answering it inline — one turn of it, enough for the
 			// runtime's tolerance of a replay under this call to matter.
@@ -800,6 +808,48 @@ func fakeAgent(scenario string) {
 				f.notify("session/update", map[string]any{"sessionId": sessionID,
 					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
 						"content": map[string]any{"type": "text", "text": "Added the widget and committed.\nHANDOFF: the widget package expects blue as the default\n"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "dirty":
+				// Ends its turn with an uncommitted change and nothing
+				// else — no escalation, no handoff, no commit. Absent from
+				// resumeScenarios: a caller that tries to nudge this one
+				// must fall back to the placeholder without ever reaching
+				// session/load.
+				os.WriteFile("widget.go", []byte("package app // built but never committed\n"), 0o644)
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "Added the widget.\n"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "dirty-resume":
+				// The cold turn leaves the same uncommitted change as
+				// "dirty"; the nudge that resumes this session commits it
+				// for real, with its own message.
+				if resumed {
+					gitc("add", "-A")
+					gitc("commit", "-m", "add the widget, since you asked")
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+							"content": map[string]any{"type": "text", "text": "Committed as asked.\n"}}})
+				} else {
+					os.WriteFile("widget.go", []byte("package app // built but never committed\n"), 0o644)
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+							"content": map[string]any{"type": "text", "text": "Added the widget.\n"}}})
+				}
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "dirty-resume-nocommit":
+				// The nudge answers but commits nothing — the placeholder
+				// must still land and the change must not be lost.
+				if resumed {
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+							"content": map[string]any{"type": "text", "text": "Looked, but there is nothing more to do here.\n"}}})
+				} else {
+					os.WriteFile("widget.go", []byte("package app // built but never committed\n"), 0o644)
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+							"content": map[string]any{"type": "text", "text": "Added the widget.\n"}}})
+				}
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "repair":
 				// The run after a red one: it fixes what is already on the
