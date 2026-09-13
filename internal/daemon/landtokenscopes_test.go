@@ -71,7 +71,7 @@ func TestAssembleRefusesADefiniteWorkflowScopeGap(t *testing.T) {
 	defer ts.Close()
 	d := newGHLandDaemon(t, ts)
 
-	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err == nil {
+	if _, _, _, _, _, _, err := d.assemble(ctx, d.cfg); err == nil {
 		t.Fatal("land token missing the workflow scope, on a repo with a workflows directory, was accepted")
 	} else if !strings.Contains(err.Error(), "gh auth refresh -s workflow") {
 		t.Fatalf("error = %v, want it to contain the one-line fix verbatim", err)
@@ -102,7 +102,7 @@ func TestAssembleAcceptsAScopeListCarryingWorkflow(t *testing.T) {
 	defer ts.Close()
 	d := newGHLandDaemon(t, ts)
 
-	loops, _, _, _, _, err := d.assemble(ctx, d.cfg)
+	loops, _, _, _, _, _, err := d.assemble(ctx, d.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +137,7 @@ func TestAssembleAcceptsAMissingWorkflowsDirectory(t *testing.T) {
 	defer ts.Close()
 	d := newGHLandDaemon(t, ts)
 
-	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
+	if _, _, _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
 		t.Fatal(err)
 	}
 
@@ -190,7 +190,7 @@ func TestAssembleRefusesADefiniteIssuesScopeGap(t *testing.T) {
 	defer ts.Close()
 	d := newGHLandDaemon(t, ts)
 
-	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err == nil {
+	if _, _, _, _, _, _, err := d.assemble(ctx, d.cfg); err == nil {
 		t.Fatal("land token missing both repo and public_repo scopes was accepted")
 	} else if !strings.Contains(err.Error(), "gh auth refresh -s repo") {
 		t.Fatalf("error = %v, want it to contain the one-line fix verbatim", err)
@@ -205,7 +205,7 @@ func TestAssembleAcceptsPublicRepoScope(t *testing.T) {
 	defer ts.Close()
 	d := newGHLandDaemon(t, ts)
 
-	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
+	if _, _, _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -243,7 +243,7 @@ func TestAssembleNonGitHubRemoteProbesNothing(t *testing.T) {
 		return nil, nil
 	})}
 
-	if _, _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
+	if _, _, _, _, _, _, err := d.assemble(ctx, d.cfg); err != nil {
 		t.Fatal(err)
 	}
 }

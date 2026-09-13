@@ -23,6 +23,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -349,6 +350,21 @@ type Box struct {
 	// validate, because a bound of nothing asks nothing and unknown must
 	// not read as zero.
 	LandRetries *int `yaml:"land_retries"`
+	// Widen answers a structured escalation that names sections it needs
+	// beyond what the item already holds: [loop.WidenTests] ("tests") lets
+	// the loop grant a test-only need in place, or hands a need it cannot
+	// grant to the box's planner to replan, instead of parking for a
+	// person; [loop.WidenNone] ("none") never widens, the behavior before
+	// this field existed. Named Widen rather than Escalation to avoid
+	// colliding with this file's own per-kind [Escalation] type below, which
+	// is unrelated.
+	//
+	// Absent defaults to "tests" — issue #182's own words call widen:tests a
+	// reasonable default, so an unset box changes answer from parking every
+	// cross-section need for a person to auto-widening the ones that stay
+	// within tests. A box that wants a person on every such escalation
+	// writes `widen: none`. Anything else is refused at Load.
+	Widen string `yaml:"widen"`
 	// Roles are per-role tiers: what the planner judges on, what the builder
 	// expresses on. A role's model or session wins over the box's for that
 	// role's runs and loses to a section's and to a plan node's. Keys are the
@@ -865,6 +881,13 @@ func (c *Config) validate() error {
 		}
 		if bx.LandRetries != nil && *bx.LandRetries <= 0 {
 			return fmt.Errorf("boxcfg: box %s: land_retries %d — a bound of nothing asks nothing; leave it unset for the loop's own default", bx.Name, *bx.LandRetries)
+		}
+		switch bx.Widen {
+		case "":
+			bx.Widen = loop.WidenTests
+		case loop.WidenTests, loop.WidenNone:
+		default:
+			return fmt.Errorf("boxcfg: box %s: widen %q — only %q or %q are known", bx.Name, bx.Widen, loop.WidenTests, loop.WidenNone)
 		}
 		for _, role := range slices.Sorted(maps.Keys(bx.Roles)) {
 			if !agent.Role(role).Known() {

@@ -47,7 +47,7 @@ boxes:
 	}
 	defer d.Close()
 
-	loops, _, _, _, _, err := d.assemble(context.Background(), d.cfg)
+	loops, _, _, _, _, _, err := d.assemble(context.Background(), d.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,7 +92,7 @@ boxes:
 		t.Fatal(err)
 	}
 	defer d2.Close()
-	loops2, _, _, _, _, err := d2.assemble(context.Background(), d2.cfg)
+	loops2, _, _, _, _, _, err := d2.assemble(context.Background(), d2.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}

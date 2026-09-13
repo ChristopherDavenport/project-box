@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
+	"github.com/ChristopherDavenport/project-box/internal/loop"
 )
 
 func writeCfg(t *testing.T, body string) string {
@@ -988,5 +989,72 @@ boxes:
 `))
 	if err == nil || !strings.Contains(err.Error(), "housekeep_every") {
 		t.Fatalf("housekeep_every malformed: err = %v, want it to name housekeep_every", err)
+	}
+}
+
+// TestWidenAbsentDefaultsToTests: issue #182's own words call widen:tests a
+// reasonable default, so a box naming no widen: policy at all must resolve to
+// [loop.WidenTests] — auto-widen a test-only cross-section need — rather than
+// parking every such escalation for a person, which is what an empty string
+// would mean if it survived Load unresolved.
+func TestWidenAbsentDefaultsToTests(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Widen; got != loop.WidenTests {
+		t.Fatalf("widen = %q, want %q (the default)", got, loop.WidenTests)
+	}
+}
+
+// TestWidenNoneParses: a box that wants a person on every cross-section
+// escalation writes this explicitly, and Load must carry it through
+// unchanged rather than defaulting past it.
+func TestWidenNoneParses(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    widen: none
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Widen; got != loop.WidenNone {
+		t.Fatalf("widen = %q, want %q", got, loop.WidenNone)
+	}
+}
+
+// TestWidenRefusesAMisspelling: only "tests" and "none" are known, and a
+// misspelling — including the truthy-looking "true" a YAML author reaches
+// for on instinct — is refused at Load naming the accepted spellings, the
+// same style as TestSessionRefusesTheSpellingsThatHaveFields.
+func TestWidenRefusesAMisspelling(t *testing.T) {
+	for _, bad := range []string{"test", "true"} {
+		_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    widen: `+bad+`
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+		if err == nil || !strings.Contains(err.Error(), "tests") || !strings.Contains(err.Error(), "none") {
+			t.Fatalf("widen: %s: err = %v, want it to name the accepted spellings tests/none", bad, err)
+		}
 	}
 }

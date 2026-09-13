@@ -236,7 +236,7 @@ func New(path string) (*Daemon, error) {
 		s.Close()
 		return nil, err
 	}
-	loops, routes, remotes, landPR, kinds, err := d.assemble(context.Background(), cfg)
+	loops, routes, remotes, landPR, kinds, replanner, err := d.assemble(context.Background(), cfg)
 	if err != nil {
 		s.Close()
 		return nil, err
@@ -259,6 +259,7 @@ func New(path string) (*Daemon, error) {
 		Kinds:       kinds,
 		Decomposers: decomposers,
 		Plans:       d.plans,
+		Replanner:   replanner,
 	}
 	d.routes = routes
 	d.remotes = remotes
@@ -316,16 +317,23 @@ func (d *Daemon) Close() error { return d.store.Close() }
 
 // assemble builds the executor, route and declaration tables from a config —
 // used at New and again at every Reload.
-func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*loop.Loop, map[string]ingress.Route, map[string]string, map[string]bool, kind.Sets, error) {
+func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*loop.Loop, map[string]ingress.Route, map[string]string, map[string]bool, kind.Sets, plan.Replanner, error) {
 	loops := map[string]*loop.Loop{}
 	routes := map[string]ingress.Route{}
 	landPR := map[string]bool{}
 	remotes := map[string]string{}
 	kinds := kind.Sets{}
+	// replanner is the pump's single [plan.Replanner] hook, wired from the
+	// same per-box [acp.Planner] this loop registers into d.planners below —
+	// see issue #182. A box with no agent never sets it; among boxes that do,
+	// the field stays one value for the whole daemon, so the last one wins,
+	// same as [pump.Pump.Replanner] itself being one field rather than one
+	// per box.
+	var replanner plan.Replanner
 	for _, bx := range cfg.Boxes {
 		set, err := d.declarations(ctx, bx)
 		if err != nil {
-			return nil, nil, nil, nil, nil, err
+			return nil, nil, nil, nil, nil, nil, err
 		}
 		kinds[bx.Name] = set
 		if len(bx.Agent) == 0 {
@@ -334,7 +342,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			// at a time. Refused here, where the operator can see it coming.
 			for _, name := range set.Names() {
 				if decl, err := set.Lookup(name); err == nil && decl.Decomposer() == acp.PlannerName {
-					return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s kind %s names the planner decomposer and the box has no agent — a build command cannot judge", bx.Name, name)
+					return nil, nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s kind %s names the planner decomposer and the box has no agent — a build command cannot judge", bx.Name, name)
 				}
 			}
 		}
@@ -386,7 +394,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			repo := r.ForgeRepo()
 			repos = append(repos, repo)
 			if err := d.mirror.Fetch(ctx, repo); err != nil {
-				return nil, nil, nil, nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
+				return nil, nil, nil, nil, nil, nil, fmt.Errorf("daemon: fetch %s/%s: %w", bx.Name, r.Name, err)
 			}
 			check := r.Check
 			if r.Review == boxcfg.ReviewJudgement && agentBuilder == nil {
@@ -394,12 +402,12 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// agent never reaches here. A nil agentBuilder in this branch
 				// is this assembly disagreeing with that refusal, not a
 				// config an operator could have written.
-				return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: review: judgement with no agent builder — should have been refused at Load", bx.Name, r.Name)
+				return nil, nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: review: judgement with no agent builder — should have been refused at Load", bx.Name, r.Name)
 			}
 			reviews := r.Review == boxcfg.ReviewJudgement
 			lp := &loop.Loop{
 				Store: d.store, Runner: d.cfgRunner(), Mirror: d.mirror, Repo: repo, Branch: r.Branch,
-				Lane: forge.Lane(r.Lane), Meter: d.meter,
+				Lane: forge.Lane(r.Lane), Meter: d.meter, Widen: bx.Widen,
 				Gates: func(ws forge.Workspace) []forge.Gate {
 					gates := []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
 						Commands: [][]string{{"sh", "-c", check}}}}
@@ -471,7 +479,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					Tenant: d.tenant, Scope: "control/config", Kind: "land-token-scopes",
 					Subject: bx.Name + "/" + r.Name, Actor: cfg.Runner, Body: body,
 				}); err != nil {
-					return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: recording land-token scopes: %w", bx.Name, r.Name, err)
+					return nil, nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: recording land-token scopes: %w", bx.Name, r.Name, err)
 				}
 				// Every indefinite outcome — a non-GitHub remote, a token or
 				// network failure, an absent X-OAuth-Scopes header, a status
@@ -482,7 +490,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// plan adds on the forge side still refuses before any push
 				// either way, so an unanswered probe is never the last word.
 				if scopes.missingWorkflowScope() {
-					return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: land token scopes (%s) lack \"workflow\", and %s has a .github/workflows directory — run: gh auth refresh -s workflow", bx.Name, r.Name, scopes.Scopes, r.Remote)
+					return nil, nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: land token scopes (%s) lack \"workflow\", and %s has a .github/workflows directory — run: gh auth refresh -s workflow", bx.Name, r.Name, scopes.Scopes, r.Remote)
 				}
 				// Closing a driving issue — on plan completion, or a
 				// resolved escalation — needs the same token's issues
@@ -493,7 +501,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				// reason the workflow one is: at Load, not at the first
 				// close's own rejection.
 				if scopes.missingIssuesScope() {
-					return nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: land token scopes (%s) lack \"repo\" or \"public_repo\" — issue closing needs issues write — run: gh auth refresh -s repo", bx.Name, r.Name, scopes.Scopes)
+					return nil, nil, nil, nil, nil, nil, fmt.Errorf("daemon: box %s repo %s: land token scopes (%s) lack \"repo\" or \"public_repo\" — issue closing needs issues write — run: gh auth refresh -s repo", bx.Name, r.Name, scopes.Scopes)
 				}
 				// Validated at Load: pull_request landing does not reach here
 				// without a known land_token, and "gh" is the only one today.
@@ -550,7 +558,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 		// same harness source under the planner role, its own seat for
 		// continuity, its own read-only trees, the same meter.
 		agentBuilder.Repos = repos
-		d.planners.Set(bx.Name, &acp.Planner{
+		boxPlanner := &acp.Planner{
 			Store: d.store, Tenant: d.tenant, Box: bx.Name,
 			Command: bx.Agent, EnvNames: forwardedEnv(bx), MaxTokens: cfg.Budget.MaxTokensPerRun,
 			Composer: agentBuilder.Composer,
@@ -562,9 +570,15 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				d.meter.Charge(ctx, run, SpendOf(u))
 			},
 			Progress: d.progress,
-		})
+		}
+		d.planners.Set(bx.Name, boxPlanner)
+		// Widen answers a structured escalation in-loop when it can; when it
+		// cannot, [pump.Pump.Replan] is what asks a planner to revise the
+		// unit instead of parking it for a person, and this is the only
+		// planner instance a box with an agent has to offer it.
+		replanner = boxPlanner
 	}
-	return loops, routes, remotes, landPR, kinds, nil
+	return loops, routes, remotes, landPR, kinds, replanner, nil
 }
 
 // declarations resolves one box's kind declarations: the seeds, then the
@@ -727,13 +741,18 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 			return "", fmt.Errorf("daemon: %s is the daemon's identity, not its configuration — changing it (%q -> %q) needs a restart; reload refused, old config still running", f.name, f.was, f.now)
 		}
 	}
-	loops, routes, remotes, landPR, kinds, err := d.assemble(ctx, ncfg)
+	loops, routes, remotes, landPR, kinds, replanner, err := d.assemble(ctx, ncfg)
 	if err != nil {
 		return "", fmt.Errorf("daemon: reload refused, old config still running: %w", err)
 	}
 
 	d.pump.SetLoops(loops)
 	d.pump.SetKinds(kinds)
+	// Unguarded, same as d.escalator.Kinds below: [pump.Pump.Replanner] has
+	// no setter because nothing reads it under Loops/Kinds' swap lock either
+	// — a run already dispatched to replan keeps asking the planner it
+	// started with, and the next one sees the new box's.
+	d.pump.Replanner = replanner
 	d.escalator.Kinds = kinds
 	d.API.SetRoutes(routes)
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
