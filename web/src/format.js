@@ -109,6 +109,51 @@ export function tokenSplit(s) {
   return parts.map(([k, n]) => `${k} ${fmtTokens(n)}`).join(' · ');
 }
 
+/** unknownSpend is true when a window (or a boot total) contains a charge
+ *  nobody could price or meter — the exact case in which the window's own
+ *  total is a partial sum, not the whole one. */
+function unknownSpend(unpriced, unmetered) {
+  return (unpriced ?? 0) > 0 || (unmetered ?? 0) > 0;
+}
+
+/**
+ * tally projects GET /v1/status into the strip's fact row: what the factory
+ * has landed (all-time — the endpoint carries no windowed count, see the
+ * package comment on control.Backlog), what's pending, what's running, and
+ * what it has spent this window and since boot. Every figure is a straight
+ * read of a field the endpoint already folds; nothing here counts anything
+ * a second time.
+ *
+ * Money and token figures read 'unknown' rather than a number whenever the
+ * window they are drawn from has an unpriced or unmetered charge in it: the
+ * true total is not knowable, and a partial sum would look identical to a
+ * complete one. When spend is absent altogether (a daemon wired without a
+ * meter) every spend-derived figure is null so the caller renders nothing —
+ * never a zero, which would read as "nothing spent" rather than "nobody
+ * asked". The boot figures are independently null when the daemon predates
+ * them (the field itself is missing from the JSON, not merely zero).
+ */
+export function tally(s) {
+  const landed = s?.backlog?.by_state?.done ?? 0;
+  const pending = s?.pending ?? 0;
+  const spend = s?.spend;
+  if (!spend) {
+    return { landed, pending, running: null, windowMoney: null, windowTokens: null, bootMoney: null, bootTokens: null };
+  }
+  const windowUnknown = unknownSpend(spend.unpriced, spend.unmetered);
+  const bootKnown = spend.boot_cost_micros !== undefined && spend.boot_tokens !== undefined;
+  const bootUnknown = bootKnown && unknownSpend(spend.boot_unpriced, spend.boot_unmetered);
+  return {
+    landed,
+    pending,
+    running: spend.running ?? 0,
+    windowMoney: windowUnknown ? 'unknown' : fmtUSD(spend.cost_micros),
+    windowTokens: windowUnknown ? 'unknown' : fmtTokens(spend.tokens),
+    bootMoney: bootKnown ? (bootUnknown ? 'unknown' : fmtUSD(spend.boot_cost_micros)) : null,
+    bootTokens: bootKnown ? (bootUnknown ? 'unknown' : fmtTokens(spend.boot_tokens)) : null,
+  };
+}
+
 /** A tool tally as one line, busiest first — the runaway signature is a name
  *  with a big number next to it. */
 export function tools(t) {

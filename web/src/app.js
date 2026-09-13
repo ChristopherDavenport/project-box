@@ -12,7 +12,7 @@ import { ActivityController } from './sse.js';
 import { THEMES, getTheme, setTheme } from './theme.js';
 import { icon } from './icons.js';
 import { base, toast } from './ui.js';
-import { age, short, sameCommit } from './format.js';
+import { age, short, sameCommit, tally } from './format.js';
 
 // JH components used anywhere in the app — imported once, for their side
 // effect of defining the custom elements.
@@ -105,18 +105,29 @@ customElements.define('box-theme', BoxTheme);
 export class BoxClaims extends LitElement {
   static properties = { _status: { state: true }, _error: { state: true } };
   static styles = [base, css`
-    :host { display: block; }
+    :host { display: block; min-width: 0; max-width: 100%; }
     .strip { display: flex; align-items: center; gap: var(--jh-space-300); flex-wrap: wrap;
              padding: var(--jh-space-200) var(--jh-space-400);
              background: var(--jh-color-container-primary-enabled);
              border: 1px solid var(--jh-color-divider-secondary);
-             border-radius: var(--jh-border-radius-300); }
+             border-radius: var(--jh-border-radius-300);
+             max-width: 100%; box-sizing: border-box; }
     .state { display: flex; align-items: center; gap: var(--jh-space-300); flex: 1; min-width: 240px; flex-wrap: wrap; }
-    .who { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); flex: 1 1 220px; }
+    .who { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); flex: 1 1 220px; min-width: 0; }
     .who b { color: var(--jh-color-content-primary-enabled); font-weight: 600; }
+    .reason { display: inline-block; max-width: 320px; vertical-align: bottom;
+              overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .id { display: flex; gap: var(--jh-space-300); flex-wrap: wrap; font: var(--jh-font-helper-regular);
-          color: var(--jh-color-content-secondary-enabled); }
+          color: var(--jh-color-content-secondary-enabled); min-width: 0; }
+    .id span { min-width: 0; }
     .id b { color: var(--jh-color-content-primary-enabled); font-weight: 500; }
+    .tally { display: flex; flex-direction: column; gap: var(--jh-space-100); min-width: 0; }
+    .facts { display: flex; gap: var(--jh-space-300); flex-wrap: wrap; font: var(--jh-font-helper-regular);
+             color: var(--jh-color-content-secondary-enabled); min-width: 0; }
+    .facts span { min-width: 0; }
+    .facts b { color: var(--jh-color-content-primary-enabled); font-weight: 500; }
+    .tokens { font: var(--jh-font-helper-regular); color: var(--jh-color-content-tertiary-enabled, var(--jh-color-content-secondary-enabled));
+              min-width: 0; }
     .live { display: inline-flex; align-items: center; gap: var(--jh-space-100); font: var(--jh-font-helper-medium); }
     .live jh-icon { --jh-icon-color-fill: var(--jh-color-content-positive-enabled); }
     .live.down jh-icon { --jh-icon-color-fill: var(--jh-color-content-negative-enabled); }
@@ -158,6 +169,7 @@ export class BoxClaims extends LitElement {
     const s = this._status;
     const c = s?.claims;
     const up = this._activity.connected;
+    const t = s ? tally(s) : null;
     return html`
       <div class="strip">
         <span class=${'live' + (up ? '' : ' down')} role="status">
@@ -169,7 +181,8 @@ export class BoxClaims extends LitElement {
               label=${c?.stopped ? 'Claims stopped' : 'Claims running'}></jh-tag>
             ${c?.actor ? html`
               <span class="who">${c.stopped ? 'stopped' : 'resumed'} <box-when .at=${c.at}></box-when>
-                by <b>${c.actor}</b>${c.reason ? html` — ${c.reason}` : nothing}</span>`
+                by <b>${c.actor}</b>${c.reason
+                  ? html` — <span class="reason" title=${c.reason}>${c.reason}</span>` : nothing}</span>`
               : html`<span class="who">nobody has pulled the cord</span>`}
             ${c?.stopped
               ? html`<box-reason floating label="Resume claims" confirm="Resume" appearance="primary" glyph="play"
@@ -189,6 +202,18 @@ export class BoxClaims extends LitElement {
               <span>${s.follow_branch} at <b>${short(s.follow_head)}</b>${
                 s.build_commit && !sameCommit(s.build_commit, s.follow_head) ? ' — behind' : ''}</span>` : nothing}
             <span>up <b>${age(s.uptime_sec)}</b></span>
+          </div>` : nothing}
+        ${t ? html`
+          <div class="tally" aria-label="Tally">
+            <div class="facts">
+              <span>landed <b>${t.landed}</b></span>
+              <span>pending <b>${t.pending}</b></span>
+              ${t.running != null ? html`<span>running <b>${t.running}</b></span>` : nothing}
+              ${t.windowMoney != null ? html`
+                <span>spend <b>${t.windowMoney}</b>${t.bootMoney != null ? html` · since boot <b>${t.bootMoney}</b>` : nothing}</span>` : nothing}
+            </div>
+            ${t.windowTokens != null ? html`
+              <div class="tokens">${t.windowTokens} tokens${t.bootTokens != null ? html` · ${t.bootTokens} boot` : nothing}</div>` : nothing}
           </div>` : nothing}
       </div>`;
   }

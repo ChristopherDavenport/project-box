@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "node build.mjs"
+    "build": "node build.mjs",
+    "test": "node --test src/*.test.js"
   },
   "dependencies": {
     "@jack-henry/jh-core": "1.6.1",
