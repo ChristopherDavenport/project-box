@@ -150,6 +150,143 @@ func pinPath(t *testing.T) string {
 	return p
 }
 
+// TestTheReplayerToleratesAnInterleavedNotification builds a transcript from
+// the pin with a session/update notification duplicated between a client
+// request and its response, and requires it to replay to the exact Result the
+// unmodified pin produces. A notification shares no id with the call it
+// happens to have landed near on the wire — the replayer must not need one to
+// arrive in order.
+func TestTheReplayerToleratesAnInterleavedNotification(t *testing.T) {
+	entries := loadTapeEntries(t, pinPath(t))
+	reqIdx := findTapeEntry(t, entries, "client", "session/set_mode")
+	notifyIdx := findTapeEntry(t, entries, "agent", "session/update")
+
+	transformed := append(append(append([]tapeEntry{}, entries[:reqIdx+1]...), entries[notifyIdx]), entries[reqIdx+1:]...)
+	path := writeTapeEntries(t, transformed)
+
+	want := runReplay(t, pinPath(t))
+	got := runReplay(t, path)
+	if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", want) {
+		t.Errorf("an interleaved notification changed the result:\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// TestTheReplayerToleratesAResponseRecordedBeforeItsRequest reorders the pin
+// so session/set_mode's response comes before the client's own request for
+// it — the exact shape the send-side recorder race used to produce (issue
+// #154): the agent answers before conn.send gets back to recording the
+// request it sent. The replayer must hold the response until the request it
+// answers has actually gone out, not drop it for arriving out of order.
+func TestTheReplayerToleratesAResponseRecordedBeforeItsRequest(t *testing.T) {
+	entries := loadTapeEntries(t, pinPath(t))
+	reqIdx := findTapeEntry(t, entries, "client", "session/set_mode")
+	_, id := frameMethod(entries[reqIdx].Frame)
+	respIdx := findTapeResponse(t, entries, reqIdx+1, id)
+
+	transformed := slices.Clone(entries)
+	transformed[reqIdx], transformed[respIdx] = transformed[respIdx], transformed[reqIdx]
+	path := writeTapeEntries(t, transformed)
+
+	want := runReplay(t, pinPath(t))
+	got := runReplay(t, path)
+	if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", want) {
+		t.Errorf("a response recorded before its request changed the result:\n got: %+v\nwant: %+v", got, want)
+	}
+}
+
+// runReplay runs the runtime against a transcript and fails the test on error
+// rather than returning it, since every caller here wants the same thing:
+// a Result to compare against another Result.
+func runReplay(t *testing.T, path string) Result {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	res, err := runtimeFor(t, "replay:"+path).Run(ctx, bundle(), "add the widget package")
+	if err != nil {
+		t.Fatalf("replay %s: %v", path, err)
+	}
+	return res
+}
+
+// loadTapeEntries parses a recorded transcript into the same shape
+// [replayTranscript] reads, so a test can reorder or duplicate entries and
+// write the result back out as a transcript of its own.
+func loadTapeEntries(t *testing.T, path string) []tapeEntry {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var entries []tapeEntry
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 {
+			continue
+		}
+		var e tapeEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			t.Fatalf("parse tape line %q: %v", line, err)
+		}
+		entries = append(entries, e)
+	}
+	return entries
+}
+
+// writeTapeEntries writes entries as a transcript in t.TempDir and returns
+// its path.
+func writeTapeEntries(t *testing.T, entries []tapeEntry) string {
+	t.Helper()
+	var buf bytes.Buffer
+	for _, e := range entries {
+		b, err := json.Marshal(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf.Write(b)
+		buf.WriteByte('\n')
+	}
+	path := filepath.Join(t.TempDir(), "transformed.jsonl")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// findTapeEntry returns the index of the first entry from the given
+// direction whose frame's wire method matches — a request or notification's
+// own method, e.g. "session/set_mode" or "session/update".
+func findTapeEntry(t *testing.T, entries []tapeEntry, from, method string) int {
+	t.Helper()
+	for i, e := range entries {
+		if e.From != from {
+			continue
+		}
+		if m, _ := frameMethod(e.Frame); m == method {
+			return i
+		}
+	}
+	t.Fatalf("no %s %q frame in the pin", from, method)
+	return -1
+}
+
+// findTapeResponse returns the index, at or after start, of the response
+// frame answering the given id.
+func findTapeResponse(t *testing.T, entries []tapeEntry, start int, id float64) int {
+	t.Helper()
+	for i := start; i < len(entries); i++ {
+		e := entries[i]
+		if e.From != "agent" {
+			continue
+		}
+		m, fid := frameMethod(e.Frame)
+		if m == "" && fid == id {
+			return i
+		}
+	}
+	t.Fatalf("no response to id %v after index %d in the pin", id, start)
+	return -1
+}
+
 // --- the replaying fake agent ---------------------------------------------
 
 // tapeEntry is one frame as [conn.record] wrote it.
@@ -177,6 +314,14 @@ func replayTranscript(f *fakeConn, path string) {
 		os.Exit(1)
 	}
 	live := map[float64]any{} // id the transcript recorded -> id this run used
+	// held keeps a response the tape carries before the client request it
+	// answers has been seen. A recorder that records a client frame after
+	// writing it (fixed since, but the shape survives in old tapes and is
+	// exactly what a race window used to produce) can leave a response ahead
+	// of its own request on tape; playing it back in tape order then hands the
+	// client an id it never asked about, and conn.serve drops it as unknown —
+	// so hold it and answer the request once it actually arrives.
+	held := map[float64]json.RawMessage{}
 	for _, line := range bytes.Split(data, []byte("\n")) {
 		line = bytes.TrimSpace(line)
 		if len(line) == 0 {
@@ -203,10 +348,18 @@ func replayTranscript(f *fakeConn, path string) {
 			}
 			if want != "" {
 				live[id] = got["id"]
+				if resp, ok := held[id]; ok {
+					delete(held, id)
+					f.enc.Encode(json.RawMessage(retarget(resp, live)))
+				}
 			}
 		case "agent":
 			if e.Frame == nil {
 				fmt.Println(e.Raw) // a frame that was not JSON, replayed as it was
+				continue
+			}
+			if id, waiting := unresolvedResponseID(e.Frame, live); waiting {
+				held[id] = e.Frame
 				continue
 			}
 			f.enc.Encode(json.RawMessage(retarget(e.Frame, live)))
@@ -227,6 +380,30 @@ func frameMethod(frame json.RawMessage) (string, float64) {
 	}
 	json.Unmarshal(frame, &m)
 	return m.Method, m.ID
+}
+
+// unresolvedResponseID reports the recorded id of a frame that is a response
+// (has an id, no method) whose id has no live-map entry yet — the request it
+// answers has not been played to the client, so retarget has nothing to map
+// it to and it must wait rather than go out under an id nobody is holding.
+func unresolvedResponseID(frame json.RawMessage, live map[float64]any) (float64, bool) {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(frame, &m) != nil {
+		return 0, false
+	}
+	if _, isMethodFrame := m["method"]; isMethodFrame {
+		return 0, false
+	}
+	idRaw, hasID := m["id"]
+	if !hasID {
+		return 0, false
+	}
+	var id float64
+	if json.Unmarshal(idRaw, &id) != nil {
+		return 0, false
+	}
+	_, known := live[id]
+	return id, !known
 }
 
 // retarget rewrites a response's id to the one this run's client actually

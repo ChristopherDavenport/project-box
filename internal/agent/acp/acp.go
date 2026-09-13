@@ -1694,8 +1694,14 @@ func (c *conn) send(m rpcMessage) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	_, err = c.w.Write(append(b, '\n'))
+	// Recorded before the write, not after: once the bytes are on the wire the
+	// agent can answer before this goroutine gets back here, and serve records
+	// on arrival. Write-then-record let a response reach the tape before the
+	// request it answers; a reader replaying causally then has nothing to
+	// answer yet and waits forever. Under c.mu, so a request is always on tape
+	// before anything that could answer it.
 	c.record("client", b)
+	_, err = c.w.Write(append(b, '\n'))
 	return err
 }
 
