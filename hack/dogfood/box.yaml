@@ -299,3 +299,15 @@ boxes:
             purpose: the design record and the briefs
             paths: [docs, README.md, CLAUDE.md]
             check: "true"
+    # Self-deploy, turned on since round 12: it waited "until one landing has
+    # been watched" (#64, round 10), and twenty-five have been watched since
+    # the 2026-09-12 16:41 restart while the box ran none of them — the wait
+    # is over. A deploy stops claims, waits for running work to settle
+    # exactly as restart.sh does, checks and rebuilds the daemon at main's
+    # new head, re-execs on the same socket and store, and rolls back —
+    # parking a deploy exception — if the new binary fails to come up. Gated
+    # to the five sections whose landings can actually change the daemon's
+    # own tree; a landing in docs or room does not restart it.
+    self_deploy:
+      from: main
+      sections: [daemon, loop, agent, forge, evidence]
