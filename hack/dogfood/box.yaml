@@ -273,15 +273,26 @@ boxes:
         # the section's check while iterating; the repository's full check
         # above still runs at the gate. Paths not covered by any section are
         # reached only by a whole-repository unit.
+        # Redrawn per #200 on the co-change evidence: loop/pump/queue change
+        # together, plan/ingress/kind change apart from them, and capacity
+        # changes apart from both — seven packages are no longer one lease.
         sections:
           - name: forge
             purpose: git mirrors, leases, workspaces, landing
             paths: [internal/forge]
             check: go test ./internal/forge/...
           - name: loop
-            purpose: the unit's transaction — queue, claim, plan, build, gate, land, capacity
-            paths: [internal/loop, internal/queue, internal/pump, internal/plan, internal/kind, internal/ingress, internal/capacity]
-            check: go test ./internal/loop/... ./internal/queue/... ./internal/pump/... ./internal/plan/... ./internal/kind/... ./internal/ingress/... ./internal/capacity/...
+            purpose: the unit's transaction — queue, claim, build, gate, land
+            paths: [internal/loop, internal/queue, internal/pump]
+            check: go test ./internal/loop/... ./internal/queue/... ./internal/pump/...
+          - name: intake
+            purpose: how work arrives and becomes a plan — ingress, kinds, plans
+            paths: [internal/plan, internal/ingress, internal/kind]
+            check: go test ./internal/plan/... ./internal/ingress/... ./internal/kind/...
+          - name: capacity
+            purpose: the meter — windows, budgets, seats
+            paths: [internal/capacity]
+            check: go test ./internal/capacity/...
           - name: agent
             purpose: the agent plane — layers, the ACP runtime, harness, seats, knowledge
             paths: [internal/agent, internal/harness, internal/seat, internal/knowledge]
@@ -313,8 +324,8 @@ boxes:
     # exactly as restart.sh does, checks and rebuilds the daemon at main's
     # new head, re-execs on the same socket and store, and rolls back —
     # parking a deploy exception — if the new binary fails to come up. Gated
-    # to the five sections whose landings can actually change the daemon's
+    # to the seven sections whose landings can actually change the daemon's
     # own tree; a landing in docs or room does not restart it.
     self_deploy:
       from: main
-      sections: [daemon, loop, agent, forge, evidence]
+      sections: [daemon, loop, agent, forge, evidence, intake, capacity]

@@ -233,3 +233,59 @@ func TestDogfoodExpressesWorkInSections(t *testing.T) {
 		t.Error("no planner tier: the dial to raise first when plans come back wrong is not on the record")
 	}
 }
+
+// TestDogfoodSectionMapMatchesCoChangeEvidence: issue #200. The old `loop`
+// section leased seven packages as one region — internal/loop, queue, pump,
+// plan, kind, ingress, and capacity — on the strength of them all belonging
+// to "the unit's transaction". The units run against this box said
+// otherwise: loop/pump/queue change together, plan/ingress/kind change
+// apart from them, and capacity changes apart from both. So the redraw is
+// worth a test on two counts: every one of those seven paths must still be
+// covered by exactly one declared section (nothing falls through to
+// whole-repository scope, and nothing is claimed twice), and each of the
+// three sections the redraw touches must run its own packages, not a
+// neighbor's — a check string is free text, and a copy-paste from the old
+// combined section would pass Load while silently testing the wrong code.
+func TestDogfoodSectionMapMatchesCoChangeEvidence(t *testing.T) {
+	c, err := Load(dogfoodConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sections := c.Boxes[0].Repos[0].Sections
+
+	oldLoopPaths := []string{
+		"internal/loop", "internal/queue", "internal/pump",
+		"internal/plan", "internal/kind", "internal/ingress", "internal/capacity",
+	}
+	for _, p := range oldLoopPaths {
+		covered := 0
+		for _, s := range sections {
+			for _, sp := range s.Paths {
+				if sp == p {
+					covered++
+				}
+			}
+		}
+		if covered != 1 {
+			t.Errorf("path %q is covered by %d declared sections, want exactly 1", p, covered)
+		}
+	}
+
+	for _, name := range []string{"loop", "intake", "capacity"} {
+		var sec *Section
+		for i := range sections {
+			if sections[i].Name == name {
+				sec = &sections[i]
+			}
+		}
+		if sec == nil {
+			t.Errorf("no section named %q", name)
+			continue
+		}
+		for _, p := range sec.Paths {
+			if !strings.Contains(sec.Check, p) {
+				t.Errorf("section %q check %q does not name its own path %q — it would run someone else's packages", name, sec.Check, p)
+			}
+		}
+	}
+}
