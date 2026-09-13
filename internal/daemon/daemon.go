@@ -156,6 +156,12 @@ type Daemon struct {
 	// refused, so a bad commit is not re-attempted every housekeeping pass —
 	// the refusal itself is already on the chain.
 	selfDeploy *selfDeployState
+	// lastPass is this daemon's own most recent self-deploy pass, set by
+	// [Daemon.recordSelfDeployPass] at the moment that pass's record is
+	// appended. Guarded by mu, same as lastPoll above. Single-valued rather
+	// than per-box, mirroring followBranchForAPI's own targets[0] convention
+	// — /v1/status has no shape for more than one box's self-deploy story.
+	lastPass selfDeployPassInfo
 	// Exec re-execs the process on the same argv and environment, completing
 	// a self-deploy once Run has returned [ErrSelfDeployed] and the caller
 	// has done its own shutdown (closing the store, letting the API finish
@@ -293,6 +299,7 @@ func New(path string) (*Daemon, error) {
 		// forever.
 		Build:        func() version.Build { return d.build() },
 		FollowBranch: d.followBranchForAPI,
+		LastPass:     d.lastPassForAPI,
 		// A person resolving an escalation and a runner landing a plan's
 		// last unit are the two ways an issue closes; this is the seam for
 		// the first, invoked only once Plans.Resolve itself has succeeded.
@@ -824,8 +831,8 @@ func (d *Daemon) Run(ctx context.Context) error {
 	workCtx, cancelWork := context.WithCancel(context.Background())
 	defer cancelWork()
 
-	slog.Info("boxd up", "tenant", d.tenant, "api", listen, "every", d.Every(), "drain", d.drain())
-	ticks := 0
+	slog.Info("boxd up", "tenant", d.tenant, "api", listen, "every", d.Every(), "drain", d.drain(), "housekeep_every", d.housekeepEvery())
+	lastHousekeep := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -843,8 +850,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if _, err := d.Tick(workCtx); err != nil {
 				slog.Error("tick", "err", err)
 			}
-			ticks++
-			if ticks%housekeepingEvery == 0 {
+			now := time.Now()
+			if housekeepingDue(lastHousekeep, now, d.housekeepEvery()) {
+				lastHousekeep = now
 				if err := d.mirror.Prune(workCtx); err != nil {
 					slog.Warn("prune", "err", err)
 				}
@@ -874,6 +882,17 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+// housekeepingDue reports whether interval has elapsed since last, as of
+// now — a pure function so the wall-clock cadence in Run is testable
+// without actually waiting out an interval. A tick-counted cadence
+// (ticks%N==0) let one long-blocked tick fire N housekeeping passes back to
+// back the moment it finally woke; timing off the clock instead means a
+// single slow tick is merely late, visible in the self-deploy pass record's
+// own timestamp, rather than amplified into a burst.
+func housekeepingDue(last, now time.Time, interval time.Duration) bool {
+	return now.Sub(last) >= interval
 }
 
 // pollDue is one route whose poll interval has elapsed, paired with the
@@ -954,6 +973,22 @@ func (d *Daemon) PollRoutes(ctx context.Context, now time.Time) {
 // orders of magnitude below control/claims or index/ingress, so leaving it
 // out costs unbounded-but-slow growth in exchange for a correctness
 // property compaction cannot currently preserve.
+//
+// That growth is no longer merely slow. Every housekeeping pass — not just
+// a deploy or a refusal — now appends its own self-deploy-pass record here
+// too (issue #152), so a box with self_deploy on writes one every
+// HousekeepEvery regardless of whether anything moved: at the 5m default
+// that is ~288 records/day/box, steadily, forever. Those records are safe
+// to fold on their own — their Subject is "pass/<box>", never a head, so
+// none of them is the LATEST-by-head answer selfDeployRefused or
+// selfDeployException depend on — but a scope-wide compaction cannot tell
+// them apart from the head-subject records already reasoned about above,
+// so they are stuck uncompactable beside those for the same reason. Kept on
+// this scope anyway, deliberately, rather than split onto a sibling
+// StandingScopes chain: a pass record's evidentiary value (what did the box
+// see, right beside the deploy or refusal it explains) is highest exactly
+// where it already lives, and control/self-deploy for a fleet of boxes is
+// still far below control/claims' volume. Revisit if that stops being true.
 var StandingScopes = []string{
 	"control/capacity",
 	"control/claims",
@@ -965,16 +1000,18 @@ var StandingScopes = []string{
 	"index/pending",
 }
 
-// housekeepingEvery spaces the standing chores: every Nth tick, the mirror
-// reaps workspaces whose leases no longer answer — the `docker system
-// prune` job as a standing task rather than a remembered chore — and the
-// room tells somebody about exceptions that have gone stale.
-const housekeepingEvery = 20
-
 func (d *Daemon) drain() time.Duration {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.cfg.DrainDuration()
+}
+
+// housekeepEvery reads the current wall-clock gap between housekeeping
+// passes — hot-reloadable, like drain and Every above.
+func (d *Daemon) housekeepEvery() time.Duration {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.cfg.HousekeepEveryDuration()
 }
 
 // defaultBootIDPath is the kernel's own record of this boot, regenerated

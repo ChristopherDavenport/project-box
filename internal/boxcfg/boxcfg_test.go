@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent/confine"
 )
@@ -919,5 +920,73 @@ boxes:
 	}
 	if want := "unix:" + filepath.Join(c.Root, "boxd.sock"); c.Listen != want {
 		t.Fatalf("listen = %q, want %q", c.Listen, want)
+	}
+}
+
+// TestHousekeepEveryDefaultsTo5m: absent means the housekeeping chores
+// (mirror prune, escalation sweep, compaction, run-log prune, self-deploy)
+// still run — on a 5-minute clock, distinct from the tick interval Every
+// carries (issue #152).
+func TestHousekeepEveryDefaultsTo5m(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.HousekeepEvery != "5m" {
+		t.Fatalf("housekeep_every = %q, want 5m", c.HousekeepEvery)
+	}
+	if got := c.HousekeepEveryDuration(); got != 5*time.Minute {
+		t.Fatalf("HousekeepEveryDuration() = %v, want 5m", got)
+	}
+}
+
+// TestHousekeepEveryParses: an explicit value is honored, and is not
+// confused with the tick interval Every.
+func TestHousekeepEveryParses(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+every: 1s
+housekeep_every: 90s
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.HousekeepEveryDuration(); got != 90*time.Second {
+		t.Fatalf("HousekeepEveryDuration() = %v, want 90s", got)
+	}
+	if got := c.EveryDuration(); got != time.Second {
+		t.Fatalf("EveryDuration() = %v, want 1s — every and housekeep_every must not collide", got)
+	}
+}
+
+// TestHousekeepEveryRefusesAMalformedDuration: the same refusal style as
+// every, drain, and retention.keep_for.
+func TestHousekeepEveryRefusesAMalformedDuration(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+housekeep_every: not-a-duration
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err == nil || !strings.Contains(err.Error(), "housekeep_every") {
+		t.Fatalf("housekeep_every malformed: err = %v, want it to name housekeep_every", err)
 	}
 }

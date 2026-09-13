@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/version"
 )
 
@@ -175,6 +176,39 @@ func TestSelfDeployDoesNotRetryARolledBackHeadAcrossARestart(t *testing.T) {
 	}
 	if _, serr := os.Stat(counter); serr == nil {
 		t.Fatal("check ran against a head already rolled back on the chain — durable refusal must consult it, not only memory")
+	}
+}
+
+// TestSelfDeployRefusedIgnoresInterleavedPassRecords: issue #152's own named
+// trap. A self-deploy-pass record's Subject must never be the bare head it
+// inspected — [Daemon.selfDeployRefused] and internal/control's
+// selfDeployException fold both take the LATEST record for a head's own
+// subject as their answer, and a pass record landing there would flip both,
+// silently, on every single pass. Proven by writing a refusal for a head and
+// then several pass records that DO name that head (in their body, not their
+// Subject) and checking the refusal still answers true.
+func TestSelfDeployRefusedIgnoresInterleavedPassRecords(t *testing.T) {
+	ctx := context.Background()
+	d, _ := plainDaemon(t)
+	head := forge.Commit("badhead")
+
+	if _, err := d.store.Log().Append(ctx, evidence.Record{
+		Tenant: d.tenant, Scope: selfDeployScope, Kind: kindSelfDeployRefused,
+		Subject: string(head), Actor: "boxd", Body: []byte("check failed"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	build := version.Build{Commit: fakeBuildCommit, Known: true}
+	for i := 0; i < 3; i++ {
+		d.recordSelfDeployPass(ctx, "shop", build, string(head), decisionRefused, "already refused on the chain", nil)
+	}
+
+	refused, err := d.selfDeployRefused(ctx, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !refused {
+		t.Fatal("selfDeployRefused = false after interleaved pass records — a pass record must never become the LATEST answer for a head's own subject")
 	}
 }
 

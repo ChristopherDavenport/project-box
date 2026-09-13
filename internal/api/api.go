@@ -103,6 +103,13 @@ type Server struct {
 	// than a fresh look at it. Nil when no box has self_deploy configured,
 	// which /v1/status reads as "these fields are absent," not an error.
 	FollowBranch func(ctx context.Context) (branch, head string, err error)
+	// LastPass, when set, reports this daemon's own most recent self-deploy
+	// housekeeping pass: when it ran, what it decided, and why. Nil-safe
+	// like FollowBranch above, but for a different absence: ok is false
+	// (rather than the seam itself being nil) until the first pass this
+	// process has run, which /v1/status must also read as the fields being
+	// absent — a restart carries no memory of a pass from before it.
+	LastPass func() (at time.Time, decision, reason string, ok bool)
 
 	mu sync.RWMutex // guards Routes and Token swaps
 }
@@ -242,6 +249,16 @@ type Status struct {
 	// configured.
 	FollowBranch string `json:"follow_branch,omitempty"`
 	FollowHead   string `json:"follow_head,omitempty"`
+	// LastPassAt, LastPassDecision and LastPassReason project this
+	// daemon's most recent self-deploy housekeeping pass — when it ran,
+	// what it decided ("current", "skipped", "deploying", "abandoned",
+	// "refused", or one of a few error decisions), and why. All three are
+	// absent together: either no box has self_deploy configured, or this
+	// process has not yet run a pass. A pass that decided nothing still
+	// ran, and still shows up here.
+	LastPassAt       string `json:"last_pass_at,omitempty"`
+	LastPassDecision string `json:"last_pass_decision,omitempty"`
+	LastPassReason   string `json:"last_pass_reason,omitempty"`
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) {
@@ -297,6 +314,13 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 		}
 		st.FollowBranch = branch
 		st.FollowHead = head
+	}
+	if s.LastPass != nil {
+		if at, decision, reason, ok := s.LastPass(); ok {
+			st.LastPassAt = at.UTC().Format(time.RFC3339)
+			st.LastPassDecision = decision
+			st.LastPassReason = reason
+		}
 	}
 	writeJSON(w, st)
 }

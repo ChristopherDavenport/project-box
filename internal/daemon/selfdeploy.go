@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -41,7 +42,79 @@ const selfDeployTTL = 30 * time.Minute
 const (
 	kindSelfDeployed      = "self-deployed"
 	kindSelfDeployRefused = "self-deploy-refused"
+	// kindSelfDeployPass is every housekeeping pass's own record: what it
+	// saw and decided, whether or not that decision moved anything. Its
+	// Subject is deliberately never the bare head — see
+	// [Daemon.recordSelfDeployPass] — so it is inert to both
+	// [Daemon.selfDeployRefused] and internal/control's rollback fold, which
+	// both take the LATEST record for a head's own subject as their answer.
+	kindSelfDeployPass = "self-deploy-pass"
 )
+
+// Decisions a self-deploy pass records for one target box. The first five
+// are the issue's own vocabulary; decisionErrored, decisionBuildUnknown and
+// decisionBuildDirty are added because a pass that fails before it can reach
+// one of those five still owes the chain an answer — mapping a fetch
+// failure or an unstamped binary onto "current" would be unknown reading as
+// zero.
+const (
+	decisionCurrent      = "current"
+	decisionSkipped      = "skipped"
+	decisionDeploying    = "deploying"
+	decisionAbandoned    = "abandoned"
+	decisionRefused      = "refused"
+	decisionErrored      = "errored"
+	decisionBuildUnknown = "build-unknown"
+	decisionBuildDirty   = "build-dirty"
+)
+
+// selfDeployPassBody is the JSON body of a self-deploy-pass record.
+// BuildKnown carries the fact of unknown-ness explicitly, the same
+// [daemonStartedBody] does for BootIDKnown: an unstamped build must never be
+// presented as a zero value indistinguishable from a real commit. Head and
+// Sections are omitted rather than zeroed when a pass never got far enough
+// to resolve or compute them — never fabricated.
+type selfDeployPassBody struct {
+	BuildCommit string   `json:"build_commit,omitempty"`
+	BuildDirty  bool     `json:"build_dirty,omitempty"`
+	BuildKnown  bool     `json:"build_known"`
+	Head        string   `json:"head,omitempty"`
+	Sections    []string `json:"sections,omitempty"`
+	Decision    string   `json:"decision"`
+	Reason      string   `json:"reason,omitempty"`
+}
+
+// recordSelfDeployPass appends one self-deploy-pass record for box and
+// updates the daemon's in-memory last-pass fact that /v1/status projects.
+// The Subject is "pass/<box>", NOT head: [Daemon.selfDeployRefused] and
+// internal/control's selfDeployException fold both take the latest record
+// for a head's own subject as their answer, and a pass record landing there
+// would become that answer on every single pass — silently retrying a
+// refused head, or un-superseding a rollback, forever.
+//
+// It logs and returns rather than propagating a write failure: a pass that
+// could not record itself has still made its decision, and the caller's own
+// control flow (stop/resume, refuse, re-exec) must not stall on evidence.
+func (d *Daemon) recordSelfDeployPass(ctx context.Context, box string, build version.Build, head, decision, reason string, sections []string) {
+	at := time.Now()
+	body, err := json.Marshal(selfDeployPassBody{
+		BuildCommit: build.Commit, BuildDirty: build.Dirty, BuildKnown: build.Known,
+		Head: head, Sections: sections, Decision: decision, Reason: reason,
+	})
+	if err != nil {
+		slog.Error("self-deploy: encoding pass record", "box", box, "err", err)
+		return
+	}
+	if _, err := d.store.Log().Append(ctx, evidence.Record{
+		Tenant: d.tenant, Scope: selfDeployScope, Kind: kindSelfDeployPass,
+		Subject: "pass/" + box, Actor: d.cfgRunner(), Body: body,
+	}); err != nil {
+		slog.Error("self-deploy: recording pass", "box", box, "err", err)
+	}
+	d.mu.Lock()
+	d.lastPass = selfDeployPassInfo{at: at, decision: decision, reason: reason, ok: true}
+	d.mu.Unlock()
+}
 
 // ErrSelfDeployed is Run's sentinel: the chore replaced the binary on disk
 // and the process needs to re-exec. Run returns it so its own deferred
@@ -71,6 +144,18 @@ func (s *selfDeployState) refuse(c forge.Commit) {
 		s.refused = map[forge.Commit]bool{}
 	}
 	s.refused[c] = true
+}
+
+// selfDeployPassInfo is the daemon's in-memory record of its own most
+// recent self-deploy pass, projected onto /v1/status by
+// [Daemon.lastPassForAPI]. Ok is false until the first pass this process
+// has run — a restart must show the fields absent, never a stale value
+// carried over from before it, and never a zero time read as "just now".
+type selfDeployPassInfo struct {
+	at       time.Time
+	decision string
+	reason   string
+	ok       bool
 }
 
 // selfDeployTarget is one box's self_deploy: block, resolved to the repo it
@@ -129,6 +214,18 @@ func (d *Daemon) followBranchForAPI(ctx context.Context) (string, string, error)
 	return t.from, string(head), nil
 }
 
+// lastPassForAPI answers /v1/status's last-pass fields: when this daemon's
+// most recent self-deploy housekeeping pass ran, what it decided, and why.
+// ok is false until the first pass this process has run, which the status
+// handler reads as the fields being absent — never a default, and never a
+// value left over from before a restart.
+func (d *Daemon) lastPassForAPI() (at time.Time, decision, reason string, ok bool) {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	lp := d.lastPass
+	return lp.at, lp.decision, lp.reason, lp.ok
+}
+
 // selfDeployChore is one housekeeping pass. It does nothing, silently, in
 // the overwhelmingly common case: no box has turned it on, this binary's own
 // build commit is not knowable, or no target's branch has moved past it.
@@ -146,11 +243,19 @@ func (d *Daemon) selfDeployChore(ctx context.Context) error {
 	}
 	build := d.build()
 	if !build.Known {
-		slog.Warn("self-deploy: this binary's own build commit is unknown — declining to compare against a guess")
+		reason := "this binary's own build commit is unknown — declining to compare against a guess"
+		slog.Warn("self-deploy: " + reason)
+		for _, t := range targets {
+			d.recordSelfDeployPass(ctx, t.box, build, "", decisionBuildUnknown, reason, nil)
+		}
 		return nil
 	}
 	if build.Dirty {
-		slog.Warn("self-deploy: this binary was built from a modified tree — it corresponds to no commit, declining to compare")
+		reason := "this binary was built from a modified tree — it corresponds to no commit, declining to compare"
+		slog.Warn("self-deploy: " + reason)
+		for _, t := range targets {
+			d.recordSelfDeployPass(ctx, t.box, build, "", decisionBuildDirty, reason, nil)
+		}
 		return nil
 	}
 	for _, t := range targets {
@@ -173,44 +278,62 @@ func (d *Daemon) selfDeployChore(ctx context.Context) error {
 func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build version.Build) error {
 	repo := t.repo.ForgeRepo()
 	if err := d.mirror.Fetch(ctx, repo); err != nil {
-		return fmt.Errorf("box %s: fetch %s: %w", t.box, repo.Name, err)
+		err = fmt.Errorf("box %s: fetch %s: %w", t.box, repo.Name, err)
+		d.recordSelfDeployPass(ctx, t.box, build, "", decisionErrored, err.Error(), nil)
+		return err
 	}
 	head, err := d.mirror.Resolve(ctx, repo, "refs/heads/"+t.from)
 	if err != nil {
-		return fmt.Errorf("box %s: resolve %s: %w", t.box, t.from, err)
+		err = fmt.Errorf("box %s: resolve %s: %w", t.box, t.from, err)
+		d.recordSelfDeployPass(ctx, t.box, build, "", decisionErrored, err.Error(), nil)
+		return err
 	}
 	if string(head) == build.Commit {
-		return nil // the common case: already running what the branch names
+		// the common case: already running what the branch names
+		d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionCurrent, "already running what the branch names", nil)
+		return nil
 	}
 	refused, err := d.selfDeployRefused(ctx, head)
 	if err != nil {
-		return fmt.Errorf("box %s: checking refusal history: %w", t.box, err)
+		err = fmt.Errorf("box %s: checking refusal history: %w", t.box, err)
+		d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionErrored, err.Error(), nil)
+		return err
 	}
 	if refused {
-		return nil // already tried this commit; the refusal is on the chain
+		// already tried this commit; the refusal is on the chain
+		d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionRefused, "already refused on the chain", nil)
+		return nil
 	}
 
+	var sections []string
 	if len(t.sections) > 0 {
 		changed, err := d.mirror.ChangedPaths(ctx, repo, forge.Commit(build.Commit), head)
 		if err != nil {
 			// An unanswerable diff must not stall the box behind a docs
 			// landing forever — proceed to deploy rather than let "unknown"
-			// stand in for "nothing changed".
+			// stand in for "nothing changed". Sections stays nil: it was
+			// never computed, so the pass record must not claim otherwise.
 			slog.Warn("self-deploy: changed paths — proceeding to deploy rather than guessing", "box", t.box, "err", err)
-		} else if selfDeploySkippable(changed, t.repo.Sections, t.sections) {
-			// The diff is entirely docs/room-shaped. Claims are never
-			// stopped for a landing that will be skipped, and the compare
-			// is always build.Commit->head, so a skipped landing needs no
-			// memory of its own: the next code landing's diff is cumulative
-			// and includes it.
-			slog.Info("self-deploy: landing touched only sections outside self_deploy.sections — skipping", "box", t.box, "commit", head)
-			return nil
+		} else {
+			sections = touchedSections(changed, t.repo.Sections)
+			if selfDeploySkippable(changed, t.repo.Sections, t.sections) {
+				// The diff is entirely docs/room-shaped. Claims are never
+				// stopped for a landing that will be skipped, and the compare
+				// is always build.Commit->head, so a skipped landing needs no
+				// memory of its own: the next code landing's diff is cumulative
+				// and includes it.
+				slog.Info("self-deploy: landing touched only sections outside self_deploy.sections — skipping", "box", t.box, "commit", head)
+				d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionSkipped, "landing touched only sections outside self_deploy.sections", sections)
+				return nil
+			}
 		}
 	}
 
 	why := fmt.Sprintf("self-deploy: box %s %s -> %s", t.box, short(build.Commit), short(string(head)))
 	if err := d.queue.Stop(ctx, d.tenant, d.cfgRunner(), why); err != nil {
-		return fmt.Errorf("box %s: stop: %w", t.box, err)
+		err = fmt.Errorf("box %s: stop: %w", t.box, err)
+		d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionErrored, err.Error(), sections)
+		return err
 	}
 
 	dctx, cancel := context.WithTimeout(ctx, d.drain())
@@ -220,11 +343,13 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 		// Abandon rather than build on the strength of a drain that did not
 		// finish: no run is ever cut short for this. The head is not
 		// remembered as refused — it was never attempted — so the next
-		// housekeeping pass tries again.
+		// housekeeping pass tries again. Abandon-on-busy behavior itself is
+		// unchanged; it now also says so on the record.
 		if rerr := d.queue.Resume(ctx, d.tenant, d.cfgRunner(), why); rerr != nil {
 			slog.Error("self-deploy: resume after abandoned quiesce", "box", t.box, "err", rerr)
 		}
 		slog.Warn("self-deploy: drain window elapsed with work in flight — abandoning this pass", "box", t.box, "commit", head)
+		d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionAbandoned, "drain window elapsed with work in flight", sections)
 		return nil
 	}
 
@@ -240,6 +365,7 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 			slog.Error("self-deploy: resume after refusal", "box", t.box, "err", rerr)
 		}
 		slog.Warn("self-deploy refused", "box", t.box, "commit", head, "reason", err)
+		d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionRefused, err.Error(), sections)
 		return nil
 	}
 
@@ -249,6 +375,7 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 	}); err != nil {
 		slog.Error("self-deploy: recording success", "box", t.box, "err", err)
 	}
+	d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionDeploying, why, sections)
 	if err := d.queue.Resume(ctx, d.tenant, d.cfgRunner(), why); err != nil {
 		slog.Error("self-deploy: resume after successful deploy", "box", t.box, "err", err)
 	}
@@ -364,6 +491,25 @@ func selfDeploySkippable(changed []string, sections []boxcfg.Section, warrant []
 		}
 	}
 	return true
+}
+
+// touchedSections answers the distinct declared section names the diff
+// touches, in first-seen order — the pass record's own account of what
+// changed, independent of whether that ends up warranting a deploy. A path
+// matching no declared section is not a section and is left out; that fact
+// is exactly what makes [selfDeploySkippable] refuse to skip.
+func touchedSections(changed []string, sections []boxcfg.Section) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, path := range changed {
+		name, ok := sectionOfPath(path, sections)
+		if !ok || seen[name] {
+			continue
+		}
+		seen[name] = true
+		out = append(out, name)
+	}
+	return out
 }
 
 // sectionOfPath answers the first declared section whose Paths cover path,

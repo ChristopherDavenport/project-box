@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http/httptest"
@@ -187,8 +188,35 @@ func selfDeployChain(t *testing.T, d *Daemon, ctx context.Context) []string {
 	return kinds
 }
 
-// TestSelfDeployUnchangedHeadDoesNothing: the common case, and it must run
-// with no side effect at all — no stop, no resume, no refusal.
+// selfDeployPasses decodes every self-deploy-pass record on the chain, in
+// order, for assertions on what a pass decided and why — and, via r.Subject,
+// that it never lands on the bare head (issue #152's own named trap).
+func selfDeployPasses(t *testing.T, d *Daemon, ctx context.Context) []selfDeployPassBody {
+	t.Helper()
+	var out []selfDeployPassBody
+	for r, err := range d.store.Log().Since(ctx, tenant.ID("acme"), selfDeployScope, 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind != kindSelfDeployPass {
+			continue
+		}
+		if !strings.HasPrefix(r.Subject, "pass/") {
+			t.Fatalf("self-deploy-pass record Subject = %q, want the pass/<box> form — never the bare head", r.Subject)
+		}
+		var body selfDeployPassBody
+		if err := json.Unmarshal(r.Body, &body); err != nil {
+			t.Fatalf("decoding pass record body: %v", err)
+		}
+		out = append(out, body)
+	}
+	return out
+}
+
+// TestSelfDeployUnchangedHeadDoesNothing: the common case has no operational
+// side effect — no stop, no resume, no refusal — but it still leaves a
+// "current" pass record (issue #152): a pass that decided nothing is still
+// a pass that ran.
 func TestSelfDeployUnchangedHeadDoesNothing(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -211,21 +239,36 @@ func TestSelfDeployUnchangedHeadDoesNothing(t *testing.T) {
 	if got := claimsChain(t, d, ctx); len(got) != 0 {
 		t.Fatalf("control/claims = %v, want none", got)
 	}
-	if got := selfDeployChain(t, d, ctx); len(got) != 0 {
-		t.Fatalf("control/self-deploy = %v, want none", got)
+	if got := selfDeployChain(t, d, ctx); len(got) != 1 || got[0] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want exactly one self-deploy-pass", got)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionCurrent {
+		t.Fatalf("passes = %+v, want exactly one with decision %q", passes, decisionCurrent)
+	}
+	if passes[0].Head != string(appHead) {
+		t.Fatalf("pass head = %q, want %q", passes[0].Head, appHead)
+	}
+
+	at, decision, reason, ok := d.lastPassForAPI()
+	if !ok || decision != decisionCurrent || reason == "" {
+		t.Fatalf("lastPassForAPI = at=%v decision=%q reason=%q ok=%v, want a current decision", at, decision, reason, ok)
 	}
 }
 
 // TestSelfDeployUnknownOrDirtyBuildDoesNothing: unknown never reads as zero
 // — neither an unstamped binary nor one built from a modified tree may be
-// compared against a branch head, in either direction.
+// compared against a branch head, in either direction — but each is exactly
+// the "why has the box not upgraded" answer a pass record exists for
+// (issue #152), so the chore-level decline still leaves one.
 func TestSelfDeployUnknownOrDirtyBuildDoesNothing(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		build version.Build
+		name     string
+		build    version.Build
+		decision string
 	}{
-		{"unknown", version.Build{}},
-		{"dirty", version.Build{Commit: "deadbeef", Dirty: true, Known: true}},
+		{"unknown", version.Build{}, decisionBuildUnknown},
+		{"dirty", version.Build{Commit: "deadbeef", Dirty: true, Known: true}, decisionBuildDirty},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
@@ -248,8 +291,15 @@ func TestSelfDeployUnknownOrDirtyBuildDoesNothing(t *testing.T) {
 			if got := claimsChain(t, d, ctx); len(got) != 0 {
 				t.Fatalf("control/claims = %v, want none", got)
 			}
-			if got := selfDeployChain(t, d, ctx); len(got) != 0 {
-				t.Fatalf("control/self-deploy = %v, want none", got)
+			if got := selfDeployChain(t, d, ctx); len(got) != 1 || got[0] != kindSelfDeployPass {
+				t.Fatalf("control/self-deploy = %v, want exactly one self-deploy-pass", got)
+			}
+			passes := selfDeployPasses(t, d, ctx)
+			if len(passes) != 1 || passes[0].Decision != tc.decision {
+				t.Fatalf("passes = %+v, want exactly one with decision %q", passes, tc.decision)
+			}
+			if passes[0].Head != "" {
+				t.Fatalf("pass head = %q, want absent — the branch was never resolved", passes[0].Head)
 			}
 		})
 	}
@@ -317,8 +367,12 @@ func TestSelfDeployRefusesAFailingCheck(t *testing.T) {
 	}
 
 	kinds := selfDeployChain(t, d, ctx)
-	if len(kinds) != 1 || kinds[0] != "self-deploy-refused" {
-		t.Fatalf("control/self-deploy = %v, want exactly one self-deploy-refused", kinds)
+	if len(kinds) != 2 || kinds[0] != "self-deploy-refused" || kinds[1] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want [self-deploy-refused self-deploy-pass]", kinds)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionRefused || passes[0].Reason == "" {
+		t.Fatalf("passes = %+v, want exactly one refused with a reason", passes)
 	}
 	if got := claimsChain(t, d, ctx); len(got) != 2 || got[0] != "stop" || got[1] != "resume" {
 		t.Fatalf("control/claims = %v, want [stop resume]", got)
@@ -361,8 +415,12 @@ func TestSelfDeployRefusesAFailingBuild(t *testing.T) {
 	}
 
 	kinds := selfDeployChain(t, d, ctx)
-	if len(kinds) != 1 || kinds[0] != "self-deploy-refused" {
-		t.Fatalf("control/self-deploy = %v, want exactly one self-deploy-refused", kinds)
+	if len(kinds) != 2 || kinds[0] != "self-deploy-refused" || kinds[1] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want [self-deploy-refused self-deploy-pass]", kinds)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionRefused || passes[0].Reason == "" {
+		t.Fatalf("passes = %+v, want exactly one refused with a reason", passes)
 	}
 	if got := claimsChain(t, d, ctx); len(got) != 2 || got[0] != "stop" || got[1] != "resume" {
 		t.Fatalf("control/claims = %v, want [stop resume]", got)
@@ -492,11 +550,151 @@ func TestSelfDeploySettlesBeforeCheckingAndSucceeds(t *testing.T) {
 	}
 
 	kinds := selfDeployChain(t, d, ctx)
-	if len(kinds) != 1 || kinds[0] != "self-deployed" {
-		t.Fatalf("control/self-deploy = %v, want exactly one self-deployed", kinds)
+	if len(kinds) != 2 || kinds[0] != "self-deployed" || kinds[1] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want [self-deployed self-deploy-pass]", kinds)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionDeploying || passes[0].Head != string(appHead) {
+		t.Fatalf("passes = %+v, want exactly one deploying at head %s", passes, appHead)
+	}
+	at, decision, _, ok := d.lastPassForAPI()
+	if !ok || decision != decisionDeploying || at.IsZero() {
+		t.Fatalf("lastPassForAPI = at=%v decision=%q ok=%v, want a deploying decision", at, decision, ok)
 	}
 	if got := claimsChain(t, d, ctx); len(got) != 2 || got[0] != "stop" || got[1] != "resume" {
 		t.Fatalf("control/claims = %v, want [stop resume]", got)
+	}
+}
+
+// TestSelfDeployAbandonsWhenQuiesceDoesNotDrain: a run still in flight when
+// the drain window elapses is abandoned rather than built on top of — the
+// head is not refused (it was never attempted), and claims are resumed so
+// the run in flight can finish. Abandon-on-busy behavior itself is
+// unchanged (issue #152); it now also leaves a pass record saying so.
+func TestSelfDeployAbandonsWhenQuiesceDoesNotDrain(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, appHead := deployRepo(t, "app", validBoxdMain)
+	started := filepath.Join(dir, "started")
+	slowBuild := fmt.Sprintf("touch %s && sleep 1 && echo done > out.txt && git add -A && git -c user.name=b -c user.email=b@i commit -m work", started)
+
+	cfg := fmt.Sprintf(`
+tenant: acme
+runner: boxd
+db: %s
+root: %s
+listen: unix:/tmp/never-used.sock
+every: 1s
+drain: 50ms
+budget: {max_concurrent: 2}
+boxes:
+  - name: shop
+    self_deploy: {from: main, repo: app}
+    repos:
+      - name: work
+        remote: %s
+        build: '%s'
+        check: 'test -f out.txt'
+      - name: app
+        remote: %s
+        build: 'true'
+        check: 'true'
+`, db, root, workRem, slowBuild, appRem)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.build = func() version.Build { return version.Build{Commit: fakeBuildCommit, Known: true} }
+
+	ts := httptest.NewServer(d.API.Handler())
+	t.Cleanup(ts.Close)
+	c, err := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.OpenIngress(ctx, "shop-work", "work-1", "slow change", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	tickDone := make(chan struct{})
+	go func() { d.Tick(ctx); close(tickDone) }()
+	waitForFile(t, started, 3*time.Second) // the build is now mid-sleep, well past the 50ms drain
+
+	if err := d.selfDeployChore(ctx); err != nil {
+		t.Fatalf("selfDeployChore: %v", err)
+	}
+	<-tickDone // let the in-flight run finish before the test tears down
+
+	kinds := selfDeployChain(t, d, ctx)
+	if len(kinds) != 1 || kinds[0] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want exactly one self-deploy-pass", kinds)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionAbandoned || passes[0].Head != string(appHead) {
+		t.Fatalf("passes = %+v, want exactly one abandoned at head %s", passes, appHead)
+	}
+	if got := claimsChain(t, d, ctx); len(got) != 2 || got[0] != "stop" || got[1] != "resume" {
+		t.Fatalf("control/claims = %v, want [stop resume] — claims must still be resumed on abandon", got)
+	}
+
+	refused, err := d.selfDeployRefused(ctx, appHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused {
+		t.Fatal("an abandoned head must not be remembered as refused — it was never attempted")
+	}
+}
+
+// TestSelfDeployRecordsAnErroredPassOnFetchFailure: a pass that cannot even
+// reach the point of deciding still owes the chain an answer (issue #152) —
+// mapping a fetch failure onto "current" would be unknown reading as zero.
+func TestSelfDeployRecordsAnErroredPassOnFetchFailure(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, _ := deployRepo(t, "app", validBoxdMain)
+	writeSelfDeployCfg(t, cfgPath, db, root, workRem, buildCmd, appRem, "true")
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.build = func() version.Build { return version.Build{Commit: fakeBuildCommit, Known: true} }
+
+	// New's own assemble already mirrored app once; removing its remote now
+	// makes the chore's next Fetch (a `git remote update` against a mirror
+	// that already exists) fail, without touching the mirror directory
+	// selfDeployChore itself reads from.
+	if err := os.RemoveAll(appRem); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.selfDeployChore(ctx); err != nil {
+		t.Fatalf("selfDeployChore: %v — an unexpected failure is logged and left for the next pass, not propagated", err)
+	}
+	if got := claimsChain(t, d, ctx); len(got) != 0 {
+		t.Fatalf("control/claims = %v, want none — a fetch failure never reaches the stop", got)
+	}
+	kinds := selfDeployChain(t, d, ctx)
+	if len(kinds) != 1 || kinds[0] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want exactly one self-deploy-pass", kinds)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionErrored || passes[0].Reason == "" {
+		t.Fatalf("passes = %+v, want exactly one errored with a reason", passes)
+	}
+	if passes[0].Head != "" {
+		t.Fatalf("pass head = %q, want absent — the branch was never resolved", passes[0].Head)
 	}
 }
 
@@ -526,8 +724,15 @@ func TestSelfDeploySkipsWhenDiffIsEntirelyOutsideNamedSections(t *testing.T) {
 	if got := claimsChain(t, d, ctx); len(got) != 0 {
 		t.Fatalf("control/claims = %v, want none — a docs-only landing must never stop claims", got)
 	}
-	if got := selfDeployChain(t, d, ctx); len(got) != 0 {
-		t.Fatalf("control/self-deploy = %v, want none", got)
+	if got := selfDeployChain(t, d, ctx); len(got) != 1 || got[0] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want exactly one self-deploy-pass", got)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionSkipped {
+		t.Fatalf("passes = %+v, want exactly one skipped", passes)
+	}
+	if len(passes[0].Sections) != 1 || passes[0].Sections[0] != "docs" {
+		t.Fatalf("pass sections = %v, want [docs]", passes[0].Sections)
 	}
 }
 
@@ -561,8 +766,12 @@ func TestSelfDeployDeploysWhenDiffTouchesANamedSection(t *testing.T) {
 		t.Fatalf("selfDeployChore = %v, want ErrSelfDeployed", err)
 	}
 	kinds := selfDeployChain(t, d, ctx)
-	if len(kinds) != 1 || kinds[0] != "self-deployed" {
-		t.Fatalf("control/self-deploy = %v, want exactly one self-deployed", kinds)
+	if len(kinds) != 2 || kinds[0] != "self-deployed" || kinds[1] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want [self-deployed self-deploy-pass]", kinds)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionDeploying || len(passes[0].Sections) != 1 || passes[0].Sections[0] != "code" {
+		t.Fatalf("passes = %+v, want exactly one deploying touching [code]", passes)
 	}
 }
 
@@ -597,8 +806,12 @@ func TestSelfDeployDeploysWhenDiffTouchesPathInNoDeclaredSection(t *testing.T) {
 		t.Fatalf("selfDeployChore = %v, want ErrSelfDeployed", err)
 	}
 	kinds := selfDeployChain(t, d, ctx)
-	if len(kinds) != 1 || kinds[0] != "self-deployed" {
-		t.Fatalf("control/self-deploy = %v, want exactly one self-deployed", kinds)
+	if len(kinds) != 2 || kinds[0] != "self-deployed" || kinds[1] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want [self-deployed self-deploy-pass]", kinds)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionDeploying || len(passes[0].Sections) != 0 {
+		t.Fatalf("passes = %+v, want exactly one deploying with no sections — VERSION matches no declared section", passes)
 	}
 }
 
@@ -632,8 +845,12 @@ func TestSelfDeployEmptySectionsDeploysOnAnyMovement(t *testing.T) {
 		t.Fatalf("selfDeployChore = %v, want ErrSelfDeployed — no sections: means every moved head is a candidate", err)
 	}
 	kinds := selfDeployChain(t, d, ctx)
-	if len(kinds) != 1 || kinds[0] != "self-deployed" {
-		t.Fatalf("control/self-deploy = %v, want exactly one self-deployed", kinds)
+	if len(kinds) != 2 || kinds[0] != "self-deployed" || kinds[1] != kindSelfDeployPass {
+		t.Fatalf("control/self-deploy = %v, want [self-deployed self-deploy-pass]", kinds)
+	}
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 1 || passes[0].Decision != decisionDeploying || len(passes[0].Sections) != 0 {
+		t.Fatalf("passes = %+v, want exactly one deploying with no sections — self_deploy declared none", passes)
 	}
 }
 

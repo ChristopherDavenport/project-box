@@ -48,6 +48,13 @@ type Config struct {
 	// directory rather than inside it (issue #73).
 	Listen string `yaml:"listen"`
 	Every  string `yaml:"every"`
+	// HousekeepEvery bounds the wall-clock gap between housekeeping passes —
+	// mirror prune, escalation sweep, compaction, run-log prune, and the
+	// self-deploy chore, in that order; empty means 5m. Distinct from Every,
+	// the tick interval: housekeeping used to ride every Nth tick, which one
+	// long tick multiplied into many, so it is timed on its own clock
+	// instead.
+	HousekeepEvery string `yaml:"housekeep_every"`
 	// Drain bounds the graceful-shutdown wait for in-flight runs; empty
 	// means 30s. SIGTERM stops new claims immediately; running work gets
 	// this long to settle before it is cancelled.
@@ -751,6 +758,12 @@ func (c *Config) validate() error {
 	if _, err := time.ParseDuration(c.Every); err != nil {
 		return fmt.Errorf("boxcfg: every: %w", err)
 	}
+	if c.HousekeepEvery == "" {
+		c.HousekeepEvery = "5m"
+	}
+	if _, err := time.ParseDuration(c.HousekeepEvery); err != nil {
+		return fmt.Errorf("boxcfg: housekeep_every: %w", err)
+	}
 	if c.Drain == "" {
 		c.Drain = "30s"
 	}
@@ -1212,6 +1225,13 @@ func (c Config) EveryDuration() time.Duration {
 // DrainDuration returns the parsed graceful-shutdown window.
 func (c Config) DrainDuration() time.Duration {
 	d, _ := time.ParseDuration(c.Drain)
+	return d
+}
+
+// HousekeepEveryDuration returns the parsed wall-clock gap between
+// housekeeping passes.
+func (c Config) HousekeepEveryDuration() time.Duration {
+	d, _ := time.ParseDuration(c.HousekeepEvery)
 	return d
 }
 

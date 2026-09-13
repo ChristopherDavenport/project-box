@@ -850,3 +850,55 @@ func TestStatusFailsWhenFollowBranchCannotResolve(t *testing.T) {
 		t.Fatal("status should have failed when the followed branch could not resolve")
 	}
 }
+
+// TestStatusReportsTheLastPassSeam: when the daemon wires LastPass and a
+// pass has run, /v1/status carries when it ran, what it decided, and why
+// (issue #152).
+func TestStatusReportsTheLastPassSeam(t *testing.T) {
+	w := rig(t)
+	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	w.srv.LastPass = func() (time.Time, string, string, bool) {
+		return at, "current", "already running what the branch names", true
+	}
+	st, err := statusOnly(t, w.srv).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.LastPassAt != at.Format(time.RFC3339) {
+		t.Fatalf("last_pass_at = %q, want %q", st.LastPassAt, at.Format(time.RFC3339))
+	}
+	if st.LastPassDecision != "current" || st.LastPassReason != "already running what the branch names" {
+		t.Fatalf("status = %+v, want decision/reason to survive the wire", st)
+	}
+}
+
+// TestStatusOmitsLastPassWhenUnwired: no self_deploy configured means no
+// LastPass seam, which must read as the fields simply being absent — the
+// nil-means-unwired shape every other optional Server dependency uses.
+func TestStatusOmitsLastPassWhenUnwired(t *testing.T) {
+	w := rig(t)
+	st, err := statusOnly(t, w.srv).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.LastPassAt != "" || st.LastPassDecision != "" || st.LastPassReason != "" {
+		t.Fatalf("status = %+v, want last-pass fields absent", st)
+	}
+}
+
+// TestStatusOmitsLastPassBeforeTheFirstPass: self_deploy configured (LastPass
+// wired) but no pass has run yet this process — a restart — must also read
+// as absent, never a zero time or empty decision presented as real.
+func TestStatusOmitsLastPassBeforeTheFirstPass(t *testing.T) {
+	w := rig(t)
+	w.srv.LastPass = func() (time.Time, string, string, bool) {
+		return time.Time{}, "", "", false
+	}
+	st, err := statusOnly(t, w.srv).Status(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.LastPassAt != "" || st.LastPassDecision != "" || st.LastPassReason != "" {
+		t.Fatalf("status = %+v, want last-pass fields absent before the first pass", st)
+	}
+}
