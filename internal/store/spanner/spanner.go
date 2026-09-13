@@ -61,16 +61,21 @@ var DDL = []string{
 		trace        STRING(MAX) NOT NULL,
 	) PRIMARY KEY (tenant, scope, seq)`,
 	`CREATE INDEX chain_by_subject ON chain (tenant, subject, at_ns)`,
+	// session is the DDL for a fresh or emulator database only. Altering an
+	// existing production Spanner database to add this column is an
+	// operator's DDL action against the live instance, out of this
+	// package's scope.
 	`CREATE TABLE runlog (
-		tenant STRING(63)  NOT NULL,
-		run    STRING(MAX) NOT NULL,
-		n      INT64       NOT NULL,
-		at_ns  INT64       NOT NULL,
-		kind   STRING(MAX) NOT NULL,
-		call   STRING(MAX) NOT NULL,
-		tool   STRING(MAX) NOT NULL,
-		text   STRING(MAX) NOT NULL,
-		reason STRING(MAX) NOT NULL,
+		tenant  STRING(63)  NOT NULL,
+		run     STRING(MAX) NOT NULL,
+		n       INT64       NOT NULL,
+		at_ns   INT64       NOT NULL,
+		kind    STRING(MAX) NOT NULL,
+		call    STRING(MAX) NOT NULL,
+		tool    STRING(MAX) NOT NULL,
+		text    STRING(MAX) NOT NULL,
+		reason  STRING(MAX) NOT NULL,
+		session STRING(MAX) NOT NULL,
 	) PRIMARY KEY (tenant, run, n)`,
 	`CREATE INDEX runlog_by_age ON runlog (tenant, at_ns)`,
 }
@@ -109,7 +114,7 @@ func (s *Store) Runs() runlog.Log { return &runs{s: s} }
 
 type runs struct{ s *Store }
 
-const frameCols = `run, n, at_ns, kind, call, tool, text, reason`
+const frameCols = `run, n, at_ns, kind, call, tool, text, reason, session`
 
 func (r *runs) Append(ctx context.Context, t tenant.ID, f runlog.Frame) (runlog.Frame, error) {
 	if err := t.Validate(); err != nil {
@@ -138,8 +143,8 @@ func (r *runs) Append(ctx context.Context, t tenant.ID, f runlog.Frame) (runlog.
 		}
 		f.N = uint64(n) + 1
 		return txn.BufferWrite([]*gspanner.Mutation{gspanner.Insert("runlog",
-			[]string{"tenant", "run", "n", "at_ns", "kind", "call", "tool", "text", "reason"},
-			[]any{string(t), f.Run, int64(f.N), f.At.UnixNano(), f.Kind, f.Call, f.Tool, f.Text, f.Reason},
+			[]string{"tenant", "run", "n", "at_ns", "kind", "call", "tool", "text", "reason", "session"},
+			[]any{string(t), f.Run, int64(f.N), f.At.UnixNano(), f.Kind, f.Call, f.Tool, f.Text, f.Reason, f.Session},
 		)})
 	})
 	if err != nil {
@@ -165,7 +170,7 @@ func (r *runs) Frames(ctx context.Context, t tenant.ID, run string) ([]runlog.Fr
 		}
 		var f runlog.Frame
 		var n, at int64
-		if err := row.Columns(&f.Run, &n, &at, &f.Kind, &f.Call, &f.Tool, &f.Text, &f.Reason); err != nil {
+		if err := row.Columns(&f.Run, &n, &at, &f.Kind, &f.Call, &f.Tool, &f.Text, &f.Reason, &f.Session); err != nil {
 			return nil, err
 		}
 		f.N, f.At = uint64(n), time.Unix(0, at).UTC()

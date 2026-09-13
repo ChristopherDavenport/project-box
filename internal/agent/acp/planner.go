@@ -184,9 +184,9 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 	rt := &Runtime{Command: p.Command, Dir: tree, ContextDir: "", Env: p.Env, EnvNames: p.EnvNames,
 		MaxTokens: p.MaxTokens, Transcript: p.Transcript,
 		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: p.InheritSettings,
-		Progress: p.progress(ctx, run)}
+		Progress: p.progress(ctx, run, bundle.Ref)}
 	if p.Progress != nil {
-		p.Progress(ctx, run, Update{Kind: UpdateStarted, Text: bundle.Ref})
+		p.Progress(ctx, run, Update{Kind: UpdateStarted, Text: bundle.Ref, Session: bundle.Ref})
 	}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, sent)
@@ -499,11 +499,15 @@ func (r recorder) json(ctx context.Context, kind, subject string, v any) {
 	r.raw(ctx, kind, subject, body)
 }
 
-// progress adapts the run-tagged hook to the runtime's untagged one; a
-// runtime with no hook does no work per update.
-func (p *Planner) progress(ctx context.Context, run string) func(Update) {
+// progress adapts the run-tagged hook to the runtime's untagged one and
+// stamps ref as the session that produced each update; a runtime with no
+// hook does no work per update.
+func (p *Planner) progress(ctx context.Context, run, ref string) func(Update) {
 	if p.Progress == nil {
 		return nil
 	}
-	return func(u Update) { p.Progress(ctx, run, u) }
+	return func(u Update) {
+		u.Session = ref
+		p.Progress(ctx, run, u)
+	}
 }

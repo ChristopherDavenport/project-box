@@ -25,6 +25,11 @@ type Frame struct {
 	Tool   string    `json:"tool,omitempty"`
 	Text   string    `json:"text,omitempty"`
 	Reason string    `json:"reason,omitempty"`
+	// Session is the agentref of the ACP session that produced this frame.
+	// Empty means the frame predates attribution — a reader must never
+	// assign such a frame to a session by time; absence is a fact, not a
+	// gap to be filled in by inference.
+	Session string `json:"session,omitempty"`
 }
 
 // Log is the store's side. The tenant is explicit on every call, as on every

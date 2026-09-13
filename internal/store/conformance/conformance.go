@@ -768,6 +768,30 @@ func Run(t *testing.T, open func(t *testing.T) Harness) {
 		}
 	})
 
+	t.Run("runlog/session-round-trips", func(t *testing.T) {
+		tn := tid(t)
+		rl := s.Runs()
+		if _, err := rl.Append(ctx, tn, runlog.Frame{Run: "wi-1", Kind: "started", Session: "agentref-1"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if _, err := rl.Append(ctx, tn, runlog.Frame{Run: "wi-1", Kind: "tool", Tool: "Read"}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		got, err := rl.Frames(ctx, tn, "wi-1")
+		if err != nil {
+			t.Fatalf("frames: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("frames = %d, want 2", len(got))
+		}
+		if got[0].Session != "agentref-1" {
+			t.Errorf("first frame's session = %q, want the agentref it was appended with", got[0].Session)
+		}
+		if got[1].Session != "" {
+			t.Errorf("second frame's session = %q, want empty — a frame appended without one must not have one invented", got[1].Session)
+		}
+	})
+
 	t.Run("runlog/tenant-scoped", func(t *testing.T) {
 		a, b := tid(t, "a"), tid(t, "b")
 		rl := s.Runs()

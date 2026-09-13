@@ -345,7 +345,7 @@ func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, c
 	// record answers afterwards; this is what puts the unit on a live view
 	// from its first instant rather than from its first tool call.
 	if b.Progress != nil {
-		b.Progress(ctx, ws.Run, Update{Kind: UpdateStarted, Text: bundle.Ref})
+		b.Progress(ctx, ws.Run, Update{Kind: UpdateStarted, Text: bundle.Ref, Session: bundle.Ref})
 	}
 
 	// The bundle explanation rides along because the prompt alone does not
@@ -358,7 +358,7 @@ func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, c
 	})
 
 	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: rc.ContextDir, Env: b.Env, EnvNames: b.EnvNames,
-		MaxTokens: b.MaxTokens, Transcript: b.Transcript, Progress: b.progress(ctx, ws.Run),
+		MaxTokens: b.MaxTokens, Transcript: b.Transcript, Progress: b.progress(ctx, ws.Run, bundle.Ref),
 		SkillsDir: rc.SkillsDir, LoadedSkills: rc.Loaded, InheritSettings: b.InheritSettings, Resume: resume}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, sent)
@@ -726,13 +726,17 @@ func (b *Builder) wakeNotes() int {
 }
 
 // progress binds the run id onto the runtime's stream hook, so the fan-in
-// arrives already knowing which unit it belongs to. Nil in, nil out: a
-// runtime with no hook does no work per update.
-func (b *Builder) progress(ctx context.Context, run string) func(Update) {
+// arrives already knowing which unit it belongs to, and stamps ref as the
+// session that produced each update. Nil in, nil out: a runtime with no hook
+// does no work per update.
+func (b *Builder) progress(ctx context.Context, run, ref string) func(Update) {
 	if b.Progress == nil {
 		return nil
 	}
-	return func(u Update) { b.Progress(ctx, run, u) }
+	return func(u Update) {
+		u.Session = ref
+		b.Progress(ctx, run, u)
+	}
 }
 
 // runRecord is which agent ran, under what, on whose seat.

@@ -41,6 +41,10 @@ type Frame struct {
 	Tool   string `json:"tool,omitempty"`
 	Text   string `json:"text,omitempty"`
 	Reason string `json:"reason,omitempty"`
+	// Session is the agentref of the ACP session that produced this frame,
+	// the same fact [runlog.Frame] carries — the live bus and the kept log
+	// tell the same story.
+	Session string `json:"session,omitempty"`
 }
 
 // Live is the room's window into runs that have not settled — the ACP stream,

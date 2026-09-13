@@ -61,7 +61,7 @@ func TestARunIsSeenLiveAndKeptAfter(t *testing.T) {
 		}
 	}
 	ctx := context.Background()
-	d.progress(ctx, "wi-x", acp.Update{Kind: acp.UpdateTool, Call: "t-1", Tool: "Read", Text: "Read main.go"})
+	d.progress(ctx, "wi-x", acp.Update{Kind: acp.UpdateTool, Call: "t-1", Tool: "Read", Text: "Read main.go", Session: "agentref-1"})
 	live := d.live.Item("wi-x")
 	kept, err := d.store.Runs().Frames(ctx, d.tenant, "wi-x")
 	if err != nil {
@@ -72,6 +72,9 @@ func TestARunIsSeenLiveAndKeptAfter(t *testing.T) {
 	}
 	if live[0].Call != "t-1" || kept[0].Call != "t-1" || kept[0].Text != "Read main.go" || kept[0].Kind != "tool" {
 		t.Errorf("frames = live %+v, kept %+v; want the call id, tool, title and kind on both", live[0], kept[0])
+	}
+	if live[0].Session != "agentref-1" || kept[0].Session != "agentref-1" {
+		t.Errorf("frames = live %+v, kept %+v; want the session on both", live[0], kept[0])
 	}
 	if !live[0].At.Equal(kept[0].At) {
 		t.Errorf("the same frame carries two moments: live %v, kept %v", live[0].At, kept[0].At)

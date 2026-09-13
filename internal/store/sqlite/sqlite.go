@@ -80,15 +80,16 @@ BEGIN SELECT RAISE(ABORT, 'evidence chain is append-only outside compaction'); E
 -- Telemetry beside the chain, so no trigger guards it — it is pruned by
 -- age, and the chain's append-only property does not extend to it.
 CREATE TABLE IF NOT EXISTS runlog (
-	tenant TEXT    NOT NULL,
-	run    TEXT    NOT NULL,
-	n      INTEGER NOT NULL,
-	at_ns  INTEGER NOT NULL,
-	kind   TEXT    NOT NULL,
-	call   TEXT    NOT NULL,
-	tool   TEXT    NOT NULL,
-	text   TEXT    NOT NULL,
-	reason TEXT    NOT NULL,
+	tenant  TEXT    NOT NULL,
+	run     TEXT    NOT NULL,
+	n       INTEGER NOT NULL,
+	at_ns   INTEGER NOT NULL,
+	kind    TEXT    NOT NULL,
+	call    TEXT    NOT NULL,
+	tool    TEXT    NOT NULL,
+	text    TEXT    NOT NULL,
+	reason  TEXT    NOT NULL,
+	session TEXT    NOT NULL DEFAULT '',
 	PRIMARY KEY (tenant, run, n)
 ) STRICT;
 
@@ -134,7 +135,47 @@ func Open(path string, opts ...Option) (*Store, error) {
 		s.Close()
 		return nil, fmt.Errorf("sqlite: apply schema: %w", err)
 	}
+	if err := addRunlogSessionColumn(w); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("sqlite: upgrade runlog schema: %w", err)
+	}
 	return s, nil
+}
+
+// addRunlogSessionColumn is the repository's first schema evolution.
+// CREATE TABLE IF NOT EXISTS above is a no-op against a database that
+// already has a runlog table, so a database opened before the session
+// column existed would never gain it from schema alone — including the
+// live dogfood daemon's. This checks the column's presence with
+// pragma table_info and adds it once when absent, so an old database
+// upgrades in place rather than needing a separate migration tool.
+func addRunlogSessionColumn(w *sql.DB) error {
+	rows, err := w.Query(`PRAGMA table_info(runlog)`)
+	if err != nil {
+		return err
+	}
+	has := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "session" {
+			has = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	if has {
+		return nil
+	}
+	_, err = w.Exec(`ALTER TABLE runlog ADD COLUMN session TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 // Close closes both pools.
@@ -154,7 +195,7 @@ func (s *Store) Runs() runlog.Log { return &runs{s: s} }
 
 type runs struct{ s *Store }
 
-const frameCols = `run, n, at_ns, kind, call, tool, text, reason`
+const frameCols = `run, n, at_ns, kind, call, tool, text, reason, session`
 
 func (r *runs) Append(ctx context.Context, t tenant.ID, f runlog.Frame) (runlog.Frame, error) {
 	if err := t.Validate(); err != nil {
@@ -177,8 +218,8 @@ func (r *runs) Append(ctx context.Context, t tenant.ID, f runlog.Frame) (runlog.
 		}
 		f.N = uint64(n) + 1
 		_, err = tx.ExecContext(ctx,
-			`INSERT INTO runlog (tenant, `+frameCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
-			string(t), f.Run, int64(f.N), f.At.UnixNano(), f.Kind, f.Call, f.Tool, f.Text, f.Reason)
+			`INSERT INTO runlog (tenant, `+frameCols+`) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			string(t), f.Run, int64(f.N), f.At.UnixNano(), f.Kind, f.Call, f.Tool, f.Text, f.Reason, f.Session)
 		return err
 	})
 	if err != nil {
@@ -198,7 +239,7 @@ func (r *runs) Frames(ctx context.Context, t tenant.ID, run string) ([]runlog.Fr
 	for rows.Next() {
 		var f runlog.Frame
 		var n, at int64
-		if err := rows.Scan(&f.Run, &n, &at, &f.Kind, &f.Call, &f.Tool, &f.Text, &f.Reason); err != nil {
+		if err := rows.Scan(&f.Run, &n, &at, &f.Kind, &f.Call, &f.Tool, &f.Text, &f.Reason, &f.Session); err != nil {
 			return nil, err
 		}
 		f.N, f.At = uint64(n), time.Unix(0, at).UTC()

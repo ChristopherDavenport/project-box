@@ -154,6 +154,11 @@ type Update struct {
 	Text string
 	// Reason is the agent's own words for the two box verbs.
 	Reason string
+	// Session is the agentref (bundle.Ref) of the run that produced this
+	// update — the session's name on every frame. Stamped by each role's
+	// progress wrapper, not by Runtime, so a resumed continuation's own
+	// bundle names its own frames rather than inheriting the run's first one.
+	Session string
 }
 
 // Usage is what a run cost, as the agent reported it.

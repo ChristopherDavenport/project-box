@@ -725,10 +725,10 @@ func (d *Daemon) Every() time.Duration {
 func (d *Daemon) progress(ctx context.Context, run string, u acp.Update) {
 	at := time.Now().UTC()
 	d.live.Append(run, control.Frame{
-		At: at, Kind: string(u.Kind), Call: u.Call, Tool: u.Tool, Text: u.Text, Reason: u.Reason,
+		At: at, Kind: string(u.Kind), Call: u.Call, Tool: u.Tool, Text: u.Text, Reason: u.Reason, Session: u.Session,
 	})
 	if _, err := d.store.Runs().Append(ctx, d.tenant, runlog.Frame{
-		Run: run, At: at, Kind: string(u.Kind), Call: u.Call, Tool: u.Tool, Text: u.Text, Reason: u.Reason,
+		Run: run, At: at, Kind: string(u.Kind), Call: u.Call, Tool: u.Tool, Text: u.Text, Reason: u.Reason, Session: u.Session,
 	}); err != nil {
 		slog.Warn("run log", "run", run, "err", err)
 	}

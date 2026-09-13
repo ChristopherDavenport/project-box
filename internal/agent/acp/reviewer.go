@@ -224,9 +224,9 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 	rt := &Runtime{Command: r.Command, Dir: mat.Dir, ContextDir: "", Env: r.Env, EnvNames: r.EnvNames,
 		MaxTokens: r.MaxTokens, Transcript: r.Transcript,
 		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: r.InheritSettings,
-		Progress: r.progress(ctx, run)}
+		Progress: r.progress(ctx, run, bundle.Ref)}
 	if r.Progress != nil {
-		r.Progress(ctx, run, Update{Kind: UpdateStarted, Text: bundle.Ref})
+		r.Progress(ctx, run, Update{Kind: UpdateStarted, Text: bundle.Ref, Session: bundle.Ref})
 	}
 	started := time.Now()
 	res, err := rt.Run(ctx, bundle, sent)
@@ -282,12 +282,16 @@ func (r *Reviewer) seatName() string {
 	return r.Seat.Name
 }
 
-// progress adapts the run-tagged hook to the runtime's untagged one.
-func (r *Reviewer) progress(ctx context.Context, run string) func(Update) {
+// progress adapts the run-tagged hook to the runtime's untagged one and
+// stamps ref as the session that produced each update.
+func (r *Reviewer) progress(ctx context.Context, run, ref string) func(Update) {
 	if r.Progress == nil {
 		return nil
 	}
-	return func(u Update) { r.Progress(ctx, run, u) }
+	return func(u Update) {
+		u.Session = ref
+		r.Progress(ctx, run, u)
+	}
 }
 
 // material is the reading a review was laid out, and what is true about it.

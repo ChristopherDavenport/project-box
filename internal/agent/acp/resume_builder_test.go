@@ -117,6 +117,60 @@ func TestInClaimRetryContinuesThePriorSession(t *testing.T) {
 	}
 }
 
+// TestFramesCarryTheAttemptsOwnAgentref: a frame reaching Progress names the
+// session (agentref) of the attempt that produced it, and two attempts on
+// the same item — the cold first build and the continuation that follows a
+// gate refusal — carry two different agentrefs, because each composes its
+// own bundle rather than inheriting the run's first one.
+func TestFramesCarryTheAttemptsOwnAgentref(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	ctx := context.Background()
+	b := lp.Builder.(*Builder)
+
+	var updates []Update
+	b.Progress = func(_ context.Context, _ string, u Update) { updates = append(updates, u) }
+
+	item := submitSectioned(t, ctx, s, router, "issue-cont-refs", "add the widget package", nil)
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	if _, err := b.Build(ctx, ws, item.Task); err != nil {
+		t.Fatalf("first attempt: %v", err)
+	}
+	first := updates
+	updates = nil
+
+	retainPrior(t, ctx, s, item, retryPrior(2, 3))
+	b.Env = []string{"ACP_FAKE=resume"}
+	if _, err := b.Build(ctx, ws, item.Task); err != nil {
+		t.Fatalf("continuation attempt: %v", err)
+	}
+	second := updates
+
+	if len(first) == 0 || len(second) == 0 {
+		t.Fatalf("want updates from both attempts, got %d and %d", len(first), len(second))
+	}
+	ref1 := first[0].Session
+	if ref1 == "" {
+		t.Fatal("the first attempt's frames carry no session")
+	}
+	for _, u := range first {
+		if u.Session != ref1 {
+			t.Errorf("first attempt update %+v carries session %q, want the one attempt's agentref %q", u, u.Session, ref1)
+		}
+	}
+	ref2 := second[0].Session
+	if ref2 == "" {
+		t.Fatal("the continuation's frames carry no session")
+	}
+	if ref2 == ref1 {
+		t.Fatal("the continuation composed its own bundle and must carry a different agentref than the cold attempt")
+	}
+	for _, u := range second {
+		if u.Session != ref2 {
+			t.Errorf("continuation update %+v carries session %q, want the continuation's own agentref %q", u, u.Session, ref2)
+		}
+	}
+}
+
 // TestInClaimRetryFallsBackColdOnFailedContinuation: a continuation that
 // cannot actually continue — session/load refuses — costs a note on the
 // chain, never the attempt: the build still succeeds, cold, and the note
