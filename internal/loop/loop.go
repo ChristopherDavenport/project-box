@@ -703,106 +703,140 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			return l.runOptimistic(ctx, q, item, claim, ws, cs, base, head)
 		}
 
-		// Gates already satisfied on THIS head are carried, not re-run. An item
-		// waiting on a person is re-drained every tick for as long as the review
-		// takes, and re-running the whole suite each time is how a worker that is
-		// doing nothing keeps a machine busy: the deterministic shells — the
-		// build, the test run — cannot change their mind about a commit that has
-		// not moved. The gate whose answer CAN change is the human one, and it is
-		// a store read. Any change of head clears the carry, because replayed or
-		// rebuilt content is a different question — UNLESS the rebase branch
-		// above found that question already answered: the sha changed but the
-		// diff a diff-judging gate reads did not (issue #95).
-		gates := l.gatesFor(item, ws)
-		carried := item.PassedGates
-		switch {
-		case string(head) == item.Built:
-			// Unchanged: every gate that already passed on this exact content
-			// still applies.
-		case rebaseCarriesDiff:
-			// Same patch, new base: only the gates that judge the diff rather
-			// than the base ride forward, and each one that does gets its own
-			// carry record naming the verdict it rests on — see
-			// [Loop.carryDiffGates]. A human approval never satisfies
-			// [forge.DiffJudge] and so is never among them: it binds to the
-			// exact commit a person looked at (docs/PLAN.md §6), not to a
-			// patch shape.
-			carried = l.carryDiffGates(ctx, item, gates, item.PassedGates, forge.Commit(item.Built), head, rebasePatchID)
-		default:
-			carried = nil
+		// The commit's own message is read once per head, before any gate is
+		// asked to spend anything on it: the ACP adapter commits under a
+		// fixed trailer (agent.AdapterTrailer) when a builder's turn ends
+		// without a commit of its own, with a subject that is just the
+		// task's first line truncated to 72 characters (acp.Builder's
+		// doneTrailer and commitMessage) — a known, free-to-recognize shape,
+		// not a change anyone offered for judgement. Issue #69's first
+		// attempt paid a reviewer $2.24 to notice exactly this; the loop can
+		// read it for the price of one git exec (issue #130). An error here
+		// is infrastructure, not a refusal — unknown never reads as zero —
+		// so it fails the item rather than minting a verdict nobody reached.
+		//
+		// Scoped to the gated lane only: the optimistic lane above already
+		// returned, and it lands before its own gates run, so changing what
+		// it lands on is a different question (precedent: issue #83 made its
+		// retry-on-refusal gated-only for the same reason).
+		msg, cmerr := git.CommitMessage(ctx, ws.Dir, string(head))
+		if cmerr != nil {
+			return q.Fail(ctx, item, claim, cmerr.Error())
 		}
 		verdicts = nil
 		passedNow = nil
-		var gateInfra, gateWait error
-		gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
-			for _, g := range gates {
-				if slices.Contains(carried, g.Name()) {
-					// No new evidence beyond what was already written above
-					// (the same-head case needs none; the rebase-carry case
-					// wrote its own "gate-carried" record): the gate ran once
-					// on this content and its verdict is already on the
-					// chain. Recording it again would be minting a judgement
-					// nobody made.
-					reason := "passed on " + short(head) + ", carried while the head stands"
-					if rebaseCarriesDiff && string(head) != item.Built {
-						reason = fmt.Sprintf("carried across a rebase: patch-id %s of the reviewed commit %s equals the patch-id of %s",
-							rebasePatchID, short(forge.Commit(item.Built)), short(head))
-					}
-					verdicts = append(verdicts, forge.Verdict{
-						Gate: g.Name(), Decision: forge.DecisionPass, Reason: reason,
-					})
-					passedNow = append(passedNow, g.Name())
-					continue
-				}
-				v, tries, err := l.evaluateGate(ctx, item, g, cs)
-				if err != nil {
-					if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrUnpriced) {
-						// The meter's own refusal, not infrastructure trouble a
-						// retry could clear: no gate today can hit this (the
-						// meter refuses at pump.Acquire, before Run), so it can
-						// only reach here by construction (a fake gate in
-						// tests). Retrying or parking would both be the loop
-						// second-guessing a rule that is not its to relax.
-						gateWait = fmt.Errorf("gate %s: %w", g.Name(), err)
-						return gateWait
-					}
-					// Infrastructure trouble is never recorded as a rejected
-					// change, even after every retry this bound allowed.
-					gateInfra = fmt.Errorf("gate %s could not conclude after %d tries: %v", g.Name(), tries, err)
-					return gateInfra
-				}
-				vr := gateVerdictRecord{Verdict: v}
-				if tries > 1 {
-					vr.Try = tries
-				}
-				body, _ := json.Marshal(vr)
-				rec := l.recordEvidence(ctx, item, "gate", string(head), string(body))
-				if rec.ID != "" {
-					// The chain's own id, threaded onto the verdict it
-					// belongs to, so a Lander that publishes verdicts
-					// outside this process (git.PRLander's GitHub check)
-					// gives its reader a way back to the chain instead of
-					// just an assertion.
-					v.Evidence = append(v.Evidence, forge.EvidenceRef{Kind: forge.EvidenceKindRecord, URI: rec.ID})
-				}
-				if v.Decision == forge.DecisionPass {
-					passedNow = append(passedNow, g.Name())
-				}
-				verdicts = append(verdicts, v)
-				if v.Decision == forge.DecisionFail {
-					// forge.Resolve's own rule, applied before the loop pays
-					// for the gates after this one: a failure outranks a
-					// pending verdict, so asking a reviewer to read a diff
-					// that already failed its tests judges nothing Resolve
-					// will not already discard.
-					break
-				}
+		var gateInfra, gateWait, gerr error
+		if why := placeholderCommitReason(msg, item.Task); why != "" {
+			// No gate runs: no reviewer, no check command, no Meter charge.
+			// Recorded exactly as a gate verdict always is, on subject head,
+			// so queue.priorVerdicts threads it to the next builder's Prior
+			// the same way any other refusal would.
+			v := forge.Verdict{Gate: "commit-message", Decision: forge.DecisionFail, Reason: why}
+			body, _ := json.Marshal(gateVerdictRecord{Verdict: v})
+			rec := l.recordEvidence(ctx, item, "gate", string(head), string(body))
+			if rec.ID != "" {
+				v.Evidence = append(v.Evidence, forge.EvidenceRef{Kind: forge.EvidenceKindRecord, URI: rec.ID})
 			}
-			if forge.Resolve(verdicts) == forge.DecisionFail {
-				return fmt.Errorf("gates failed") // marks the stage span failed; the reasons go to evidence and the park note
+			verdicts = []forge.Verdict{v}
+		} else {
+			// Gates already satisfied on THIS head are carried, not re-run. An item
+			// waiting on a person is re-drained every tick for as long as the review
+			// takes, and re-running the whole suite each time is how a worker that is
+			// doing nothing keeps a machine busy: the deterministic shells — the
+			// build, the test run — cannot change their mind about a commit that has
+			// not moved. The gate whose answer CAN change is the human one, and it is
+			// a store read. Any change of head clears the carry, because replayed or
+			// rebuilt content is a different question — UNLESS the rebase branch
+			// above found that question already answered: the sha changed but the
+			// diff a diff-judging gate reads did not (issue #95).
+			gates := l.gatesFor(item, ws)
+			carried := item.PassedGates
+			switch {
+			case string(head) == item.Built:
+				// Unchanged: every gate that already passed on this exact content
+				// still applies.
+			case rebaseCarriesDiff:
+				// Same patch, new base: only the gates that judge the diff rather
+				// than the base ride forward, and each one that does gets its own
+				// carry record naming the verdict it rests on — see
+				// [Loop.carryDiffGates]. A human approval never satisfies
+				// [forge.DiffJudge] and so is never among them: it binds to the
+				// exact commit a person looked at (docs/PLAN.md §6), not to a
+				// patch shape.
+				carried = l.carryDiffGates(ctx, item, gates, item.PassedGates, forge.Commit(item.Built), head, rebasePatchID)
+			default:
+				carried = nil
 			}
-			return nil
-		})
+			gerr = telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
+				for _, g := range gates {
+					if slices.Contains(carried, g.Name()) {
+						// No new evidence beyond what was already written above
+						// (the same-head case needs none; the rebase-carry case
+						// wrote its own "gate-carried" record): the gate ran once
+						// on this content and its verdict is already on the
+						// chain. Recording it again would be minting a judgement
+						// nobody made.
+						reason := "passed on " + short(head) + ", carried while the head stands"
+						if rebaseCarriesDiff && string(head) != item.Built {
+							reason = fmt.Sprintf("carried across a rebase: patch-id %s of the reviewed commit %s equals the patch-id of %s",
+								rebasePatchID, short(forge.Commit(item.Built)), short(head))
+						}
+						verdicts = append(verdicts, forge.Verdict{
+							Gate: g.Name(), Decision: forge.DecisionPass, Reason: reason,
+						})
+						passedNow = append(passedNow, g.Name())
+						continue
+					}
+					v, tries, err := l.evaluateGate(ctx, item, g, cs)
+					if err != nil {
+						if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrUnpriced) {
+							// The meter's own refusal, not infrastructure trouble a
+							// retry could clear: no gate today can hit this (the
+							// meter refuses at pump.Acquire, before Run), so it can
+							// only reach here by construction (a fake gate in
+							// tests). Retrying or parking would both be the loop
+							// second-guessing a rule that is not its to relax.
+							gateWait = fmt.Errorf("gate %s: %w", g.Name(), err)
+							return gateWait
+						}
+						// Infrastructure trouble is never recorded as a rejected
+						// change, even after every retry this bound allowed.
+						gateInfra = fmt.Errorf("gate %s could not conclude after %d tries: %v", g.Name(), tries, err)
+						return gateInfra
+					}
+					vr := gateVerdictRecord{Verdict: v}
+					if tries > 1 {
+						vr.Try = tries
+					}
+					body, _ := json.Marshal(vr)
+					rec := l.recordEvidence(ctx, item, "gate", string(head), string(body))
+					if rec.ID != "" {
+						// The chain's own id, threaded onto the verdict it
+						// belongs to, so a Lander that publishes verdicts
+						// outside this process (git.PRLander's GitHub check)
+						// gives its reader a way back to the chain instead of
+						// just an assertion.
+						v.Evidence = append(v.Evidence, forge.EvidenceRef{Kind: forge.EvidenceKindRecord, URI: rec.ID})
+					}
+					if v.Decision == forge.DecisionPass {
+						passedNow = append(passedNow, g.Name())
+					}
+					verdicts = append(verdicts, v)
+					if v.Decision == forge.DecisionFail {
+						// forge.Resolve's own rule, applied before the loop pays
+						// for the gates after this one: a failure outranks a
+						// pending verdict, so asking a reviewer to read a diff
+						// that already failed its tests judges nothing Resolve
+						// will not already discard.
+						break
+					}
+				}
+				if forge.Resolve(verdicts) == forge.DecisionFail {
+					return fmt.Errorf("gates failed") // marks the stage span failed; the reasons go to evidence and the park note
+				}
+				return nil
+			})
+		}
 		if gateWait != nil {
 			// The unit waits exactly as a refused start at pump.Acquire waits:
 			// the window will turn, and nothing about this commit was judged.
@@ -1053,6 +1087,43 @@ func short(c forge.Commit) string {
 		return string(c[:12])
 	}
 	return string(c)
+}
+
+// placeholderCommitReason names why msg is the ACP adapter's fallback
+// commit shape, or returns "" when it is a real one. The three rules match
+// exactly what acp.Builder mints when a builder's turn ends without
+// committing (doneTrailer and commitMessage): the trailer itself, an empty
+// subject, or a subject that is nothing but the task's own first line.
+func placeholderCommitReason(msg, task string) string {
+	if strings.Contains(msg, agent.AdapterTrailer) {
+		return fmt.Sprintf("commit message carries %q, the adapter's fallback trailer: the agent's turn ended without a commit of its own", agent.AdapterTrailer)
+	}
+	subject := strings.TrimSpace(firstLine(msg))
+	if subject == "" {
+		return "commit subject is empty"
+	}
+	if subject == strings.TrimSpace(taskSubject(task)) {
+		return "commit subject is exactly the task's first line, unchanged from what the adapter mints when nobody wrote one"
+	}
+	return ""
+}
+
+// taskSubject is the subject line acp.Builder's commitMessage mints from a
+// task when no agent wrote its own: the first line, truncated to 72
+// characters.
+func taskSubject(task string) string {
+	line := firstLine(task)
+	if len(line) > 72 {
+		line = line[:72]
+	}
+	return line
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i]
+	}
+	return s
 }
 
 // drivingIssue reads the GitHub issue number off an issue-route ingress's

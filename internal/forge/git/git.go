@@ -476,6 +476,16 @@ func Dirty(ctx context.Context, dir string) (bool, error) {
 	return strings.TrimSpace(out) != "", err
 }
 
+// CommitMessage returns rev's full commit message (subject and body,
+// trailers included) — what the loop reads before its gates run to refuse a
+// commit that still carries the ACP adapter's placeholder shape (#130). An
+// unknown rev is an error, never an empty message: unknown never reads as
+// zero.
+func CommitMessage(ctx context.Context, dir, rev string) (string, error) {
+	out, err := run(ctx, dir, "show", "-s", "--format=%B", rev)
+	return out, err
+}
+
 // ErrRebaseConflict reports that the workspace's commits do not replay onto
 // the new base without a judgement call. The rebase is aborted and the tree
 // left where it was: a conflict resolution nobody reviewed is not something

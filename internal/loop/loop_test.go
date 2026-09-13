@@ -42,11 +42,20 @@ func (scriptedBuilder) Build(_ context.Context, ws forge.Workspace, task string)
 	if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
 		return "", err
 	}
-	if _, err := sh(ws.Dir, "git", "commit", "-m", task); err != nil {
+	if _, err := sh(ws.Dir, "git", "commit", "-m", scriptedCommitSubject(task)); err != nil {
 		return "", err
 	}
 	out, err := sh(ws.Dir, "git", "rev-parse", "HEAD")
 	return forge.Commit(strings.TrimSpace(out)), err
+}
+
+// scriptedCommitSubject stands in for an agent's own commit message: a
+// subject that is not merely the task's first line, the shape #130's
+// commit-message gate refuses as the ACP adapter's placeholder. The
+// dedicated placeholder-refusal tests build that shape themselves, on
+// purpose, rather than through this helper.
+func scriptedCommitSubject(task string) string {
+	return "build: " + task
 }
 
 type env struct {
@@ -1191,7 +1200,7 @@ func (b lineEditBuilder) Build(_ context.Context, ws forge.Workspace, task strin
 	if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
 		return "", err
 	}
-	if _, err := sh(ws.Dir, "git", "commit", "-m", task); err != nil {
+	if _, err := sh(ws.Dir, "git", "commit", "-m", scriptedCommitSubject(task)); err != nil {
 		return "", err
 	}
 	out, err := sh(ws.Dir, "git", "rev-parse", "HEAD")

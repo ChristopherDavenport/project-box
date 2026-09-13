@@ -332,3 +332,13 @@ type Resolver interface {
 	// anything, the way a manifest is rendered before it is applied.
 	Explain(ctx context.Context, b Bundle) ([]byte, error)
 }
+
+// AdapterTrailer is the marker the ACP runtime's adapter leaves on a commit
+// it made on a session's behalf, because the session's turn ended without
+// one of its own (internal/agent/acp's doneTrailer aliases this, so the text
+// exists exactly once). It names no judgement about the change — only that
+// nobody wrote the message — which is exactly why a change that still
+// carries it at the gate stage is refused there for free rather than paid
+// for by a gate (#130): a builder that never committed produced a known
+// zero, not a change offered for judgement.
+const AdapterTrailer = "(committed by the adapter: the agent made the change and left the ceremony)"

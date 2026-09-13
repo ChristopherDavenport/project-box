@@ -649,6 +649,38 @@ func TestPatchIDIsStableAcrossARebaseAndDiffersForADifferentPatch(t *testing.T) 
 	}
 }
 
+func TestCommitMessageReturnsTheFullMessage(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "add the widget\n\na trailer line here")
+	head := strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD"))
+
+	got, err := CommitMessage(ctx, dir, head)
+	if err != nil {
+		t.Fatalf("commit message: %v", err)
+	}
+	if !strings.Contains(got, "add the widget") || !strings.Contains(got, "a trailer line here") {
+		t.Fatalf("commit message = %q, want subject and trailer both present", got)
+	}
+}
+
+func TestCommitMessageOfAnUnknownRevErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+
+	unknown := strings.Repeat("a", 40)
+	if _, err := CommitMessage(ctx, dir, unknown); err == nil {
+		t.Fatal("commit message of an unknown rev: want error, got nil")
+	}
+}
+
 func agentContext(commit forge.Commit, path string) (set agentpkg.ContextSet) {
 	cr := agentpkg.ContextRepo{Repo: "app", Commit: string(commit)}
 	if path != "" {

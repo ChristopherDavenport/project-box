@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"testing"
+
+	"github.com/ChristopherDavenport/project-box/internal/agent"
 )
 
 // TestADirtyTurnIsNudgedIntoItsOwnCommit is issue #130's agent half: a
@@ -68,6 +70,12 @@ func TestANudgeThatAnswersWithoutCommittingStillFallsBack(t *testing.T) {
 	msg := mustSh(t, ws.Dir, "git", "log", "-1", "--format=%B")
 	if !strings.Contains(msg, doneTrailer) {
 		t.Fatalf("the placeholder commit did not land after the nudge answered without committing: %q", msg)
+	}
+	if !strings.Contains(msg, agent.AdapterTrailer) {
+		// doneTrailer and agent.AdapterTrailer must never drift apart — the
+		// loop refuses on the exported constant (#130), and this asserts the
+		// commit the adapter actually mints still carries it.
+		t.Fatalf("the placeholder commit does not carry agent.AdapterTrailer, the text the loop refuses on: %q", msg)
 	}
 	content := mustSh(t, ws.Dir, "cat", "widget.go")
 	if !strings.Contains(content, "built but never committed") {

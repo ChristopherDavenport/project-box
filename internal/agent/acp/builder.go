@@ -736,8 +736,14 @@ func tally(names []string) map[string]int {
 // The two trailers the adapter commits under. They differ because the commits
 // differ: one is a change offered for judgement, the other is a session's
 // working state kept so its successor does not buy it again.
+//
+// doneTrailer aliases [agent.AdapterTrailer] rather than restating it: the
+// loop refuses a commit that carries this text before its gates run (#130),
+// and loop cannot import acp (acp imports loop), so the text has to live
+// where both sides can reach it. Aliasing rather than duplicating means the
+// two can never drift apart.
 const (
-	doneTrailer = "(committed by the adapter: the agent made the change and left the ceremony)"
+	doneTrailer = agent.AdapterTrailer
 	wipTrailer  = "(work in progress, committed by the adapter: the session handed off before finishing)"
 )
 
