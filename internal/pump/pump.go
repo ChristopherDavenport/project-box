@@ -306,6 +306,23 @@ func sectionsIntersect(a, b []string) bool {
 // A candidate not [drainCandidate.ok] or not [drainCandidate.polled] is
 // skipped entirely — held on a person or unrouted, it is not contending for
 // a section this tick either way.
+//
+// Issue #166: the same shape applies to the land window. A group's land
+// window is one branch (Branch is repo-level config, so the (box, repo)
+// group is already the right granularity), and a candidate parked there with
+// a passed, kept candidate — Built set, not Unfinished, at least one passed
+// gate — that has gone back to Wait at or past StarveAfter turns in a row is
+// that group's land head. Unlike a section head, a land head's yield is not
+// scoped by section: every other candidate in the group is told to step
+// aside regardless of what it touches, because they all feed the same
+// branch the head is trying to land on, and a candidate that lands there
+// first is exactly the race this closes. A land head wins its group
+// outright — no section head is chosen for a group that already has one —
+// because a unit already reviewed and merely waiting on the branch is closer
+// to done than one still contending for a section to even start building,
+// and the rebase bound this answers only means what it says if the unit
+// already in line is not the one made to yield to newer work. The holder
+// exemption and the ordering below apply identically to both kinds of head.
 func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 	bound := p.StarveAfter
 	if bound <= 0 {
@@ -328,6 +345,31 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 	heads := map[int]bool{}
 	for _, k := range groupOrder {
 		idxs := groups[k] // submission order — oldest first, which is the tiebreak
+
+		landHead := -1
+		for _, i := range idxs {
+			it := cands[i].item
+			if it.Built == "" || it.Unfinished || len(it.PassedGates) == 0 {
+				continue
+			}
+			if it.LandWaits < bound {
+				continue
+			}
+			if landHead == -1 || it.LandWaits > cands[landHead].item.LandWaits {
+				landHead = i
+			}
+		}
+		if landHead != -1 {
+			heads[landHead] = true
+			for _, i := range idxs {
+				if i == landHead || cands[i].holder {
+					continue
+				}
+				cands[i].item.YieldTo = cands[landHead].item.ID
+			}
+			continue // a land head wins its group outright; no section head this tick
+		}
+
 		head := -1
 		for _, i := range idxs {
 			if cands[i].item.SectionWaits < bound {

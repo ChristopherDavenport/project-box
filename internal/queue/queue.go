@@ -315,6 +315,17 @@ type WorkItem struct {
 	// fairness rule reads to name an oldest waiter. Reset to zero the moment
 	// the sections this unit needs are actually acquired.
 	SectionWaits int `json:"section_waits,omitempty"`
+	// LandWaits counts how many claims in a row reached the gated land
+	// window with a passed candidate and went back to Wait because the
+	// branch was busy or had moved — the land-window analogue of
+	// SectionWaits, and the starvation signal the pump's fairness rule reads
+	// to name an oldest waiter there instead. Deliberately disjoint from
+	// SectionWaits: a land-window wait never touches that counter, and a
+	// section wait never touches this one — they name two different queues
+	// a unit can be stuck behind. Reset wherever a candidate drops out of
+	// line ([WorkItem.dropResume], which also covers a successful landing
+	// via [Queue.Done]).
+	LandWaits int `json:"land_waits,omitempty"`
 	// YieldTo is the ID of a starved unit this claim should step aside for on
 	// this tick, set by the pump on the candidate copy it hands to
 	// [loop.Loop.Run]. It is a dispatch hint, not a fact about the item — the
@@ -612,6 +623,7 @@ func (q *Queue) park(ctx context.Context, w WorkItem, lease forge.Lease, sev Sev
 func (w *WorkItem) dropResume() {
 	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = "", "", nil, false
 	w.RebaseCount = 0
+	w.LandWaits = 0
 }
 
 // KeepCandidate records a finished change to come back to instead of buying

@@ -680,3 +680,116 @@ func TestAHolderIsNeverYieldedToItsOwnWaiter(t *testing.T) {
 		t.Fatalf("the head should claim the section once the holder frees it, got %s: %s", head.State, head.Note)
 	}
 }
+
+// TestLandWindowHeadIsFrontedAndContendersYield is issue #166's land-window
+// analogue of TestAWholeRepositoryUnitStopsStarving: a candidate already
+// reviewed and merely waiting on the branch (a kept, passed candidate whose
+// LandWaits has reached the bound) is the group's land head. Unlike a
+// section head, the yield is not scoped by section — every other candidate
+// in the (box, repo) group feeds the same branch, so all of them are told to
+// step aside, sections or not.
+func TestLandWindowHeadIsFrontedAndContendersYield(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	head := w.submitItem(t, "head-1", "fix module head", func(wi *queue.WorkItem) {
+		wi.Built, wi.BuiltBase = "deadbeef", "cafebabe"
+		wi.PassedGates = []string{"post-land"}
+		wi.LandWaits = 3
+	})
+	contender := w.submitItem(t, "contender-1", "fix module contender", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"web"} // disjoint from the head's (whole-repo) sections, and still told to yield
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	head, err := w.q.Load(ctx, tn, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contender, err = w.q.Load(ctx, tn, contender.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.State != queue.StateDone {
+		t.Fatalf("the land head should land once fronted, got %s: %s", head.State, head.Note)
+	}
+	if head.LandWaits != 0 {
+		t.Fatalf("a landed head should reset LandWaits, got %d", head.LandWaits)
+	}
+	if contender.State != queue.StateWaiting {
+		t.Fatalf("the contender should yield to the land head, got %s: %s", contender.State, contender.Note)
+	}
+	for _, want := range []string{"reserved for " + head.ID, "next in line"} {
+		if !strings.Contains(contender.Note, want) {
+			t.Errorf("the contender's wait does not say %q: %s", want, contender.Note)
+		}
+	}
+}
+
+// TestAHolderIsNeverYieldedToTheLandHead is #143's holder exemption applied
+// to the land-window head instead of a section head: a candidate already
+// holding a section it needs (mid-flight on a rebase, re-gate or push) is
+// the only thing that can free that section, so it is never told to yield —
+// not even to a starved land head — and dispatches ahead of it.
+func TestAHolderIsNeverYieldedToTheLandHead(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 1})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	holder := w.submitItem(t, "holder-1", "fix module holder", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+	})
+	claimed, lease, err := w.q.Claim(ctx, holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed.KeepCandidate("deadbeef", "cafebabe", nil)
+	holder, err = w.q.Wait(ctx, claimed, lease, "mid-flight, needs re-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdSection(t, w, "api", holder.ID)
+
+	head := w.submitItem(t, "head-1", "fix module head", func(wi *queue.WorkItem) {
+		wi.Built, wi.BuiltBase = "deadbeef", "cafebabe"
+		wi.PassedGates = []string{"post-land"}
+		wi.LandWaits = 3
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	holder, err = w.q.Load(ctx, tn, holder.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err = w.q.Load(ctx, tn, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(holder.Note, "reserved for") {
+		t.Fatalf("the holder was told to yield to the land head: %s", holder.Note)
+	}
+	if holder.State != queue.StateDone {
+		t.Fatalf("the holder should claim the one seat and finish, got %s: %s", holder.State, holder.Note)
+	}
+	if head.State != queue.StatePending {
+		t.Fatalf("the land head should not even have been tried this tick (one-seat budget went to the holder), got %s: %s", head.State, head.Note)
+	}
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	head, err = w.q.Load(ctx, tn, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.State != queue.StateDone {
+		t.Fatalf("the land head should claim the seat once the holder frees it, got %s: %s", head.State, head.Note)
+	}
+}

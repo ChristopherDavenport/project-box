@@ -1125,9 +1125,16 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		// The gates passed on this head; if the branch was merely busy, next
 		// tick lands without re-running them. If it moved, the replay changes
 		// the head and the carry drops itself.
+		//
+		// LandWaits counts this exactly as SectionWaits counts a held
+		// section, and deliberately not into SectionWaits itself — this is
+		// the pump's starvation signal for the land window, a different
+		// queue than the one SectionWaits names. See [pump.Pump.fairSectionOrder].
+		item.LandWaits++
 		item.KeepCandidate(head, base, passedNow)
 		return q.Wait(ctx, item, claim, notOurTurn)
 	}
+	item.LandWaits = 0
 	defer l.release(ctx, landLease, item.ID)
 	cs.Members[0].Lease = landLease
 	var landing forge.Landing
