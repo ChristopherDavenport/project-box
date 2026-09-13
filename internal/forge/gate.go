@@ -22,6 +22,23 @@ type Gate interface {
 	Evaluate(ctx context.Context, cs ChangeSet) (Verdict, error)
 }
 
+// DiffJudge is an optional [Gate] capability: a gate that judges the content
+// of the change rather than the state of the base it was built on. A gate
+// that satisfies this and passed a commit is still satisfied by any other
+// commit carrying the identical patch, which is what lets a rebase stage
+// carry that gate's verdict forward instead of re-running it.
+//
+// Declared here rather than as a required Gate method so that most gates —
+// a check that runs against the base's tree, a human approval that binds to
+// the exact commit a person looked at — simply do not implement it, and the
+// loop finds that out with a type assertion rather than importing every
+// gate's package to ask.
+type DiffJudge interface {
+	// JudgesDiff reports true for a gate whose verdict depends only on the
+	// diff's content, not on the base commit it was evaluated against.
+	JudgesDiff() bool
+}
+
 // Decision is a gate's answer. Three states, not two: a human gate cannot
 // decide synchronously, and collapsing "not yet" into "no" would fail changes
 // that are merely waiting.

@@ -476,6 +476,61 @@ func TestMaterializeContextIsPinnedNarrowAndReadOnly(t *testing.T) {
 	}
 }
 
+func TestPatchIDIsStableAcrossARebaseAndDiffersForADifferentPatch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	oldBase := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nchanged\n"), 0o644)
+	mustGit(t, dir, "commit", "-am", "the patch")
+	oldHead := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	id1, err := PatchID(ctx, dir, oldBase, oldHead)
+	if err != nil {
+		t.Fatalf("patch-id: %v", err)
+	}
+	if id1 == "" {
+		t.Fatal("expected a non-empty patch-id for a real diff")
+	}
+
+	// Move the base far from the patch, then replay the kept commit onto it.
+	mustGit(t, dir, "checkout", string(oldBase))
+	os.WriteFile(filepath.Join(dir, "unrelated.txt"), []byte("elsewhere\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "moved base")
+	newBase := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	mustGit(t, dir, "checkout", "-b", "kept", string(oldHead))
+	mustGit(t, dir, "rebase", "--onto", string(newBase), string(oldBase), "kept")
+	newHead := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	id2, err := PatchID(ctx, dir, newBase, newHead)
+	if err != nil {
+		t.Fatalf("patch-id after rebase: %v", err)
+	}
+	if id2 != id1 {
+		t.Fatalf("same patch replayed onto a moved base got a different id: %s vs %s", id1, id2)
+	}
+
+	// A genuinely different patch onto the same new base gets a different id.
+	mustGit(t, dir, "checkout", "-b", "different", string(newBase))
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nsomething else entirely\n"), 0o644)
+	mustGit(t, dir, "commit", "-am", "a different patch")
+	differentHead := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	id3, err := PatchID(ctx, dir, newBase, differentHead)
+	if err != nil {
+		t.Fatalf("patch-id for different patch: %v", err)
+	}
+	if id3 == id1 {
+		t.Fatal("a different patch produced the same patch-id")
+	}
+}
+
 func agentContext(commit forge.Commit, path string) (set agentpkg.ContextSet) {
 	cr := agentpkg.ContextRepo{Repo: "app", Commit: string(commit)}
 	if path != "" {

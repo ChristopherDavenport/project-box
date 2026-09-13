@@ -496,3 +496,42 @@ func CommitAll(ctx context.Context, dir, message string) error {
 	_, err := run(ctx, dir, "commit", "-m", message)
 	return err
 }
+
+// PatchID fingerprints the content of the diff between base and head — not
+// the commits that produced it. Replaying the identical patch onto a moved
+// base yields the same id, which is what lets a rebase stage recognize a
+// gate's verdict as still applying instead of re-running it.
+//
+// git patch-id emits nothing for an empty diff, and this returns "" in that
+// case. Per this repo's rule that unknown never reads as zero, callers must
+// treat an empty (or otherwise unproduced) patch-id as never equal to
+// another, including another empty one — two diffs that both failed to
+// yield an id are not thereby the same diff.
+func PatchID(ctx context.Context, dir string, base, head forge.Commit) (string, error) {
+	env := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+
+	diff := exec.CommandContext(ctx, "git", "diff", fmt.Sprintf("%s..%s", base, head))
+	diff.Dir = dir
+	diff.Env = env
+	var diffOut, diffErr bytes.Buffer
+	diff.Stdout, diff.Stderr = &diffOut, &diffErr
+	if err := diff.Run(); err != nil {
+		return "", fmt.Errorf("git diff %s..%s: %w: %s", base, head, err, strings.TrimSpace(diffErr.String()))
+	}
+
+	id := exec.CommandContext(ctx, "git", "patch-id", "--stable")
+	id.Dir = dir
+	id.Env = env
+	id.Stdin = &diffOut
+	var idOut, idErr bytes.Buffer
+	id.Stdout, id.Stderr = &idOut, &idErr
+	if err := id.Run(); err != nil {
+		return "", fmt.Errorf("git patch-id: %w: %s", err, strings.TrimSpace(idErr.String()))
+	}
+
+	fields := strings.Fields(idOut.String())
+	if len(fields) == 0 {
+		return "", nil
+	}
+	return fields[0], nil
+}

@@ -1151,6 +1151,449 @@ func TestMovedHeadRetiresTheCarriedVerdicts(t *testing.T) {
 	}
 }
 
+// diffJudgingGate is countingGate's shape plus [forge.DiffJudge]: a stand-in
+// for acp.Reviewer that a fake gate list can use without an ACP runtime, so a
+// rebase's carry logic has something to carry (issue #95).
+type diffJudgingGate struct {
+	name string
+	n    *int
+}
+
+func (g diffJudgingGate) Name() string { return g.name }
+
+func (g diffJudgingGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	*g.n++
+	return forge.Verdict{Gate: g.name, Decision: forge.DecisionPass, Reason: "read the diff, ok"}, nil
+}
+
+func (diffJudgingGate) JudgesDiff() bool { return true }
+
+// lineEditBuilder edits one line of an existing multi-line file, so its diff
+// carries real context lines that a nearby, non-conflicting edit to the base
+// can perturb — unlike scriptedBuilder's brand-new file, which has none.
+type lineEditBuilder struct {
+	file string
+	line int
+	text string
+}
+
+func (b lineEditBuilder) Build(_ context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	path := filepath.Join(ws.Dir, b.file)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	lines[b.line-1] = b.text
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "commit", "-m", task); err != nil {
+		return "", err
+	}
+	out, err := sh(ws.Dir, "git", "rev-parse", "HEAD")
+	return forge.Commit(strings.TrimSpace(out)), err
+}
+
+// interlopeEditLine pushes an edit to one line of an existing file from
+// outside the factory — interlope's counterpart for perturbing a file the
+// kept commit also touches, rather than adding an unrelated one.
+func interlopeEditLine(t *testing.T, remote, file string, line int, text string) {
+	t.Helper()
+	other := filepath.Join(t.TempDir(), "editor")
+	mustSh(t, "", "git", "clone", remote, other)
+	path := filepath.Join(other, file)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	lines[line-1] = text
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSh(t, other, "git", "add", ".")
+	mustSh(t, other, "git", "commit", "-m", "edited elsewhere")
+	mustSh(t, other, "git", "push", "origin", "HEAD:refs/heads/main")
+}
+
+// gateCarriedBodies reads every "gate-carried" record off id's chain.
+func gateCarriedBodies(t *testing.T, e *env, id string) []struct {
+	Gate     string `json:"gate"`
+	Reviewed string `json:"reviewed"`
+	Original string `json:"original"`
+	PatchID  string `json:"patch_id"`
+} {
+	t.Helper()
+	type body struct {
+		Gate     string `json:"gate"`
+		Reviewed string `json:"reviewed"`
+		Original string `json:"original"`
+		PatchID  string `json:"patch_id"`
+	}
+	var out []struct {
+		Gate     string `json:"gate"`
+		Reviewed string `json:"reviewed"`
+		Original string `json:"original"`
+		PatchID  string `json:"patch_id"`
+	}
+	for r, err := range e.store.Log().Since(context.Background(), tn, "workitem/"+id, 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind != "gate-carried" {
+			continue
+		}
+		var b body
+		if jerr := json.Unmarshal(r.Body, &b); jerr != nil {
+			t.Fatalf("gate-carried record %s: %v", r.ID, jerr)
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
+// countGateRecords counts "gate" records on id's chain naming gate, the
+// count a test reads as "how many times was this gate actually judged" —
+// distinct from a gate's own call counter, which a carried gate never
+// increments but which still must not appear a second time on the chain.
+func countGateRecords(t *testing.T, e *env, id, gate string) int {
+	t.Helper()
+	n := 0
+	for r, err := range e.store.Log().Since(context.Background(), tn, "workitem/"+id, 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind != "gate" {
+			continue
+		}
+		var body struct{ Gate, Decision string }
+		if jerr := json.Unmarshal(r.Body, &body); jerr != nil {
+			t.Fatalf("gate record %s: %v", r.ID, jerr)
+		}
+		if body.Gate == gate {
+			n++
+		}
+	}
+	return n
+}
+
+// TestRebaseCarriesTheDiffJudgingGateNotTheCheck is issue #95's headline
+// case: a rebase that replays the identical patch onto a moved base carries
+// a diff-judging gate's verdict forward, and re-runs only the gate that
+// judges the base — with exactly one judgement and one carry on the chain,
+// never two judgements of the same content.
+func TestRebaseCarriesTheDiffJudgingGateNotTheCheck(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	var reviewN, checkN int
+	e.loop.Builder = &countingBuilder{}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{
+			diffJudgingGate{name: "review", n: &reviewN},
+			countingGate{name: "check", n: &checkN},
+			holdingGate{approved: &approved},
+		}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-95a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-carry-a", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting, got %s (%s)", item.State, item.Note)
+	}
+	if reviewN != 1 || checkN != 1 {
+		t.Fatalf("first pass should run both gates once: review=%d check=%d", reviewN, checkN)
+	}
+	firstHead := item.Built
+
+	// Far from the patch (a brand-new, unrelated file): the rebase is clean
+	// and the patch-id is unchanged.
+	interlope(t, e.remote, "elsewhere.txt", "moved, far from the patch\n")
+	approved = true
+
+	loaded, _ := q.Load(ctx, tn, "wi-carry-a")
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+	if item.Head == firstHead {
+		t.Fatal("the landed commit should be the replayed one, not the original")
+	}
+	if reviewN != 1 {
+		t.Fatalf("the reviewer must not be re-asked about a patch it already judged: ran %d times", reviewN)
+	}
+	if checkN != 2 {
+		t.Fatalf("the check gate judges the base and must run again: ran %d times", checkN)
+	}
+
+	if n := countGateRecords(t, e, "wi-carry-a", "review"); n != 1 {
+		t.Fatalf("expected exactly one review judgement on the chain, found %d", n)
+	}
+	carries := gateCarriedBodies(t, e, "wi-carry-a")
+	if len(carries) != 1 {
+		t.Fatalf("expected exactly one carry record, found %d", len(carries))
+	}
+	if carries[0].Gate != "review" || carries[0].Reviewed != firstHead || carries[0].Original == "" || carries[0].PatchID == "" {
+		t.Fatalf("carry record is missing what it should name: %+v", carries[0])
+	}
+}
+
+// TestRebaseWithADifferentPatchReevaluatesAndWritesNoCarry is the other side
+// of issue #95: a rebase can be clean and still change what a diff-judging
+// gate would read, when the base moves close enough to the kept commit's
+// change to alter the diff's context lines. The reviewer's patch-id then
+// differs and it is judged again, with no carry record written.
+func TestRebaseWithADifferentPatchReevaluatesAndWritesNoCarry(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	var reviewN, checkN int
+	e.loop.Builder = lineEditBuilder{file: "notes.txt", line: 6, text: "SIX-CHANGED"}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{
+			diffJudgingGate{name: "review", n: &reviewN},
+			countingGate{name: "check", n: &checkN},
+			holdingGate{approved: &approved},
+		}
+	}
+
+	notes := "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight\nnine\nten\neleven\n"
+	interlope(t, e.remote, "notes.txt", notes)
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-95b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-carry-b", "change line six"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting, got %s (%s)", item.State, item.Note)
+	}
+	if reviewN != 1 {
+		t.Fatalf("first pass should run the reviewer once, ran %d", reviewN)
+	}
+
+	// Close enough to the changed line to fall inside the diff's context
+	// window (default 3 lines either side), far enough not to conflict.
+	interlopeEditLine(t, e.remote, "notes.txt", 9, "NINE-MOVED")
+	approved = true
+
+	loaded, _ := q.Load(ctx, tn, "wi-carry-b")
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+	if reviewN != 2 {
+		t.Fatalf("a genuinely different patch must be judged again: reviewer ran %d times", reviewN)
+	}
+	if carries := gateCarriedBodies(t, e, "wi-carry-b"); len(carries) != 0 {
+		t.Fatalf("no carry record should be written for a changed patch: %+v", carries)
+	}
+}
+
+// TestApprovalIsNeverCarriedAcrossARebase upholds docs/PLAN.md §6's "approvals
+// bind to a commit, not a pull request": even when a rebase's patch-ids come
+// out equal, a human-approval gate never satisfies [forge.DiffJudge], so it
+// is asked again about the new sha rather than riding the old approval
+// forward onto a commit nobody looked at.
+func TestApprovalIsNeverCarriedAcrossARebase(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	var reviewN int
+	e.loop.Builder = &countingBuilder{}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{diffJudgingGate{name: "review", n: &reviewN}}
+	}
+	e.loop.Approval = func(item queue.WorkItem) forge.Gate {
+		return holdingGate{approved: &approved}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-95c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-carry-c", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting on the approval, got %s (%s)", item.State, item.Note)
+	}
+	if reviewN != 1 {
+		t.Fatalf("expected the reviewer to run once, ran %d", reviewN)
+	}
+
+	interlope(t, e.remote, "elsewhere.txt", "moved, far from the patch\n")
+	approved = true
+
+	loaded, _ := q.Load(ctx, tn, "wi-carry-c")
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+	if reviewN != 1 {
+		t.Fatalf("the reviewer's identical-patch verdict should have been carried: ran %d times", reviewN)
+	}
+	// The approval must have been asked again on the replayed head: one
+	// "holding" gate record per head it was asked about.
+	if n := countGateRecords(t, e, "wi-carry-c", "holding"); n != 2 {
+		t.Fatalf("expected the approval to be asked on both heads (2 records), found %d", n)
+	}
+	if carries := gateCarriedBodies(t, e, "wi-carry-c"); len(carries) != 1 || carries[0].Gate != "review" {
+		t.Fatalf("expected exactly one carry record, for review only: %+v", carries)
+	}
+}
+
+// TestRebaseCounterOverItsBoundParksInsteadOfChasingTheBranch is issue #95's
+// bound: a rebase happens at most once per claim, so a branch that never
+// stops moving would otherwise buy an unbounded run of free
+// rebase-and-regate cycles across as many claims as it takes. Past the
+// attempt budget the loop parks instead, keeping the commit, and a person
+// decides.
+func TestRebaseCounterOverItsBoundParksInsteadOfChasingTheBranch(t *testing.T) {
+	e := setup(t, []string{"true"}) // Attempts: 1, so the bound is one rebase
+	ctx := context.Background()
+	approved := false // never answers: every tick stays pending
+	e.loop.Builder = &countingBuilder{}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{holdingGate{approved: &approved}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-95d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-carry-d", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting, got %s (%s)", item.State, item.Note)
+	}
+
+	interlope(t, e.remote, "far1.txt", "moved once\n")
+	loaded, _ := q.Load(ctx, tn, "wi-carry-d")
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected still waiting after the first rebase, got %s (%s)", item.State, item.Note)
+	}
+	loaded, _ = q.Load(ctx, tn, "wi-carry-d")
+	if loaded.RebaseCount != 1 {
+		t.Fatalf("expected one rebase counted, got %d", loaded.RebaseCount)
+	}
+	keptCommit := loaded.Built
+
+	interlope(t, e.remote, "far2.txt", "moved twice\n")
+	loaded, _ = q.Load(ctx, tn, "wi-carry-d")
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("expected the second rebase to park at the bound, got %s (%s)", item.State, item.Note)
+	}
+	if !strings.Contains(item.Note, "1") {
+		t.Fatalf("the note should name the rebase count: %q", item.Note)
+	}
+	if item.Built != keptCommit {
+		t.Fatalf("parking at the bound should keep the last rebased commit as the resume point: got %q, want %q", item.Built, keptCommit)
+	}
+}
+
+// TestRebaseCounterResetsOnAFreshBuild is the counter's other half: a rebase
+// that conflicts falls back to a fresh build, and that build's count starts
+// over rather than carrying a tally from a candidate that no longer exists.
+func TestRebaseCounterResetsOnAFreshBuild(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	// A budget of 2: this test needs a SECOND rebase to actually be
+	// attempted (and conflict), which the default budget of 1 would refuse
+	// outright at the bound before the conflict ever had a chance to occur.
+	e.loop.Attempts = 2
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{holdingGate{approved: &approved}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-95e"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-carry-e", "add a thing"))
+
+	if item, err = e.loop.Run(ctx, item); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting, got %s (%s)", item.State, item.Note)
+	}
+
+	interlope(t, e.remote, "elsewhere.txt", "moved\n")
+	loaded, _ := q.Load(ctx, tn, "wi-carry-e")
+	if _, err = e.loop.Run(ctx, loaded); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	loaded, _ = q.Load(ctx, tn, "wi-carry-e")
+	if loaded.RebaseCount != 1 {
+		t.Fatalf("expected one rebase counted, got %d", loaded.RebaseCount)
+	}
+
+	// The interloper writes the very file the builder writes, differently:
+	// the replay conflicts and falls back to a fresh build.
+	interlope(t, e.remote, "answer.txt", "someone else's answer\n")
+	loaded, _ = q.Load(ctx, tn, "wi-carry-e")
+	if _, err = e.loop.Run(ctx, loaded); err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if builder.n != 2 {
+		t.Fatalf("a conflicting replay must fall back to the agent: %d builds", builder.n)
+	}
+	loaded, _ = q.Load(ctx, tn, "wi-carry-e")
+	if loaded.RebaseCount != 0 {
+		t.Fatalf("a fresh build must reset the rebase count, got %d", loaded.RebaseCount)
+	}
+}
+
 // failNTimesGate refuses its first failFor evaluations, then passes every
 // one after — the gate itself changing its answer between retries, the way a
 // flaky check or a fix that landed on the SAME commit's next look would.

@@ -260,6 +260,99 @@ func (l *Loop) gatesFor(item queue.WorkItem, ws forge.Workspace) []forge.Gate {
 	return out
 }
 
+// diffJudge reports whether g's verdict depends only on the diff's content
+// rather than the base it was evaluated against — see [forge.DiffJudge] —
+// found out by a type assertion so the loop need not import any concrete
+// gate's package to ask.
+func diffJudge(g forge.Gate) bool {
+	dj, ok := g.(forge.DiffJudge)
+	return ok && dj.JudgesDiff()
+}
+
+// findGate returns the gate named name among gates, or nil.
+func findGate(gates []forge.Gate, name string) forge.Gate {
+	for _, g := range gates {
+		if g.Name() == name {
+			return g
+		}
+	}
+	return nil
+}
+
+// gateCarriedRecord is a "gate-carried" record's body: a rebase replayed a
+// patch equal to the one a gate already judged, so that gate's verdict rides
+// forward rather than judging the same content a second time. Reviewed is
+// the commit the ORIGINAL verdict named at Subject in the chain; Original is
+// that verdict record's own chain id, so an auditor lands on the one
+// judgement this carry rests on rather than being told merely that some
+// judgement exists somewhere.
+type gateCarriedRecord struct {
+	Gate     string `json:"gate"`
+	Reviewed string `json:"reviewed"`
+	Original string `json:"original"`
+	PatchID  string `json:"patch_id"`
+}
+
+// carryDiffGates is the rebase-carry half of the gate stage's carry logic
+// (issue #95): of the gate names in passed, it keeps only those that both
+// name a gate in gates satisfying [forge.DiffJudge] and have a findable
+// original verdict on the chain, and for each one it kept it writes a
+// "gate-carried" record at newHead naming that original verdict and the
+// patch-id the rebase found equal — never a fresh "gate" judgement, so an
+// auditor sees one judgement and one carry rather than two judgements.
+//
+// A name whose original verdict cannot be found is dropped rather than
+// carried on faith: this repo's rule that unknown never reads as zero
+// applies to provenance as much as to anything else it governs.
+func (l *Loop) carryDiffGates(ctx context.Context, item queue.WorkItem, gates []forge.Gate, passed []string, reviewed, newHead forge.Commit, patchID string) []string {
+	var out []string
+	for _, name := range passed {
+		g := findGate(gates, name)
+		if g == nil || !diffJudge(g) {
+			continue
+		}
+		original, ok := l.findGateVerdict(ctx, item, name, reviewed)
+		if !ok {
+			continue
+		}
+		body, _ := json.Marshal(gateCarriedRecord{
+			Gate: name, Reviewed: string(reviewed), Original: original, PatchID: patchID,
+		})
+		l.record(ctx, item, "gate-carried", string(newHead), string(body))
+		out = append(out, name)
+	}
+	return out
+}
+
+// findGateVerdict scans item's chain for the latest "gate" record on subject
+// reviewed whose body names gate with a pass — mirrors the read pattern in
+// [queue.priorVerdicts]: unmarshalling only the shared fields rather than
+// importing internal/forge for a shape that is already the record's own
+// default JSON encoding.
+func (l *Loop) findGateVerdict(ctx context.Context, item queue.WorkItem, gate string, reviewed forge.Commit) (string, bool) {
+	type verdictBody struct {
+		Gate     string
+		Decision string
+	}
+	found := ""
+	for r, err := range l.Store.Log().Since(ctx, item.Tenant, "workitem/"+item.ID, 0) {
+		if err != nil {
+			return "", false
+		}
+		if r.Kind != "gate" || r.Subject != string(reviewed) {
+			continue
+		}
+		var body verdictBody
+		if json.Unmarshal(r.Body, &body) != nil {
+			continue
+		}
+		if body.Gate == gate && body.Decision == string(forge.DecisionPass) {
+			found = r.ID // keep scanning: a later record on this subject wins
+		}
+	}
+	return found, found != ""
+}
+
 // Poll asks whether a held item's outstanding gate has answered yet, and
 // writes nothing whatsoever: no claim, no lease, no evidence. It reports
 // whether anything has changed, so the pump can leave a still-waiting item
@@ -404,6 +497,13 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	var ws forge.Workspace
 	var head forge.Commit
 	resumed := false
+	// Set only in the rebase branch below, on a clean replay whose patch-id
+	// against the moved base equals the one the kept commit had against its
+	// old base: the sha changed but the diff a diff-judging gate cares about
+	// did not, so that gate's verdict is carried forward in the gate stage
+	// instead of re-run (issue #95).
+	rebaseCarriesDiff := false
+	rebasePatchID := ""
 	if item.Built != "" {
 		adopted, ok, aerr := l.Mirror.Adopt(ctx, wsLease, forge.Commit(item.Built), base)
 		if aerr != nil {
@@ -427,12 +527,37 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			// makes concurrency on one branch not worth having. The gates run
 			// again below, on the replayed content, which is what makes
 			// reusing the commit safe rather than merely cheap.
+			//
+			// Bounded by the same budget as a build attempt (issue #95): a
+			// rebase happens at most once per claim (only here), so a branch
+			// that never stops moving would otherwise buy an unbounded run of
+			// free rebase-and-regate cycles, one claim after another, with the
+			// loop always one step behind. Past the bound a person decides.
+			if budget := l.attemptBudget(item); item.RebaseCount >= budget {
+				return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+					"rebased onto a moving branch %d times, at the attempt budget of %d — parking rather than chasing it again",
+					item.RebaseCount, budget))
+			}
+			// The OLD patch-id, read while item.Built is still HEAD in this
+			// tree and its objects are certainly reachable: git.Rebase is
+			// about to move HEAD out from under it.
+			oldPatchID, oidErr := git.PatchID(ctx, adopted.Dir, forge.Commit(item.BuiltBase), forge.Commit(item.Built))
 			replayed, rerr := git.Rebase(ctx, adopted.Dir, base, forge.Commit(item.BuiltBase))
 			if rerr == nil {
 				ws, head, resumed = adopted, replayed, true
+				item.RebaseCount++
+				newPatchID, nidErr := git.PatchID(ctx, adopted.Dir, base, replayed)
+				// Equal, non-empty patch-ids on a clean rebase: the same patch
+				// on a new base, so a diff-judging gate's verdict still
+				// applies — carried below, in the gate stage. Anything else,
+				// including either side erroring, is never treated as equal:
+				// unknown never reads as zero.
+				if oidErr == nil && nidErr == nil && oldPatchID != "" && oldPatchID == newPatchID {
+					rebaseCarriesDiff, rebasePatchID = true, newPatchID
+				}
 				l.record(ctx, item, "build-rebased", string(replayed),
-					fmt.Sprintf(`{"was":%q,"from":%q,"onto":%q,"unfinished":%v}`,
-						item.Built, item.BuiltBase, base, item.Unfinished))
+					fmt.Sprintf(`{"was":%q,"from":%q,"onto":%q,"unfinished":%v,"old_patch_id":%q,"new_patch_id":%q}`,
+						item.Built, item.BuiltBase, base, item.Unfinished, oldPatchID, newPatchID))
 			} else {
 				// A conflict is a judgement call, and the agent is the one
 				// who makes those. Recorded, then built afresh.
@@ -442,6 +567,9 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		}
 	}
 	if !resumed {
+		// A fresh build (including one built afresh after a rebase conflict):
+		// nothing here was replayed, so the rebase count starts over.
+		item.RebaseCount = 0
 		ws, err = l.Mirror.Checkout(ctx, wsLease, base)
 		if err != nil {
 			return q.Fail(ctx, item, claim, err.Error())
@@ -539,23 +667,46 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		// build, the test run — cannot change their mind about a commit that has
 		// not moved. The gate whose answer CAN change is the human one, and it is
 		// a store read. Any change of head clears the carry, because replayed or
-		// rebuilt content is a different question.
+		// rebuilt content is a different question — UNLESS the rebase branch
+		// above found that question already answered: the sha changed but the
+		// diff a diff-judging gate reads did not (issue #95).
+		gates := l.gatesFor(item, ws)
 		carried := item.PassedGates
-		if string(head) != item.Built {
+		switch {
+		case string(head) == item.Built:
+			// Unchanged: every gate that already passed on this exact content
+			// still applies.
+		case rebaseCarriesDiff:
+			// Same patch, new base: only the gates that judge the diff rather
+			// than the base ride forward, and each one that does gets its own
+			// carry record naming the verdict it rests on — see
+			// [Loop.carryDiffGates]. A human approval never satisfies
+			// [forge.DiffJudge] and so is never among them: it binds to the
+			// exact commit a person looked at (docs/PLAN.md §6), not to a
+			// patch shape.
+			carried = l.carryDiffGates(ctx, item, gates, item.PassedGates, forge.Commit(item.Built), head, rebasePatchID)
+		default:
 			carried = nil
 		}
 		verdicts = nil
 		passedNow = nil
 		var gateInfra, gateWait error
 		gerr := telemetry.Stage(ctx, "gate", item, func(ctx context.Context) error {
-			for _, g := range l.gatesFor(item, ws) {
+			for _, g := range gates {
 				if slices.Contains(carried, g.Name()) {
-					// No new evidence: the gate ran once on this content and its
-					// verdict is already on the chain. Recording it again would
-					// be minting a judgement nobody made.
+					// No new evidence beyond what was already written above
+					// (the same-head case needs none; the rebase-carry case
+					// wrote its own "gate-carried" record): the gate ran once
+					// on this content and its verdict is already on the
+					// chain. Recording it again would be minting a judgement
+					// nobody made.
+					reason := "passed on " + short(head) + ", carried while the head stands"
+					if rebaseCarriesDiff && string(head) != item.Built {
+						reason = fmt.Sprintf("carried across a rebase: patch-id %s of the reviewed commit %s equals the patch-id of %s",
+							rebasePatchID, short(forge.Commit(item.Built)), short(head))
+					}
 					verdicts = append(verdicts, forge.Verdict{
-						Gate: g.Name(), Decision: forge.DecisionPass,
-						Reason: "passed on " + short(head) + ", carried while the head stands",
+						Gate: g.Name(), Decision: forge.DecisionPass, Reason: reason,
 					})
 					passedNow = append(passedNow, g.Name())
 					continue

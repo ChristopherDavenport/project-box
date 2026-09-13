@@ -101,6 +101,12 @@ type Reviewer struct {
 // Name satisfies [forge.Gate].
 func (r *Reviewer) Name() string { return ReviewerName }
 
+// JudgesDiff satisfies [forge.DiffJudge]: the reviewer reads the diff between
+// base and head and never the base's own state, so a rebase that replays the
+// identical patch onto a moved base carries this verdict rather than paying
+// for the read twice.
+func (r *Reviewer) JudgesDiff() bool { return true }
+
 // maxDiffBytes bounds the patch a reviewer is handed. A change larger than
 // this is shown its first part and told so, in the material and in the
 // prompt: a reviewer that silently read half a change and passed it is

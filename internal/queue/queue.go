@@ -270,6 +270,16 @@ type WorkItem struct {
 	// are the deterministic shells. Any change of head clears this, because a
 	// different commit is a different question.
 	PassedGates []string `json:"passed_gates,omitempty"`
+	// RebaseCount is how many times this item's candidate has been replayed
+	// onto a moved base with git.Rebase, across every claim: a rebase happens
+	// at most once per claim (only in the loop's adopt branch), so a branch
+	// that keeps moving would otherwise buy the loop an unbounded run of free
+	// rebase-and-regate cycles chasing it, one claim after another. Bounded by
+	// the attempt budget (see [loop.Loop.attemptBudget]); past it the loop
+	// parks instead of rebasing again and a person decides. Reset wherever the
+	// candidate resets: [WorkItem.dropResume] and a fresh (or rebase-refused)
+	// build.
+	RebaseCount int `json:"rebase_count,omitempty"`
 	// Note carries the parked/failed reason.
 	Note string `json:"note,omitempty"`
 	// Severity is how loudly this parking asks for a person. Set by the stage
@@ -567,6 +577,7 @@ func (q *Queue) park(ctx context.Context, w WorkItem, lease forge.Lease, sev Sev
 // states the same tree is still worth coming back to.
 func (w *WorkItem) dropResume() {
 	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = "", "", nil, false
+	w.RebaseCount = 0
 }
 
 // KeepCandidate records a finished change to come back to instead of buying

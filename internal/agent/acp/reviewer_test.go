@@ -139,6 +139,23 @@ func chain(t *testing.T, s *sqlite.Store, run string) map[string]string {
 	return kinds
 }
 
+// TestTheGateJudgesTheDiff: the reviewer reads base against head, never the
+// base alone, so a rebase that replays the identical patch onto a moved base
+// may carry this gate's verdict forward. gate.Command and the human-approval
+// gate deliberately do not implement forge.DiffJudge — a check re-runs
+// against whatever tree it is handed, and an approval binds to the exact
+// commit a person looked at, never to a patch shape.
+func TestTheGateJudgesTheDiff(t *testing.T) {
+	var g forge.Gate = &Reviewer{}
+	dj, ok := g.(forge.DiffJudge)
+	if !ok {
+		t.Fatal("*Reviewer does not satisfy forge.DiffJudge")
+	}
+	if !dj.JudgesDiff() {
+		t.Fatal("the reviewer must report that it judges the diff")
+	}
+}
+
 // TestTheGateReadsAChangeAndPasses: the gate role's seat, occupied. The
 // verdict carries this gate's name and its reason, and the whole account of
 // the judgement — the agentref before the run, the model that judged, the
