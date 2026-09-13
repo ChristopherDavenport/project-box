@@ -341,6 +341,14 @@ type Box struct {
 	// negative is refused at validate, because a bound of nothing asks
 	// nothing and unknown must not read as zero.
 	GateRetries *int `yaml:"gate_retries"`
+	// LandRetries bounds how many more times a landing that returned a
+	// transient forge error is re-tried in place before the item parks, for
+	// every repo that names no override of its own — see
+	// [Repo.LandRetries]. Absent means the loop's own default
+	// (loop.DefaultLandRetries); an explicit zero or negative is refused at
+	// validate, because a bound of nothing asks nothing and unknown must
+	// not read as zero.
+	LandRetries *int `yaml:"land_retries"`
 	// Roles are per-role tiers: what the planner judges on, what the builder
 	// expresses on. A role's model or session wins over the box's for that
 	// role's runs and loses to a section's and to a plan node's. Keys are the
@@ -678,6 +686,12 @@ type Repo struct {
 	// validate when it is an explicit zero or negative, for the same reason
 	// the box-level field is.
 	GateRetries *int `yaml:"gate_retries"`
+	// LandRetries overrides the box's land-retry bound for this repository
+	// alone — see [Box.LandRetries]. Absent inherits the box's value, and
+	// the loop's own default when the box names none either. Refused at
+	// validate when it is an explicit zero or negative, for the same reason
+	// the box-level field is.
+	LandRetries *int `yaml:"land_retries"`
 }
 
 // Approval is a [Repo]'s human sign-off policy.
@@ -849,6 +863,9 @@ func (c *Config) validate() error {
 		if bx.GateRetries != nil && *bx.GateRetries <= 0 {
 			return fmt.Errorf("boxcfg: box %s: gate_retries %d — a bound of nothing asks nothing; leave it unset for the loop's own default", bx.Name, *bx.GateRetries)
 		}
+		if bx.LandRetries != nil && *bx.LandRetries <= 0 {
+			return fmt.Errorf("boxcfg: box %s: land_retries %d — a bound of nothing asks nothing; leave it unset for the loop's own default", bx.Name, *bx.LandRetries)
+		}
 		for _, role := range slices.Sorted(maps.Keys(bx.Roles)) {
 			if !agent.Role(role).Known() {
 				return fmt.Errorf("boxcfg: box %s: roles.%s — no such role; the seats are builder, planner, gate, deployer and curator", bx.Name, role)
@@ -962,6 +979,9 @@ func (c *Config) validate() error {
 			}
 			if r.GateRetries != nil && *r.GateRetries <= 0 {
 				return fmt.Errorf("boxcfg: box %s repo %s: gate_retries %d — a bound of nothing asks nothing; leave it unset to inherit the box's, or the loop's own default", bx.Name, r.Name, *r.GateRetries)
+			}
+			if r.LandRetries != nil && *r.LandRetries <= 0 {
+				return fmt.Errorf("boxcfg: box %s repo %s: land_retries %d — a bound of nothing asks nothing; leave it unset to inherit the box's, or the loop's own default", bx.Name, r.Name, *r.LandRetries)
 			}
 			if err := validateSections(bx, r); err != nil {
 				return err
