@@ -763,15 +763,20 @@ func (q *Queue) Recover(ctx context.Context, w WorkItem) (WorkItem, bool, error)
 	return w, true, q.index(ctx, w.Tenant, "pending", w.ID, w.Note)
 }
 
-// Resolve closes a parked item without a landing: the operator read the
-// exception, agreed there is nothing to build, and said so.
+// Resolve closes a parked or failed item without a landing: the operator
+// read the exception, agreed there is nothing more to build, and said so. A
+// failed item becomes resolved, never done: "failed" stays on the chain as
+// an attempt that produced nothing, and resolving it says nothing more is
+// owed, not that it landed.
 //
 // The exception queue had no way out. StateParked was written in one place
 // and read in five, and nothing anywhere moved an item off it — so every
 // parked item was permanent, the queue only ever grew, and the verdict an
 // escalating agent had gone to the trouble of writing ("this issue is already
 // implemented, close it") was a recommendation the system could not act on.
-// An exception queue nobody can clear is a list, not a queue.
+// An exception queue nobody can clear is a list, not a queue. A failed item
+// was the same story with no escalation at all: a person could neither
+// retry it nor close it out.
 func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id, actor, why string) (WorkItem, error) {
 	if why == "" {
 		return WorkItem{}, errors.New("queue: resolve needs a reason — closing an exception is a judgement and the record must carry whose")
@@ -779,8 +784,8 @@ func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id, actor, why string)
 	return q.reopen(ctx, t, id, actor, StateResolved, "resolved", why)
 }
 
-// Retry returns a parked item to the queue for another attempt, with the
-// operator's note replacing the one it parked with.
+// Retry returns a parked or failed item to the queue for another attempt,
+// with the operator's note replacing the one it parked or failed with.
 //
 // The counterpart to Resolve, and the reason parking could not simply be
 // terminal: an item parks for transient reasons too — a flaky gate, a
@@ -791,23 +796,33 @@ func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id, actor, why string)
 // refused gate bought. A note that says to rebuild — matched case-
 // insensitively for "rebuild" — drops it instead, exactly as a retry always
 // used to, for the operator who has already judged the commit itself to be
-// the problem.
+// the problem. A failed item has no commit worth re-offering — Fail already
+// dropped its resume point — so its retry is always a rebuild, whatever the
+// note says, and carries the failure reason forward as the rebuilt attempt's
+// Prior.Reason.
 func (q *Queue) Retry(ctx context.Context, t tenant.ID, id, actor, note string) (WorkItem, error) {
 	return q.reopen(ctx, t, id, actor, StatePending, "retried", note)
 }
 
 // reopen is the one transition off the exception queue, in both directions it
-// can go. Only a parked item may take it: an operator resolving something
-// still running would race the runner that holds its lease.
+// can go. Only a parked or failed item may take it: an operator resolving
+// something still running would race the runner that holds its lease.
 func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to State, kind, note string) (WorkItem, error) {
 	w, err := q.Load(ctx, t, id)
 	if err != nil {
 		return WorkItem{}, err
 	}
-	if w.State != StateParked {
-		return w, fmt.Errorf("queue: item %s is %s, not parked — only an exception can be %s", id, w.State, kind)
+	if w.State != StateParked && w.State != StateFailed {
+		return w, fmt.Errorf("queue: item %s is %s, not parked or failed — only an exception can be %s", id, w.State, kind)
 	}
-	rebuild := kind == "retried" && strings.Contains(strings.ToLower(note), "rebuild")
+	wasFailed := w.State == StateFailed
+	// A failed item's attempt already produced nothing — Fail dropped its
+	// resume point on the way in, so there is no commit worth re-offering
+	// and no case for keeping it. Every retry of a failed item is a
+	// rebuild, whatever the operator's note says; a parked item still
+	// chooses, by that note, between re-checking the same commit and
+	// abandoning it.
+	rebuild := kind == "retried" && (wasFailed || strings.Contains(strings.ToLower(note), "rebuild"))
 	if rebuild {
 		// The attempt being abandoned is what the next one is woken
 		// knowing: the commit it produced and what refused it, with the
@@ -829,6 +844,16 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 		}
 		w.Prior = &agent.Prior{Run: w.ID, Repo: w.Repo, Sha: w.Built,
 			Verdicts: verdicts, RetriedBy: actor, RetryNote: note}
+		if wasFailed {
+			// w.Note is still what Fail recorded — the operator's own note
+			// below this overwrites it. Reason is what reported the trouble
+			// said; RetriedBy/RetryNote stay the operator's own words, kept
+			// apart exactly as agent.Prior's doc comment demands. There may
+			// be no Verdicts to go with it — a gate-infra failure never
+			// reached a gate — and an empty list beside a populated Reason
+			// is correct, not an error.
+			w.Prior.Reason = w.Note
+		}
 	}
 	w.State, w.Note = to, note
 	// Resolve is final and always drops it — closing an exception says there

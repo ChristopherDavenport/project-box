@@ -111,6 +111,22 @@ func TestRetryReturnsParkedWorkToTheQueue(t *testing.T) {
 	}
 }
 
+// fail drives an item to StateFailed the way a runner settling unsuccessfully
+// does: claimed, then failed with a reason.
+func fail(t *testing.T, qu *Queue, id, reason string) WorkItem {
+	t.Helper()
+	w := submit(t, qu, id)
+	w, lease, err := qu.Claim(context.Background(), w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err = qu.Fail(context.Background(), w, lease, reason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
 // parkKeeping parks an item the way a refused gate does now: with a resume
 // point set on it first and ParkKeeping used instead of Park, so the park
 // itself does not drop it. See [Queue.ParkKeeping].
@@ -431,5 +447,190 @@ func TestARetryThatKeepsTheCommitCarriesNoPrior(t *testing.T) {
 	}
 	if got.Prior != nil {
 		t.Fatalf("a resumed retry carried a prior: %+v", *got.Prior)
+	}
+}
+
+// TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason. A failed
+// item's attempt already produced nothing — Fail dropped its resume point on
+// the way in — so unlike a parked item, a retry never gets to keep it, and
+// the word "rebuild" in the operator's note is beside the point. What the
+// rebuilt run needs is the account of what went wrong, which Fail wrote to
+// the note and Retry's own note is about to overwrite: it has to be captured
+// into Prior.Reason first, kept apart from the operator's own words in
+// RetriedBy/RetryNote.
+func TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	w := submit(t, qu, "wi-1")
+	w, lease, err := qu.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gateRecord(t, qu, w, "sha-built", forge.Verdict{
+		Gate: "review", Decision: forge.DecisionFail, Reason: "cannot match the nested case",
+	})
+	w.KeepCandidate("sha-built", "sha-base", []string{})
+	if _, err := qu.Fail(ctx, w, lease, "gate-infra: runner crashed mid-check"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "try it again, nothing to change")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StatePending {
+		t.Fatalf("state = %s, want pending", got.State)
+	}
+	// A failed item has no resume point to keep — Fail already dropped it —
+	// so the retry rebuilds even though the note never says "rebuild".
+	if got.Built != "" || got.BuiltBase != "" || got.PassedGates != nil {
+		t.Fatalf("a failed item's retry kept a resume point it never had: %+v", got)
+	}
+	if got.Prior == nil {
+		t.Fatal("a failed item's retry carried nothing of the attempt it abandoned")
+	}
+	if got.Prior.Reason != "gate-infra: runner crashed mid-check" {
+		t.Fatalf("prior.Reason = %q, want the failure note Fail recorded", got.Prior.Reason)
+	}
+	if got.Prior.RetriedBy != "chris" || got.Prior.RetryNote != "try it again, nothing to change" {
+		t.Fatalf("the operator's own words must stay on their own fields, apart from Reason: %+v", *got.Prior)
+	}
+	if len(got.Prior.Verdicts) != 1 || got.Prior.Verdicts[0].Reason != "cannot match the nested case" {
+		t.Fatalf("prior.Verdicts = %+v, want the chain's refusal even though Fail settled the item, not a gate", got.Prior.Verdicts)
+	}
+
+	reloaded, err := qu.Load(ctx, tn, "wi-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Prior == nil || reloaded.Prior.Reason != "gate-infra: runner crashed mid-check" {
+		t.Fatalf("Load after the retry does not carry the failure reason: %+v", reloaded.Prior)
+	}
+	if _, _, err := qu.Claim(ctx, reloaded); err != nil {
+		t.Fatalf("a retried failed item could not be claimed: %v", err)
+	}
+}
+
+// TestRetryOfAFailedItemWithNoGateVerdictsCarriesAnEmptyList. A gate-infra
+// failure never reached a gate, so there is nothing on the chain to read —
+// an empty Verdicts list beside a populated Reason is correct here, not a
+// sign that the read failed.
+func TestRetryOfAFailedItemWithNoGateVerdictsCarriesAnEmptyList(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	fail(t, qu, "wi-1", "runner died before it ever built anything")
+
+	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Prior == nil {
+		t.Fatal("a failed item's retry carried no prior")
+	}
+	if got.Prior.Reason != "runner died before it ever built anything" {
+		t.Fatalf("prior.Reason = %q", got.Prior.Reason)
+	}
+	if len(got.Prior.Verdicts) != 0 {
+		t.Fatalf("prior.Verdicts = %+v, want none — this item never reached a gate", got.Prior.Verdicts)
+	}
+}
+
+// TestResolveOfAFailedItemClosesItWithoutALanding. A failed item becomes
+// resolved, never done: "failed" stays on the chain as an attempt that
+// produced nothing, and resolving it says nothing more is owed, not that it
+// landed.
+func TestResolveOfAFailedItemClosesItWithoutALanding(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	fail(t, qu, "wi-1", "repeated gate refusal, not worth another attempt")
+
+	got, err := qu.Resolve(ctx, tn, "wi-1", "chris", "agreed — not worth pursuing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StateResolved {
+		t.Fatalf("state = %s, want resolved", got.State)
+	}
+
+	reloaded, err := qu.Load(ctx, tn, "wi-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.State != StateResolved || reloaded.Note != "agreed — not worth pursuing" {
+		t.Fatalf("resolve did not survive the fold: %+v", reloaded)
+	}
+
+	var actor string
+	for rec, err := range qu.Store.Log().Since(ctx, tn, scope("wi-1"), 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Kind == "resolved" {
+			actor = rec.Actor
+		}
+	}
+	if actor != "chris" {
+		t.Fatalf("resolved record actor = %q, want the operator", actor)
+	}
+
+	for rec, err := range qu.Store.Log().Since(ctx, tn, "index/landings", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Subject == "wi-1" {
+			t.Fatal("a resolved item reached the landings index; it never landed")
+		}
+	}
+}
+
+// TestNeitherVerbReopensAnItemThatIsNeitherParkedNorFailed. Pending, claimed,
+// and done items are all mid-flight or settled by a landing — none of them
+// is the exception a person is meant to be closing or retrying by hand.
+func TestNeitherVerbReopensAnItemThatIsNeitherParkedNorFailed(t *testing.T) {
+	states := []struct {
+		name string
+		item func(t *testing.T, qu *Queue, id string) WorkItem
+	}{
+		{"pending", func(t *testing.T, qu *Queue, id string) WorkItem {
+			return submit(t, qu, id)
+		}},
+		{"claimed", func(t *testing.T, qu *Queue, id string) WorkItem {
+			w := submit(t, qu, id)
+			w, _, err := qu.Claim(context.Background(), w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return w
+		}},
+		{"done", func(t *testing.T, qu *Queue, id string) WorkItem {
+			w := submit(t, qu, id)
+			w, lease, err := qu.Claim(context.Background(), w)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w, err = qu.Done(context.Background(), w, lease, forge.Commit("sha-done"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			return w
+		}},
+	}
+
+	for _, s := range states {
+		for _, verb := range []string{"resolve", "retry"} {
+			qu, ctx := q(t), context.Background()
+			id := "wi-" + s.name + "-" + verb
+			s.item(t, qu, id)
+
+			var err error
+			if verb == "resolve" {
+				_, err = qu.Resolve(ctx, tn, id, "chris", "closing")
+			} else {
+				_, err = qu.Retry(ctx, tn, id, "chris", "again")
+			}
+			if err == nil {
+				t.Fatalf("%s took a %s item off a queue it was never on", verb, s.name)
+			}
+			if !strings.Contains(err.Error(), "not parked or failed") {
+				t.Fatalf("%s on %s: err = %v, want it to name both refused states", verb, s.name, err)
+			}
+		}
 	}
 }
