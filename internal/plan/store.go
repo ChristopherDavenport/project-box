@@ -163,6 +163,14 @@ type Standing struct {
 	State  string
 	Reason string
 	At     time.Time
+	// Defers counts the DeferredKind records trailing the newest conclusion
+	// on the chain — how many times in a row a dispatch has met the
+	// account's window instead of an answer (issue #112). A ClaimedKind
+	// (proof of dispatch, not a conclusion) carries the count forward
+	// rather than resetting it; anything else — a plan, a failure, a retry,
+	// a resolution — resets it to zero, because a run that answered ends the
+	// streak whatever it answered with.
+	Defers int
 }
 
 // Blocked reports that intake must not plan this origination now: a
@@ -186,7 +194,7 @@ func (s *Store) Standing(ctx context.Context, t tenant.ID, ingressID string) (St
 		}
 		switch rec.Kind {
 		case ClaimedKind:
-			st = Standing{State: "judging", At: rec.At}
+			st = Standing{State: "judging", At: rec.At, Defers: st.Defers}
 		case RecordKind:
 			st = Standing{State: "planned", At: rec.At}
 		case FailedKind:
@@ -196,7 +204,7 @@ func (s *Store) Standing(ctx context.Context, t tenant.ID, ingressID string) (St
 		case ResolvedKind:
 			st = Standing{State: "resolved", Reason: string(rec.Body), At: rec.At}
 		case DeferredKind:
-			st = Standing{State: "deferred", Reason: string(rec.Body), At: rec.At}
+			st = Standing{State: "deferred", Reason: string(rec.Body), At: rec.At, Defers: st.Defers + 1}
 		}
 	}
 	return st, nil

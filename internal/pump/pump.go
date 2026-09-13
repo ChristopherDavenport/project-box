@@ -573,11 +573,18 @@ func meterPacing(err error) bool {
 // credential brake) releases the lease and skips silently, with no record:
 // the meter's own window is why nothing happened, and the next tick's
 // Acquire is the retry — the same posture Drain already takes at claim. This
-// supersedes the retry-in-place scheme issue #110 built for a judgement run
-// inline in the tick ([plan.Store.Defer], [plan.DeferredKind]): once
-// dispatch is off the tick there is no tick left to retry within, and a
-// meter refusal before dispatch is already the same silent, next-tick-
-// retried pacing every claim gets.
+// leaves no PRE-dispatch use for the retry-in-place scheme issue #110 built
+// for a judgement run inline in the tick ([plan.Store.Defer],
+// [plan.DeferredKind]): once dispatch is off the tick there is no tick left
+// to retry a refused Acquire within, and a meter refusal before dispatch is
+// already the same silent, next-tick-retried pacing every claim gets.
+//
+// Issue #112 revives Defer for the case Acquire cannot see: a dispatched run
+// that gets past Acquire and THEN has its own provider account report the
+// window spent mid-flight ([loop.WindowSpent]). That is not this pacing —
+// the meter's own budget never refused anything here — so it is recorded
+// rather than silently retried, bounded by [loop.MaxWindowDefers] the same
+// way a claim's own build-or-gate deferral is.
 //
 // Once both are held, [plan.Store.Claim] records the dispatch and the
 // judgement runs in a goroutine registered with p.inflight — so Quiesce
@@ -623,6 +630,25 @@ func (p *Pump) dispatchJudgement(ctx context.Context, ing ingress.Ingress, decl 
 		// takes throughout this package.
 		pl, err := plan.Make(ctx, p.Decomposers, ing, decl)
 		if err != nil {
+			var ws *loop.WindowSpent
+			if errors.As(err, &ws) {
+				if resetsAt, ok := ws.ResolveReset(p.Meter); ok {
+					if standing, serr := p.Plans.Standing(ctx, ing.Tenant, ing.ID); serr == nil {
+						if standing.Defers < loop.MaxWindowDefers {
+							body := fmt.Sprintf(`{"window":%q,"resets_at":%d}`, ws.Window, resetsAt.Unix())
+							_ = p.Plans.Defer(ctx, ing, body)
+							return
+						}
+						_ = p.Plans.Fail(ctx, ing, fmt.Sprintf(
+							"deferred for the account window %d times without answering, and the limit is %d — failing rather than deferring again: %s",
+							standing.Defers+1, loop.MaxWindowDefers, ws.Error()))
+						return
+					}
+				}
+				// Unknown never reads as zero: no reset named and no account
+				// window on record either (or the standing could not be
+				// read), so this falls through to today's Fail path.
+			}
 			_ = p.Plans.Fail(ctx, ing, err.Error())
 			return
 		}

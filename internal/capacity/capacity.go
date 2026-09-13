@@ -705,6 +705,28 @@ type Report struct {
 	LastCredential CredentialKind `json:"last_credential,omitempty"`
 }
 
+// Window returns a copy of the account window this meter last heard about
+// from a run's report, nil when no run ever has. The meter's first exported
+// READ of the account window (issue #112): a mid-run refusal that names no
+// reset of its own (a run refused at session or prompt start, before any
+// usage update) resolves one from here instead, because the meter is the one
+// place the account's own window survives across runs and restarts (see
+// [Meter.Restore]).
+//
+// Unlike [Meter.Report], this does not roll the window forward first: the
+// account's clock is its own, kept apart from the meter's window exactly as
+// [Meter.limit] is, and a stale copy of what the account last reported is
+// still the best guess there is for it — it is never invented.
+func (m *Meter) Window() *Limit {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.limit == nil {
+		return nil
+	}
+	cp := *m.limit
+	return &cp
+}
+
 // Report snapshots the window.
 //
 // It rolls the window forward first. Reading is not a side-effect-free act

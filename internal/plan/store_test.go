@@ -194,6 +194,69 @@ func TestADeferralFoldsToDeferredAndStaysUnblocked(t *testing.T) {
 	}
 }
 
+// TestDefersCountsConsecutiveDeferralsAcrossClaims: issue #112 bounds a
+// judgement's deferral streak, and the bound reads off Standing.Defers — the
+// count of DeferredKind records trailing the newest conclusion. A ClaimedKind
+// between two deferrals is proof-of-dispatch, not a conclusion, so it must
+// carry the count forward rather than reset it; a plan (a real conclusion)
+// must reset it to zero.
+func TestDefersCountsConsecutiveDeferralsAcrossClaims(t *testing.T) {
+	s := store(t)
+	ctx := context.Background()
+	ps := &Store{Log: s.Log(), Actor: "boxd"}
+	ing := issue("ing-1")
+	openOn(t, s, ing)
+
+	if err := ps.Claim(ctx, ing); err != nil {
+		t.Fatal(err)
+	}
+	if err := ps.Defer(ctx, ing, "deferred 1"); err != nil {
+		t.Fatal(err)
+	}
+	st, err := ps.Standing(ctx, tn, ing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Defers != 1 {
+		t.Fatalf("Defers after one deferral = %d, want 1", st.Defers)
+	}
+
+	if err := ps.Claim(ctx, ing); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = ps.Standing(ctx, tn, ing.ID); err != nil {
+		t.Fatal(err)
+	}
+	if st.State != "judging" || st.Defers != 1 {
+		t.Fatalf("a claim between deferrals should carry the count forward, not reset it: %+v", st)
+	}
+
+	if err := ps.Defer(ctx, ing, "deferred 2"); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = ps.Standing(ctx, tn, ing.ID); err != nil {
+		t.Fatal(err)
+	}
+	if st.Defers != 2 {
+		t.Fatalf("Defers after two deferrals across two claims = %d, want 2", st.Defers)
+	}
+
+	// A real conclusion resets the streak to zero, whatever it answered.
+	p, err := Make(ctx, Default(), ing, seed(t, kind.SeedIssue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.Record(ctx, ing, p); err != nil {
+		t.Fatal(err)
+	}
+	if st, err = ps.Standing(ctx, tn, ing.ID); err != nil {
+		t.Fatal(err)
+	}
+	if st.State != "planned" || st.Defers != 0 {
+		t.Fatalf("a planned conclusion should reset the deferral streak: %+v", st)
+	}
+}
+
 // TestAClaimFoldsToJudgingAndStaysUnblocked: issue #50 moved judgement
 // decomposition off the intake tick, dispatched under a claim lease and
 // settled by a later tick. Standing must surface "judging" so a reader can

@@ -270,6 +270,15 @@ type WorkItem struct {
 	// returns without aborting, so one old abort cannot push a much-later one
 	// over the bound.
 	AbortedTries int `json:"aborted_tries,omitempty"`
+	// DeferredTries counts how many times in a row this claim's build or
+	// gate review has deferred for the account window — the run's own
+	// provider report that the window is exhausted, mid-flight rather than
+	// at pump.Acquire — and gone back to waiting rather than parking; see
+	// [loop.MaxWindowDefers]. Persists through Wait the same way
+	// AbortedTries does. Reset to zero by a build that answers, whatever it
+	// answers with: a deferral streak ends the moment a run gets an answer
+	// out of the window rather than a refusal from it.
+	DeferredTries int `json:"deferred_tries,omitempty"`
 	// PassedGates names the gates that already returned pass on Built.
 	//
 	// They are carried rather than re-run while that head stands. A gate that

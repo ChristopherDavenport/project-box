@@ -192,6 +192,15 @@ const DefaultGateRetries = 2
 // (issue #69).
 const MaxAbortedRetries = 2
 
+// MaxWindowDefers bounds how many times in a row a claim may defer for the
+// account window — a build or a gate review refused by the run's own limit
+// report — before the item parks (or, for a judgement dispatch with no item
+// yet, the origination fails) instead of waiting again (issue #112). More
+// than a handful in a row means the window is not turning the way the run
+// said it would, and that has stopped being pacing and become a person's
+// question.
+const MaxWindowDefers = 3
+
 // defaultGateBackoffUnit is the base of [Loop.gateBackoff]'s default growth:
 // try 1 waits one unit, try 2 waits two, and so on. Seconds, because a gate
 // error is infrastructure trouble worth a short pause, not a rate limit
@@ -648,8 +657,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 					// A build that got all the way to a commit did not abort,
 					// whatever an earlier attempt on this same claim said — an
 					// old abort must not go on counting against a claim that
-					// has since built cleanly.
+					// has since built cleanly. A deferral streak ends the same
+					// way: a run that answers is proof the window admitted it.
 					item.AbortedTries = 0
+					item.DeferredTries = 0
 					l.record(ctx, item, "built", string(head), "")
 				} else if bctx.Err() != nil && ctx.Err() == nil {
 					// The clock ran out, not the caller. Say so plainly: "context
@@ -696,6 +707,29 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 						item.AbortedTries+1, MaxAbortedRetries, ab.Reason))
 					return l.settle(ctx, item), nil
 				}
+				var ws *WindowSpent
+				if errors.As(serr, &ws) {
+					// The run's own account report, not a judgement: nothing
+					// decided, so no KeepCandidate — a build refused mid-run
+					// keeps nothing to resume from.
+					if resetsAt, ok := ws.ResolveReset(l.Meter); ok {
+						l.record(ctx, item, "deferred", item.ID,
+							fmt.Sprintf(`{"window":%q,"resets_at":%d}`, ws.Window, resetsAt.Unix()))
+						if item.DeferredTries < MaxWindowDefers {
+							item.DeferredTries++
+							note := fmt.Sprintf("waiting for the account window, resumes at %s", resetsAt.Format(time.RFC3339))
+							item, _ = q.Wait(ctx, item, claim, note)
+							return l.settle(ctx, item), nil
+						}
+						item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+							"deferred for the account window %d times without finishing, and the limit is %d — parking rather than waiting again: %s",
+							item.DeferredTries+1, MaxWindowDefers, ws.Error()))
+						return l.settle(ctx, item), nil
+					}
+					// Unknown never reads as zero: no reset named and no
+					// account window on record either, so this takes the
+					// same park path any other build error would.
+				}
 				item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, "build: "+serr.Error())
 				return l.settle(ctx, item), nil
 			}
@@ -737,6 +771,8 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		verdicts = nil
 		passedNow = nil
 		var gateInfra, gateWait, gerr error
+		var gateWindowSpent *WindowSpent
+		var gateWindowReset time.Time
 		if why := placeholderCommitReason(msg, item.Task); why != "" {
 			// No gate runs: no reviewer, no check command, no Meter charge.
 			// Recorded exactly as a gate verdict always is, on subject head,
@@ -800,6 +836,20 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 					}
 					v, tries, err := l.evaluateGate(ctx, item, g, cs)
 					if err != nil {
+						var ws *WindowSpent
+						if errors.As(err, &ws) {
+							if resetsAt, ok := ws.ResolveReset(l.Meter); ok {
+								// The run's own account report, met at the gate
+								// rather than the build: the commit stands and
+								// the free recheck resumes here once the window
+								// turns (issue #112, #76's shape).
+								gateWindowSpent, gateWindowReset = ws, resetsAt
+								return err
+							}
+							// Unknown never reads as zero: no reset named and
+							// no account window on record either, so this
+							// falls through to the ordinary infra path below.
+						}
 						if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrUnpriced) {
 							// The meter's own refusal, not infrastructure trouble a
 							// retry could clear: no gate today can hit this (the
@@ -898,6 +948,23 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 				}
 				return nil
 			})
+		}
+		if gateWindowSpent != nil {
+			// The run's own account report, not a judgement: the built commit
+			// is kept, exactly as [gateWait] keeps it, but this is also a
+			// deferral on the chain and bound by the same streak a build-side
+			// one is.
+			l.record(ctx, item, "deferred", string(head),
+				fmt.Sprintf(`{"window":%q,"resets_at":%d}`, gateWindowSpent.Window, gateWindowReset.Unix()))
+			item.KeepCandidate(head, base, passedNow)
+			if item.DeferredTries < MaxWindowDefers {
+				item.DeferredTries++
+				note := fmt.Sprintf("waiting for the account window, resumes at %s", gateWindowReset.Format(time.RFC3339))
+				return q.Wait(ctx, item, claim, note)
+			}
+			return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+				"deferred for the account window %d times without finishing, and the limit is %d — parking rather than waiting again: %s",
+				item.DeferredTries+1, MaxWindowDefers, gateWindowSpent.Error()))
 		}
 		if gateWait != nil {
 			// The unit waits exactly as a refused start at pump.Acquire waits:
@@ -1478,6 +1545,47 @@ func (a *Aborted) Error() string {
 	return fmt.Sprintf("build aborted: %s", a.Reason)
 }
 
+// WindowSpent is the run's own provider account report saying the window is
+// exhausted — the adapter's "You've hit your session limit" refusal (issue
+// #112). Nothing was judged and nothing was decided, which is what separates
+// it from [Escalation] and [Handoff] alike: this is the account's own pacing
+// rule holding mid-run, the same rule [capacity.Meter.Acquire] already
+// enforces at the start of a claim, just met after the run was already under
+// way. acp wraps it exactly as [Aborted] wraps acp.ErrAborted today.
+type WindowSpent struct {
+	// Window names the exhausted window, e.g. "five_hour" or "seven_day".
+	Window string
+	// ResetsAt is when the window turns, as the run's own refusal named it.
+	// Zero when the refusal named no reset — a run refused at session or
+	// prompt start sends no usage updates — in which case the caller
+	// resolves it from the meter's own held account window instead; see
+	// [WindowSpent.ResolveReset].
+	ResetsAt time.Time
+	Reason   string
+}
+
+// Error satisfies error.
+func (w *WindowSpent) Error() string {
+	return fmt.Sprintf("account window %s spent: %s", w.Window, w.Reason)
+}
+
+// ResolveReset resolves the reset this refusal names, falling back to the
+// meter's own held account window when the run's own report named none.
+// False when neither says — unknown never reads as zero, and the caller must
+// not treat a run this refuses to resolve as a bounded wait.
+func (w *WindowSpent) ResolveReset(m *capacity.Meter) (time.Time, bool) {
+	if !w.ResetsAt.IsZero() {
+		return w.ResetsAt, true
+	}
+	if m == nil {
+		return time.Time{}, false
+	}
+	if lim := m.Window(); lim != nil && lim.ResetsAt != 0 {
+		return time.Unix(lim.ResetsAt, 0), true
+	}
+	return time.Time{}, false
+}
+
 // handOff ends the session and returns the item to the queue for a fresh one,
 // unless the hops are spent.
 func (l *Loop) handOff(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, base forge.Commit, h *Handoff) (queue.WorkItem, error) {
@@ -1748,7 +1856,11 @@ func (l *Loop) foldFlakeException(ctx context.Context, item queue.WorkItem, subj
 // returned immediately, un-retried, on the first try that hits it: the
 // window's exhaustion, or a run that reported blind under a budget, is the
 // meter's own rule standing, not infrastructure trouble a re-ask could
-// clear. See the caller's Wait branch.
+// clear. See the caller's Wait branch. A [*WindowSpent] gets the same
+// treatment (issue #112): the run's own account report is nobody's
+// infrastructure trouble either, so asking again spends nothing it did not
+// already spend once — the caller's gateWindowSpent branch is where it is
+// acted on.
 //
 // Every erroring try — including the first, which is not yet a "retry" but
 // is still a try nobody may act on as a verdict — is recorded on the chain,
@@ -1764,7 +1876,8 @@ func (l *Loop) evaluateGate(ctx context.Context, item queue.WorkItem, g forge.Ga
 		if err == nil {
 			return v, try, nil
 		}
-		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrUnpriced) {
+		var ws *WindowSpent
+		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrUnpriced) || errors.As(err, &ws) {
 			return forge.Verdict{}, try, err
 		}
 		lastErr = err
