@@ -4,32 +4,49 @@
 #   ./hack/dogfood/restart.sh "why"
 #
 # Stops new claims with the reason, waits for whatever is running to settle
-# (a killed run produces nothing at all, so this never cuts one short), stops
-# the daemon and the room, rebuilds both binaries from this tree through
-# run.sh, brings them back, and resumes claims with the same reason. The
+# (a killed run produces nothing at all, so this never cuts one short), asks
+# systemd to restart the daemon and room units (install.sh's), waits for the
+# socket to answer again, and resumes claims with the same reason. The
 # reason is what the chain shows beside the stop and the resume, so say what
 # the restart is for.
 #
-# Processes are found by pid through the socket and the port, never by
-# pattern — a pattern matched this script's own shell once and killed it.
-set -u
+# Process supervision now belongs to systemd --user (hack/dogfood/install.sh):
+# this script no longer discovers a pid, forks with nohup/setsid, or rotates
+# log files.
+#   - Discovery: systemd finds "the daemon" by the unit's cgroup, not a
+#     process-list pattern. The old doctrine here was "never by pattern — a
+#     pattern matched this script's own shell once and killed it"; that
+#     hazard cannot recur once nothing here greps ps.
+#   - Logs: journald owns them now. `journalctl --user -u
+#     project-box-dogfood-boxd.service -f`, not boxd.log/boxd.prev.log.
+#   - The one-time .factory migration guard duplicated here (issue #73) is
+#     gone too: it existed only because this script used to write log files
+#     into ../project-box-state before run.sh's own copy of the guard could
+#     fire. Nothing here writes there anymore, so run.sh's guard is the only
+#     one that needs to exist.
+#
+# Refuses rather than falling back to the old pid-hunting path when the
+# units are not installed — two divergent restart paths is exactly what
+# this rewrite removes.
+#
+# This is for restarts an operator asks for (a landed change outside
+# self_deploy's sections, an edited box.yaml, a manual bounce) — box.yaml's
+# self_deploy chore re-execs the running process in place (syscall.Exec,
+# same pid) and never goes through systemd or this script at all.
+set -eu
 cd "$(dirname "$0")/../.."
-reason=${1:?a reason for the restart, e.g. "roles fix deployed"}
-export PATH=$HOME/coding/ai/buzz-zero-scaling/node_modules/.bin:$PATH
 
-# One-time migration (issue #73), guarded the same way as run.sh's and run
-# here too: this script writes into ../project-box-state below (the log
-# mv's, then run.sh's own redirect) before run.sh gets a chance to migrate,
-# so on the transition restart run.sh's copy of this guard fires too late —
-# the redirect into a directory that does not exist yet kills run.sh before
-# its first line runs. `mv` within one filesystem only relinks the
-# directory entry, so a still-running old daemon's socket file keeps
-# answering at its new path afterward — the sock= line below and the
-# API/pid checks that follow it stay correct against the OLD daemon even
-# though .factory is already gone by the time they run.
-if [ -d .factory ] && [ ! -e ../project-box-state ]; then
-  mv .factory ../project-box-state
-fi
+reason=${1:?a reason for the restart, e.g. "roles fix deployed"}
+
+BOXD_UNIT=project-box-dogfood-boxd.service
+ROOM_UNIT=project-box-dogfood-room.service
+
+for u in "$BOXD_UNIT" "$ROOM_UNIT"; do
+  if ! systemctl --user cat "$u" >/dev/null 2>&1; then
+    echo "restart.sh: $u is not installed — run hack/dogfood/install.sh first" >&2
+    exit 1
+  fi
+done
 
 sock=../project-box-state/boxd.sock
 log() { echo "$(date +%H:%M:%S) $*"; }
@@ -40,28 +57,15 @@ if [ -S "$sock" ] && api status >/dev/null 2>&1; then
   api stop -X POST -d "{\"reason\":\"restart: $reason\"}" >/dev/null
   log "claims stopped; waiting for running work to settle"
   while [ "$(running)" != 0 ]; do sleep 10; done
-  # By name and argument, never by pattern over every process: a pattern
-  # matched this script's own shell once and killed it.
-  pid=$(pgrep -x boxd -a | grep -F 'hack/dogfood/box.yaml' | awk '{print $1}' | head -1)
-  if [ -n "$pid" ]; then
-    log "stopping boxd pid=$pid"
-    kill "$pid"
-    i=0; while kill -0 "$pid" 2>/dev/null && [ $i -lt 120 ]; do sleep 1; i=$((i+1)); done
-    if kill -0 "$pid" 2>/dev/null; then log "boxd still up after 120s; not forcing it"; exit 1; fi
-  fi
 fi
-room=$(lsof -t -iTCP:8477 -sTCP:LISTEN 2>/dev/null || true)
-[ -n "$room" ] && { kill $room; log "room pid=$room stopped"; }
 
-mv -f ../project-box-state/boxd.log ../project-box-state/boxd.prev.log 2>/dev/null || true
-mv -f ../project-box-state/room.log ../project-box-state/room.prev.log 2>/dev/null || true
-setsid nohup ./hack/dogfood/run.sh > ../project-box-state/boxd.log 2>&1 < /dev/null &
-log "run.sh started: generate, build, run"
+log "restarting $BOXD_UNIT and $ROOM_UNIT"
+systemctl --user restart "$BOXD_UNIT" "$ROOM_UNIT"
+
 i=0; until [ -S "$sock" ] && ./bin/box -tenant davenport -daemon "unix:$sock" status >/dev/null 2>&1; do
-  sleep 1; i=$((i+1)); [ $i -ge 180 ] && { log "boxd did not come up in 180s; see ../project-box-state/boxd.log"; exit 1; }
+  sleep 1; i=$((i+1))
+  [ $i -ge 180 ] && { log "boxd did not come up in 180s; see: journalctl --user -u $BOXD_UNIT -n100"; exit 1; }
 done
-setsid nohup ./hack/dogfood/room.sh > ../project-box-state/room.log 2>&1 < /dev/null &
-i=0; until curl -s -o /dev/null http://127.0.0.1:8477/; do sleep 1; i=$((i+1)); [ $i -ge 30 ] && break; done
 api resume -X POST -d "{\"reason\":\"restart: $reason — claims back on\"}" >/dev/null
 log "up: $(./bin/box -tenant davenport -daemon "unix:$sock" status | head -1)"
 log "room: http://127.0.0.1:8477/ ($(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8477/))"

@@ -269,6 +269,14 @@ forge reaches a private HTTPS remote only through the credential channel
 `../project-box-state/`, beside the checkout rather than inside it — a
 workspace under the checkout would advertise the checkout (issue #73).
 
+`hack/dogfood/install.sh` is how the box survives the host (issue #113):
+run once, it generates and enables `systemd --user` units — WSL2 with
+systemd enabled, or any Linux user session bus — for the daemon and the
+control room, so a machine reboot or a crash-restart comes back on its own
+rather than needing someone to re-run `run.sh` by hand. `restart.sh` is the
+same lifecycle through those units, keeping the chain's stop/resume record
+intact around a `systemctl --user restart`.
+
 ## Web control room
 
 `web/` (Lit + @lit-labs/router + Jack Henry Design System). The bundle is
