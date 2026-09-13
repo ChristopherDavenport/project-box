@@ -313,7 +313,7 @@ func TestFreeRecheckSpendsNoAttempt(t *testing.T) {
 		t.Fatalf("builder ran %d times before the first park, want 1", builder.n)
 	}
 
-	retried, err := q.Retry(ctx, tn, "wi-81d", "chris", "try again")
+	retried, err := q.Retry(ctx, tn, "wi-81d", queue.Identity{Name: "chris"}, "try again")
 	if err != nil {
 		t.Fatal(err)
 	}

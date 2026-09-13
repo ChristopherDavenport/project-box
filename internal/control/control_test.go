@@ -187,7 +187,7 @@ func TestFailedItemThatOnceParkedStillLists(t *testing.T) {
 	if _, err := q.Park(ctx, w, lease, queue.SeverityHigh, "gate flaked"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.Retry(ctx, tn, "wi-park-retry-fail", "chris", "try again"); err != nil {
+	if _, err := q.Retry(ctx, tn, "wi-park-retry-fail", queue.Identity{Name: "chris"}, "try again"); err != nil {
 		t.Fatal(err)
 	}
 	w, err = q.Load(ctx, tn, "wi-park-retry-fail")
@@ -294,7 +294,7 @@ func TestResolvedParkedItemDropsOutOfExceptions(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("before resolve: %+v", got)
 	}
-	if _, err := q.Resolve(ctx, tn, "wi-parked", "chris", "nothing to build, closing"); err != nil {
+	if _, err := q.Resolve(ctx, tn, "wi-parked", queue.Identity{Name: "chris"}, "nothing to build, closing"); err != nil {
 		t.Fatal(err)
 	}
 	got, err = r.Exceptions(ctx)

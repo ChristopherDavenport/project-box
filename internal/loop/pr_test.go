@@ -376,7 +376,7 @@ func TestALandingTheRemoteRefusedKeepsTheCommitForTheRetry(t *testing.T) {
 		t.Fatalf("before the retry: %d builds, %d gate runs", builder.n, gateRuns)
 	}
 
-	retried, err := q.Retry(ctx, tn, "wi-land-refused", "chris", "the token has the scope now; land it")
+	retried, err := q.Retry(ctx, tn, "wi-land-refused", queue.Identity{Name: "chris"}, "the token has the scope now; land it")
 	if err != nil {
 		t.Fatal(err)
 	}

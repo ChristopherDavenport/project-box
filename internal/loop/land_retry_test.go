@@ -203,7 +203,7 @@ func TestLandTransientOverBoundParksThenRetryResumesAtLanding(t *testing.T) {
 		t.Fatalf("a land retry must never re-mint the gate's verdict: %d gate records", got)
 	}
 
-	retried, err := q.Retry(ctx, tn, "wi-land-overbound", "chris", "the forge should be back by now")
+	retried, err := q.Retry(ctx, tn, "wi-land-overbound", queue.Identity{Name: "chris"}, "the forge should be back by now")
 	if err != nil {
 		t.Fatal(err)
 	}

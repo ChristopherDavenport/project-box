@@ -208,7 +208,7 @@ func TestDoneReleasesCascadeParkedDependents(t *testing.T) {
 	}
 
 	// root is retried and lands this time.
-	w, err = qu.Retry(ctx, tn, "root", "operator", "flaky gate, retrying")
+	w, err = qu.Retry(ctx, tn, "root", Identity{Name: "operator"}, "flaky gate, retrying")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,7 +304,7 @@ func TestParkAfterReleaseDoesNotRecascade(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	w, err = qu.Retry(ctx, tn, "root", "operator", "retry")
+	w, err = qu.Retry(ctx, tn, "root", Identity{Name: "operator"}, "retry")
 	if err != nil {
 		t.Fatal(err)
 	}

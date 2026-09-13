@@ -35,7 +35,7 @@ func TestResolveClosesAnExceptionWithoutALanding(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	park(t, qu, "wi-1", "escalated by mason: already implemented by ab8ccfb")
 
-	got, err := qu.Resolve(ctx, tn, "wi-1", "chris", "agreed — closing the issue instead")
+	got, err := qu.Resolve(ctx, tn, "wi-1", Identity{Name: "chris"}, "agreed — closing the issue instead")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestResolveClosesAnExceptionWithoutALanding(t *testing.T) {
 func TestResolveIsAttributedToTheOperator(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	park(t, qu, "wi-1", "gate flake")
-	if _, err := qu.Resolve(ctx, tn, "wi-1", "chris", "not worth a retry"); err != nil {
+	if _, err := qu.Resolve(ctx, tn, "wi-1", Identity{Name: "chris"}, "not worth a retry"); err != nil {
 		t.Fatal(err)
 	}
 	var actor string
@@ -94,7 +94,7 @@ func TestRetryReturnsParkedWorkToTheQueue(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	park(t, qu, "wi-1", "gate timed out")
 
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "gate was flaky; try again")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "gate was flaky; try again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +157,7 @@ func TestRetryKeepsTheResumePointUnlessToldToRebuild(t *testing.T) {
 		t.Fatal("setup: ParkKeeping dropped the resume point")
 	}
 
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "let's ask the gate again")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "let's ask the gate again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -185,7 +185,7 @@ func TestRetryWithRebuildInTheNoteDropsTheResumePoint(t *testing.T) {
 		id := fmt.Sprintf("wi-rebuild-%d", i)
 		parkKeeping(t, qu, id, "gate refused")
 
-		got, err := qu.Retry(ctx, tn, id, "chris", note)
+		got, err := qu.Retry(ctx, tn, id, Identity{Name: "chris"}, note)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -227,7 +227,7 @@ func TestRetryOfAKeptCommitResetsTheRebaseCount(t *testing.T) {
 	parkKeepingAfterRebases(t, qu, "wi-1",
 		"rebased onto a moving branch 2 times, at the attempt budget of 2 — parking rather than chasing it again", 2)
 
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "try again")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "try again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestRetryOfAKeptCommitWithNoRebasesLeavesTheNotePlain(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	parkKeeping(t, qu, "wi-1", "gate refused")
 
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "let's ask the gate again")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "let's ask the gate again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -277,7 +277,7 @@ func TestRetryWithRebuildResetsTheRebaseCountWithoutTheMachineSuffix(t *testing.
 	qu, ctx := q(t), context.Background()
 	parkKeepingAfterRebases(t, qu, "wi-1", "gate refused", 2)
 
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "rebuild from scratch")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "rebuild from scratch")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestRetryOfAFailedItemResetsTheRebaseCountWithoutTheMachineSuffix(t *testin
 		t.Fatal("setup: Fail should already drop the resume point, including the rebase count")
 	}
 
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "try again")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "try again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestResolveAlwaysDropsTheResumePoint(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	parkKeeping(t, qu, "wi-1", "gate refused")
 
-	got, err := qu.Resolve(ctx, tn, "wi-1", "chris", "already implemented, nothing to rebuild")
+	got, err := qu.Resolve(ctx, tn, "wi-1", Identity{Name: "chris"}, "already implemented, nothing to rebuild")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestResolveDoesNotAddARebaseResetNote(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	parkKeepingAfterRebases(t, qu, "wi-1", "gate refused", 2)
 
-	got, err := qu.Resolve(ctx, tn, "wi-1", "chris", "already implemented, nothing to rebuild")
+	got, err := qu.Resolve(ctx, tn, "wi-1", Identity{Name: "chris"}, "already implemented, nothing to rebuild")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -369,9 +369,9 @@ func TestOnlyAnExceptionCanBeReopened(t *testing.T) {
 	for _, verb := range []string{"resolve", "retry"} {
 		var err error
 		if verb == "resolve" {
-			_, err = qu.Resolve(ctx, tn, "wi-1", "chris", "closing")
+			_, err = qu.Resolve(ctx, tn, "wi-1", Identity{Name: "chris"}, "closing")
 		} else {
-			_, err = qu.Retry(ctx, tn, "wi-1", "chris", "again")
+			_, err = qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "again")
 		}
 		if err == nil {
 			t.Fatalf("%s took a claimed item off a queue it was never on", verb)
@@ -387,7 +387,7 @@ func TestOnlyAnExceptionCanBeReopened(t *testing.T) {
 func TestResolveDemandsAReason(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	park(t, qu, "wi-1", "escalated")
-	if _, err := qu.Resolve(ctx, tn, "wi-1", "chris", ""); err == nil {
+	if _, err := qu.Resolve(ctx, tn, "wi-1", Identity{Name: "chris"}, ""); err == nil {
 		t.Fatal("an exception was closed with no reason on the record")
 	}
 }
@@ -525,7 +525,7 @@ func TestARebuildIsWokenKnowingWhatRefusedTheLastAttempt(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "rebuild: admit the list-item form")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "rebuild: admit the list-item form")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -587,7 +587,7 @@ func TestARebuildIsWokenKnowingWhatRefusedTheLastAttempt(t *testing.T) {
 func TestARetryThatKeepsTheCommitCarriesNoPrior(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	parkKeeping(t, qu, "wi-1", "gate refused")
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "the gate was flaky; try again")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "the gate was flaky; try again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,7 +619,7 @@ func TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason(t *testing.T
 		t.Fatal(err)
 	}
 
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "try it again, nothing to change")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "try it again, nothing to change")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -664,7 +664,7 @@ func TestRetryOfAFailedItemWithNoGateVerdictsCarriesAnEmptyList(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	fail(t, qu, "wi-1", "runner died before it ever built anything")
 
-	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "try again")
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "try again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -687,7 +687,7 @@ func TestResolveOfAFailedItemClosesItWithoutALanding(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	fail(t, qu, "wi-1", "repeated gate refusal, not worth another attempt")
 
-	got, err := qu.Resolve(ctx, tn, "wi-1", "chris", "agreed — not worth pursuing")
+	got, err := qu.Resolve(ctx, tn, "wi-1", Identity{Name: "chris"}, "agreed — not worth pursuing")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -767,9 +767,9 @@ func TestNeitherVerbReopensAnItemThatIsNeitherParkedNorFailed(t *testing.T) {
 
 			var err error
 			if verb == "resolve" {
-				_, err = qu.Resolve(ctx, tn, id, "chris", "closing")
+				_, err = qu.Resolve(ctx, tn, id, Identity{Name: "chris"}, "closing")
 			} else {
-				_, err = qu.Retry(ctx, tn, id, "chris", "again")
+				_, err = qu.Retry(ctx, tn, id, Identity{Name: "chris"}, "again")
 			}
 			if err == nil {
 				t.Fatalf("%s took a %s item off a queue it was never on", verb, s.name)

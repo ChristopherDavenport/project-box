@@ -27,7 +27,11 @@ type Client struct {
 }
 
 // Dial connects to "unix:/path" or "tcp:host:port" (http). Token may be
-// empty for unix sockets.
+// empty for unix sockets. actor is an EXPLICIT X-Box-Actor on-behalf-of
+// claim, sent only when non-empty — the daemon's own identity for a write is
+// always the socket's peer, never this header, so leave actor empty unless
+// the caller deliberately means to claim to act on another subject's behalf
+// (and the daemon's own allowlist permits it).
 func Dial(spec, token, actor string) (*Client, error) {
 	switch {
 	case strings.HasPrefix(spec, "unix:"):

@@ -439,7 +439,7 @@ func TestRetryStartsTheClockAndTheTallyAgain(t *testing.T) {
 	}
 
 	// An operator retries it; it parks again an hour later.
-	if _, err := w.queue.Retry(ctx, tn, "wi-1", "chris", "the gate was flaky"); err != nil {
+	if _, err := w.queue.Retry(ctx, tn, "wi-1", queue.Identity{Name: "chris"}, "the gate was flaky"); err != nil {
 		t.Fatal(err)
 	}
 	w.advance(time.Minute)

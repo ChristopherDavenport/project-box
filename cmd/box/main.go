@@ -46,7 +46,7 @@ func run(args []string) error {
 	daemon := fs.String("daemon", "", "daemon API address (unix:/path or tcp:host:port); talks to boxd instead of opening the store")
 	token := fs.String("token", "", "bearer token for a tcp daemon")
 	tn := fs.String("tenant", "", "tenant id")
-	actor := fs.String("actor", os.Getenv("USER"), "operator subject")
+	actor := fs.String("actor", "", "X-Box-Actor on-behalf-of claim sent to a daemon (rare — the socket already knows who called); direct-store mode falls back to $USER")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -73,7 +73,7 @@ func run(args []string) error {
 		if *tn == "" {
 			*tn = cx.Tenant
 		}
-		if cx.Actor != "" && *actor == os.Getenv("USER") {
+		if cx.Actor != "" && *actor == "" {
 			*actor = cx.Actor
 		}
 		_ = name
@@ -90,8 +90,14 @@ func run(args []string) error {
 	}
 	defer s.Close()
 	ctx := context.Background()
-	room := &control.Room{Store: s, Tenant: t, Actor: *actor}
-	q := &queue.Queue{Store: s, Runner: *actor}
+	// Direct-store mode has no socket to assert a peer, so it keeps its
+	// pre-existing actor behavior: an explicit -actor, or $USER.
+	directActor := *actor
+	if directActor == "" {
+		directActor = os.Getenv("USER")
+	}
+	room := &control.Room{Store: s, Tenant: t, Actor: directActor}
+	q := &queue.Queue{Store: s, Runner: directActor}
 	rest := fs.Args()[1:]
 
 	switch fs.Arg(0) {
@@ -122,7 +128,7 @@ func run(args []string) error {
 		if len(rest) == 0 {
 			return fmt.Errorf("stop needs a reason — it becomes the record")
 		}
-		if err := q.Stop(ctx, t, *actor, rest[0]); err != nil {
+		if err := q.Stop(ctx, t, directActor, rest[0]); err != nil {
 			return err
 		}
 		fmt.Println("stopped: no new claims until resume")
@@ -130,7 +136,7 @@ func run(args []string) error {
 		if len(rest) == 0 {
 			return fmt.Errorf("resume needs a reason — it becomes the record")
 		}
-		if err := q.Resume(ctx, t, *actor, rest[0]); err != nil {
+		if err := q.Resume(ctx, t, directActor, rest[0]); err != nil {
 			return err
 		}
 		fmt.Println("resumed")

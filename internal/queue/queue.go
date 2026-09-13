@@ -444,6 +444,19 @@ type Queue struct {
 	TTL time.Duration
 }
 
+// Identity is who an operator-initiated write is attributed to: Name and Pid
+// come from the wire itself — a unix socket's SO_PEERCRED, resolved to an
+// account name, never a header the caller wrote — and OnBehalfOf is empty
+// unless the operator carried an X-Box-Actor claim the box's own allowlist
+// named. Name always lands as the evidence record's Actor; a claim only ever
+// rides OnBehalfOf beside it, because delegation intersects and a caller's
+// assertion narrows who authority was exercised for, never who exercised it.
+type Identity struct {
+	Name       string
+	Pid        int32
+	OnBehalfOf string
+}
+
 func scope(id string) string { return "workitem/" + id }
 
 // gateVerdict is a [forge.Verdict] read back off the chain. Unmarshalled by
@@ -799,7 +812,7 @@ func (q *Queue) releaseDependents(ctx context.Context, t tenant.ID, id string) e
 		if dep.State != StateParked || dep.ParkedBy != id {
 			continue
 		}
-		if _, err := q.reopen(ctx, t, dep.ID, q.Runner, StatePending, "retried", fmt.Sprintf("dependency %s landed", id)); err != nil {
+		if _, err := q.reopen(ctx, t, dep.ID, Identity{Name: q.Runner}, StatePending, "retried", fmt.Sprintf("dependency %s landed", id)); err != nil {
 			return err
 		}
 	}
@@ -872,11 +885,11 @@ func (q *Queue) Recover(ctx context.Context, w WorkItem) (WorkItem, bool, error)
 // An exception queue nobody can clear is a list, not a queue. A failed item
 // was the same story with no escalation at all: a person could neither
 // retry it nor close it out.
-func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id, actor, why string) (WorkItem, error) {
+func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id string, who Identity, why string) (WorkItem, error) {
 	if why == "" {
 		return WorkItem{}, errors.New("queue: resolve needs a reason — closing an exception is a judgement and the record must carry whose")
 	}
-	return q.reopen(ctx, t, id, actor, StateResolved, "resolved", why)
+	return q.reopen(ctx, t, id, who, StateResolved, "resolved", why)
 }
 
 // Retry returns a parked or failed item to the queue for another attempt,
@@ -895,14 +908,14 @@ func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id, actor, why string)
 // dropped its resume point — so its retry is always a rebuild, whatever the
 // note says, and carries the failure reason forward as the rebuilt attempt's
 // Prior.Reason.
-func (q *Queue) Retry(ctx context.Context, t tenant.ID, id, actor, note string) (WorkItem, error) {
-	return q.reopen(ctx, t, id, actor, StatePending, "retried", note)
+func (q *Queue) Retry(ctx context.Context, t tenant.ID, id string, who Identity, note string) (WorkItem, error) {
+	return q.reopen(ctx, t, id, who, StatePending, "retried", note)
 }
 
 // reopen is the one transition off the exception queue, in both directions it
 // can go. Only a parked or failed item may take it: an operator resolving
 // something still running would race the runner that holds its lease.
-func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to State, kind, note string) (WorkItem, error) {
+func (q *Queue) reopen(ctx context.Context, t tenant.ID, id string, who Identity, to State, kind, note string) (WorkItem, error) {
 	w, err := q.Load(ctx, t, id)
 	if err != nil {
 		return WorkItem{}, err
@@ -938,7 +951,7 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 			return WorkItem{}, fmt.Errorf("queue: reopen: reading %s's prior verdicts: %w", id, verr)
 		}
 		w.Prior = &agent.Prior{Run: w.ID, Repo: w.Repo, Sha: w.Built,
-			Verdicts: verdicts, RetriedBy: actor, RetryNote: note}
+			Verdicts: verdicts, RetriedBy: who.Name, RetryNote: note}
 		if wasFailed {
 			// w.Note is still what Fail recorded — the operator's own note
 			// below this overwrites it. Reason is what reported the trouble
@@ -974,10 +987,20 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 	w.ParkedBy = ""
 	// The actor is the operator, not the runner: this is the one transition a
 	// person makes by hand, and an audit that could not tell it from the
-	// daemon's own work would be missing the only human act in the loop.
+	// daemon's own work would be missing the only human act in the loop. Pid
+	// is the wire's own credential, never a claim. OnBehalfOf defaults to the
+	// item's own Requester, same as every other write on this chain, but an
+	// operator's allowed claim wins over it: the claim is a deliberate
+	// assertion for THIS call, where the Requester is only what the
+	// origination happened to carry, and a person who said "acting for X"
+	// meant it more specifically than the item's own ambient attribution.
+	onBehalfOf := w.Requester
+	if who.OnBehalfOf != "" {
+		onBehalfOf = who.OnBehalfOf
+	}
 	if _, err := q.Store.Log().Append(ctx, evidence.Record{
 		Tenant: w.Tenant, Scope: scope(w.ID), Kind: kind, Subject: w.ID,
-		Actor: actor, OnBehalfOf: w.Requester, Body: mustMarshal(w),
+		Actor: who.Name, Pid: who.Pid, OnBehalfOf: onBehalfOf, Body: mustMarshal(w),
 	}); err != nil {
 		return w, err
 	}

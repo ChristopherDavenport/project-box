@@ -175,7 +175,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	httpSrv := &http.Server{Handler: apiSrv.Handler()}
+	httpSrv := &http.Server{Handler: apiSrv.Handler(), ConnContext: api.ConnContext}
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("api server", "err", err)

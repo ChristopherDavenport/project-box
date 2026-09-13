@@ -1058,3 +1058,83 @@ boxes:
 		}
 	}
 }
+
+// TestActorClaimsAbsentByDefault: an unset allowlist is not a lax one — it
+// parses to no entries at all, which the api package reads as "no claim is
+// ever honored" (see internal/api/api.go's mustActor).
+func TestActorClaimsAbsentByDefault(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.ActorClaims) != 0 {
+		t.Fatalf("actor_claims = %v, want none absent from the file", c.ActorClaims)
+	}
+}
+
+// TestActorClaimsLoads: the ordinary case, an operator naming who may be
+// claimed as an on-behalf-of over the API.
+func TestActorClaimsLoads(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+actor_claims: [chris, ci-bot]
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"chris", "ci-bot"}; len(c.ActorClaims) != len(want) || c.ActorClaims[0] != want[0] || c.ActorClaims[1] != want[1] {
+		t.Fatalf("actor_claims = %v, want %v", c.ActorClaims, want)
+	}
+}
+
+// TestActorClaimsRefusesAnEmptyEntry: a name-shaped list with a hole in it is
+// a config an operator almost certainly did not mean, and unknown must not
+// read as zero — silently admitting an empty claim would be exactly that.
+func TestActorClaimsRefusesAnEmptyEntry(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+actor_claims: [chris, ""]
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err == nil || !strings.Contains(err.Error(), "actor_claims") {
+		t.Fatalf("err = %v, want it to name actor_claims", err)
+	}
+}
+
+// TestActorClaimsRefusesADuplicate: two entries naming the same claim are
+// certainly a mistake, not an intensified grant — the allowlist is a set,
+// and Load should say so rather than silently deduplicating.
+func TestActorClaimsRefusesADuplicate(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+actor_claims: [chris, chris]
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err == nil || !strings.Contains(err.Error(), "chris") {
+		t.Fatalf("err = %v, want it to name the duplicated claim", err)
+	}
+}

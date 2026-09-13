@@ -69,8 +69,17 @@ type Config struct {
 	Retention    Retention `yaml:"retention"`
 	// Runs is the run log's policy: how long what an agent did while it ran
 	// stays readable after the run. Telemetry, kept beside the chain.
-	Runs  Runs  `yaml:"runs"`
-	Boxes []Box `yaml:"boxes"`
+	Runs Runs `yaml:"runs"`
+	// ActorClaims is the allowlist an X-Box-Actor header must appear in to be
+	// honored at all. The daemon's own identity for a mutating write is
+	// always the unix-socket peer SO_PEERCRED asserted — never this header,
+	// which is a caller's claim rather than an authenticated fact — so a
+	// name in this list only ever lands as OnBehalfOf beside the peer's own
+	// name, never in place of it. Absent means no claim is ever honored: an
+	// unclaimed daemon is not a laxer one, because delegation intersects and
+	// an empty allowlist is the empty intersection.
+	ActorClaims []string `yaml:"actor_claims"`
+	Boxes       []Box    `yaml:"boxes"`
 }
 
 // Runs is the retention of the run log — every tool call and its title, what
@@ -848,6 +857,16 @@ func (c *Config) validate() error {
 	if half := (c.Retention.Keep > 0) != (c.Retention.KeepForDuration() > 0); half {
 		return fmt.Errorf("boxcfg: retention needs BOTH keep and keep_for (got keep=%d keep_for=%q) — a count alone would flatten a quiet scope's whole history the moment it crossed the number, and an age alone would leave a busy one entirely hot",
 			c.Retention.Keep, c.Retention.KeepFor)
+	}
+	seenClaims := map[string]bool{}
+	for _, claim := range c.ActorClaims {
+		if claim == "" {
+			return fmt.Errorf("boxcfg: actor_claims has an empty entry — every claim needs a name to allow")
+		}
+		if seenClaims[claim] {
+			return fmt.Errorf("boxcfg: actor_claims: %q is listed twice", claim)
+		}
+		seenClaims[claim] = true
 	}
 	if len(c.Boxes) == 0 {
 		return fmt.Errorf("boxcfg: no boxes configured")

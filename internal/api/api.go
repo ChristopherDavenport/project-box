@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -110,8 +111,13 @@ type Server struct {
 	// process has run, which /v1/status must also read as the fields being
 	// absent — a restart carries no memory of a pass from before it.
 	LastPass func() (at time.Time, decision, reason string, ok bool)
+	// ActorClaims is the allowlist an X-Box-Actor claim must appear in to be
+	// honored at all — see [boxcfg.Config.ActorClaims]. Nil, cmd/boxd's flag
+	// path, refuses every claim: the peer still becomes Actor, but no header
+	// ever reaches OnBehalfOf. Swappable on reload, same as Routes.
+	ActorClaims []string
 
-	mu sync.RWMutex // guards Routes and Token swaps
+	mu sync.RWMutex // guards Routes, ActorClaims and Token swaps
 }
 
 // SetRoutes swaps the route table on reload.
@@ -119,6 +125,22 @@ func (s *Server) SetRoutes(r map[string]ingress.Route) {
 	s.mu.Lock()
 	s.Routes = r
 	s.mu.Unlock()
+}
+
+// SetActorClaims swaps the X-Box-Actor allowlist on reload — a box that
+// tightens or loosens who may be claimed should not need a restart to mean
+// it, and a stale allowlist surviving a reload would be a widened envelope
+// nobody asked for.
+func (s *Server) SetActorClaims(claims []string) {
+	s.mu.Lock()
+	s.ActorClaims = claims
+	s.mu.Unlock()
+}
+
+func (s *Server) claimAllowed(claim string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return slices.Contains(s.ActorClaims, claim)
 }
 
 func (s *Server) route(name string) (ingress.Route, bool) {
@@ -191,19 +213,57 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// actor is who a mutating request acts as. With bearer auth this is still
-// the operator's own claim; OIDC turns it into a verified subject.
-func (s *Server) actor(r *http.Request) string {
-	if a := r.Header.Get("X-Box-Actor"); a != "" {
-		return a
+// mustActor resolves who a MUTATING request acts as: the peer the socket
+// itself asserted, kernel credentials rather than anything the caller wrote.
+// A connection with no resolvable peer — a TCP test server, non-linux, no
+// ucred available — is refused outright rather than defaulted to any name;
+// "local-operator" does not exist here for the same reason. An X-Box-Actor
+// header is a claim, never an identity: honored only when it appears in this
+// box's own allowlist, in which case it lands in Identity.OnBehalfOf while
+// the peer stays Identity.Name — delegation intersects and a claim only ever
+// narrows who authority was exercised for, never replaces who exercised it.
+// An unlisted claim refuses the whole request, not just the claim, so a
+// caller cannot silently fall back to acting as the peer when the
+// on-behalf-of it asked for was refused.
+func (s *Server) mustActor(r *http.Request) (queue.Identity, error) {
+	cred := peerFromContext(r.Context())
+	if !cred.ok {
+		return queue.Identity{}, fmt.Errorf("no unix-socket peer was asserted for this connection — mutating calls require one")
 	}
-	return "local-operator"
+	id := queue.Identity{Name: accountName(cred.uid), Pid: cred.pid}
+	if claim := r.Header.Get("X-Box-Actor"); claim != "" {
+		if !s.claimAllowed(claim) {
+			return queue.Identity{}, fmt.Errorf("actor claim %q is not in this box's allowlist", claim)
+		}
+		id.OnBehalfOf = claim
+	}
+	return id, nil
+}
+
+// refuseActor writes mustActor's refusal in the api package's error
+// envelope. 403: the connection is authenticated (it is a socket peer or it
+// would not have reached the handler) but not authorized for this claim or
+// for writing at all.
+func refuseActor(w http.ResponseWriter, err error) {
+	httpErrCode(w, http.StatusForbidden, "actor_required", err.Error())
+}
+
+// peerName is a best-effort peer for READ-ONLY context: unlike mustActor it
+// never refuses, because a GET must answer over whatever transport reaches
+// it — tests and `box room`'s browser-facing surface both drive reads over
+// plain TCP. Empty is the honest "unknown" a read has no reason to reject.
+func (s *Server) peerName(r *http.Request) string {
+	cred := peerFromContext(r.Context())
+	if !cred.ok {
+		return ""
+	}
+	return accountName(cred.uid)
 }
 
 // room is this request's control surface, carrying the server's objective so
 // every reader measures the queue against the same number.
 func (s *Server) room(r *http.Request) *control.Room {
-	return &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.actor(r),
+	return &control.Room{Store: s.Store, Tenant: s.Tenant, Actor: s.peerName(r),
 		Objective: s.Objective, Live: s.Live}
 }
 
@@ -539,8 +599,13 @@ func (s *Server) retry(w http.ResponseWriter, r *http.Request) {
 // whose planning failed is on that queue before any item exists, so the same
 // verb reaches it through the plan store and answers in the item's shape.
 func (s *Server) reopen(w http.ResponseWriter, r *http.Request,
-	f func(context.Context, tenant.ID, string, string, string) (queue.WorkItem, error),
+	f func(context.Context, tenant.ID, string, queue.Identity, string) (queue.WorkItem, error),
 	planned queue.State, g func(context.Context, string, string, string) error) {
+	who, err := s.mustActor(r)
+	if err != nil {
+		refuseActor(w, err)
+		return
+	}
 	var req ControlRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpErr(w, http.StatusBadRequest, "a JSON body with a reason is required")
@@ -552,14 +617,14 @@ func (s *Server) reopen(w http.ResponseWriter, r *http.Request,
 			httpErr(w, http.StatusNotFound, "no plan store: "+id+" cannot be reopened here")
 			return
 		}
-		if err := g(r.Context(), id, s.actor(r), req.Reason); err != nil {
+		if err := g(r.Context(), id, who.Name, req.Reason); err != nil {
 			httpErr(w, http.StatusConflict, err.Error())
 			return
 		}
 		writeJSON(w, queue.WorkItem{ID: id, Tenant: s.Tenant, Ingress: id, State: planned, Note: req.Reason})
 		return
 	}
-	item, err := f(r.Context(), s.Tenant, id, s.actor(r), req.Reason)
+	item, err := f(r.Context(), s.Tenant, id, who, req.Reason)
 	switch {
 	case errors.Is(err, queue.ErrNoItem):
 		httpErr(w, http.StatusNotFound, err.Error())
@@ -574,12 +639,17 @@ func (s *Server) reopen(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) control(w http.ResponseWriter, r *http.Request, f func(context.Context, tenant.ID, string, string) error) {
+	who, err := s.mustActor(r)
+	if err != nil {
+		refuseActor(w, err)
+		return
+	}
 	var req ControlRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Reason) == "" {
 		httpErr(w, 400, "a reason is required — it becomes the record")
 		return
 	}
-	if err := f(r.Context(), s.Tenant, s.actor(r), req.Reason); err != nil {
+	if err := f(r.Context(), s.Tenant, who.Name, req.Reason); err != nil {
 		httpErr(w, 500, err.Error())
 		return
 	}
@@ -591,7 +661,12 @@ func (s *Server) reload(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotImplemented, "this daemon was started without a config file; reload needs one")
 		return
 	}
-	summary, err := s.Reload(r.Context(), s.actor(r))
+	who, err := s.mustActor(r)
+	if err != nil {
+		refuseActor(w, err)
+		return
+	}
+	summary, err := s.Reload(r.Context(), who.Name)
 	if err != nil {
 		httpErr(w, http.StatusUnprocessableEntity, err.Error())
 		return

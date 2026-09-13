@@ -93,10 +93,10 @@ func TestReopeningDropsTheSeverity(t *testing.T) {
 		reopen func(*Queue) (WorkItem, error)
 	}{
 		{"retry", func(qu *Queue) (WorkItem, error) {
-			return qu.Retry(context.Background(), tn, "wi-1", "chris", "try again")
+			return qu.Retry(context.Background(), tn, "wi-1", Identity{Name: "chris"}, "try again")
 		}},
 		{"resolve", func(qu *Queue) (WorkItem, error) {
-			return qu.Resolve(context.Background(), tn, "wi-1", "chris", "handled by hand")
+			return qu.Resolve(context.Background(), tn, "wi-1", Identity{Name: "chris"}, "handled by hand")
 		}},
 	} {
 		t.Run(tc.verb, func(t *testing.T) {

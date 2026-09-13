@@ -3,10 +3,13 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -14,6 +17,38 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
+
+// dialSocket serves the daemon's API over a real unix socket with the peer
+// credential wiring production uses (ConnContext), so a test exercising a
+// mutating endpoint gets a resolvable peer the same way boxd does — a TCP
+// httptest.Server, used elsewhere here for read-only calls, has none.
+func dialSocket(t *testing.T, d *Daemon) *api.Client {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "boxd.sock")
+	ln, err := api.Listen("unix:" + sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := &http.Server{Handler: d.API.Handler(), ConnContext: api.ConnContext}
+	go hs.Serve(ln)
+	t.Cleanup(func() { hs.Close() })
+	c, err := api.Dial("unix:"+sock, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// selfAccountName is who SO_PEERCRED names this test process's own uid as —
+// the identity a socket-connected client above asserts with no claim.
+func selfAccountName(t *testing.T) string {
+	t.Helper()
+	u, err := user.LookupId(strconv.Itoa(os.Getuid()))
+	if err != nil || u.Username == "" {
+		return "uid:" + strconv.Itoa(os.Getuid())
+	}
+	return u.Username
+}
 
 func bare(t *testing.T, name string) string {
 	t.Helper()
@@ -74,12 +109,7 @@ func TestReloadAddsARepoWithoutRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { d.Close() })
-	ts := httptest.NewServer(d.API.Handler())
-	t.Cleanup(ts.Close)
-	c, err := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
-	if err != nil {
-		t.Fatal(err)
-	}
+	c := dialSocket(t, d)
 
 	// The original config works.
 	if _, err := c.OpenIngress(ctx, "shop-api", "api-1", "first change", ""); err != nil {
@@ -117,13 +147,15 @@ func TestReloadAddsARepoWithoutRestart(t *testing.T) {
 	if out := mustGit(t, webRem, "log", "--format=%s", "refs/heads/main"); !strings.Contains(out, "work") {
 		t.Fatalf("reloaded repo's remote never moved:\n%s", out)
 	}
-	// The reload is on the record: who, and what shape.
+	// The reload is on the record: who, and what shape. The actor is the
+	// socket's own peer — this client carried no X-Box-Actor claim.
+	wantActor := selfAccountName(t)
 	saw := false
 	for r, err := range d.store.Log().Since(ctx, tenant.ID("acme"), "control/config", 1) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if r.Kind == "config-reloaded" && r.Actor == "chris" && strings.Contains(string(r.Body), "executors=2") {
+		if r.Kind == "config-reloaded" && r.Actor == wantActor && strings.Contains(string(r.Body), "executors=2") {
 			saw = true
 		}
 	}

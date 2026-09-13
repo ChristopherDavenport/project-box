@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/ChristopherDavenport/project-box/internal/api"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 )
 
@@ -109,19 +110,25 @@ func openAndFail(t *testing.T, d *Daemon, key, reason string) ingress.Ingress {
 }
 
 // postResolve drives POST /v1/items/{id}/resolve over the daemon's own API
-// handler, the same surface a person's `box resolve` reaches.
+// handler, the same surface a person's `box resolve` reaches — over a real
+// unix socket, since a resolve is a mutating call and only a socket peer can
+// satisfy it (see internal/api's mustActor).
 func postResolve(t *testing.T, d *Daemon, id, note string) {
 	t.Helper()
-	ts := httptest.NewServer(d.API.Handler())
-	defer ts.Close()
-	resp, err := http.Post(ts.URL+"/v1/items/"+id+"/resolve", "application/json",
-		strings.NewReader(`{"reason":"`+note+`"}`))
+	sock := filepath.Join(t.TempDir(), "boxd.sock")
+	ln, err := api.Listen("unix:" + sock)
 	if err != nil {
-		t.Fatalf("POST resolve: %v", err)
+		t.Fatal(err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("POST resolve: status %d", resp.StatusCode)
+	hs := &http.Server{Handler: d.API.Handler(), ConnContext: api.ConnContext}
+	go hs.Serve(ln)
+	defer hs.Close()
+	c, err := api.Dial("unix:"+sock, "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Reopen(context.Background(), "resolve", id, note); err != nil {
+		t.Fatalf("POST resolve: %v", err)
 	}
 }
 

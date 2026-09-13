@@ -1910,7 +1910,7 @@ func TestRetriedGateNowPassingLandsWithoutRebuilding(t *testing.T) {
 		t.Fatalf("builder ran %d times before the first park", builder.n)
 	}
 
-	retried, err := q.Retry(ctx, tn, "wi-regate-pass", "chris", "gate was probably flaky; try again")
+	retried, err := q.Retry(ctx, tn, "wi-regate-pass", queue.Identity{Name: "chris"}, "gate was probably flaky; try again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1989,7 +1989,7 @@ func TestRetriedGateStillFailingRebuilds(t *testing.T) {
 		t.Fatalf("builder ran %d times before the first park", builder.n)
 	}
 
-	retried, err := q.Retry(ctx, tn, "wi-regate-fail", "chris", "try again")
+	retried, err := q.Retry(ctx, tn, "wi-regate-fail", queue.Identity{Name: "chris"}, "try again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2048,7 +2048,7 @@ func TestRetryWithNoWorkspaceLeftGoesStraightToTheBuilder(t *testing.T) {
 		t.Fatalf("builder ran %d times", builder.n)
 	}
 
-	retried, err := q.Retry(ctx, tn, "wi-regate-nows", "chris", "try again")
+	retried, err := q.Retry(ctx, tn, "wi-regate-nows", queue.Identity{Name: "chris"}, "try again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2485,7 +2485,7 @@ func TestParkedGateErrorResumesAtGateNotBuilder(t *testing.T) {
 		t.Fatalf("builder ran %d times before the park", builder.n)
 	}
 
-	retried, err := q.Retry(ctx, tn, "wi-gateerror-resume", "chris", "probably flaky; try again")
+	retried, err := q.Retry(ctx, tn, "wi-gateerror-resume", queue.Identity{Name: "chris"}, "probably flaky; try again")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2990,7 +2990,7 @@ func TestSameCommitFreeRecheckPassRecordsFlaky(t *testing.T) {
 	}
 	refusedHead := item.Built
 
-	retried, err := q.Retry(ctx, tn, "wi-flake-g", "chris", "gate was probably flaky; try again")
+	retried, err := q.Retry(ctx, tn, "wi-flake-g", queue.Identity{Name: "chris"}, "gate was probably flaky; try again")
 	if err != nil {
 		t.Fatal(err)
 	}

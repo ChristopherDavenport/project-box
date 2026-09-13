@@ -290,10 +290,11 @@ func New(path string) (*Daemon, error) {
 		Store: s, Tenant: t, Routes: routes,
 		Router: router,
 		Queue:  d.queue, Meter: d.meter, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
-		Plans:   d.plans,
-		Live:    d.live,
-		Started: time.Now(),
-		Reload:  d.reloadForAPI,
+		Plans:       d.plans,
+		Live:        d.live,
+		Started:     time.Now(),
+		Reload:      d.reloadForAPI,
+		ActorClaims: cfg.ActorClaims,
 		// A closure rather than d.build directly: the latter would capture
 		// today's function value, so a later swap of d.build (only ever done
 		// by a test) would leave the API reporting the production seam
@@ -755,6 +756,7 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 	d.pump.Replanner = replanner
 	d.escalator.Kinds = kinds
 	d.API.SetRoutes(routes)
+	d.API.SetActorClaims(ncfg.ActorClaims)
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
 		MaxPerWindow:       ncfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow,
@@ -841,7 +843,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 	if err := d.recordStarted(ctx); err != nil {
 		slog.Error("daemon-started: recording", "err", err)
 	}
-	httpSrv := &http.Server{Handler: d.API.Handler()}
+	httpSrv := &http.Server{Handler: d.API.Handler(), ConnContext: api.ConnContext}
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("api server", "err", err)

@@ -33,10 +33,10 @@ func TestRetryReachesAFailedPlan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hs := &http.Server{Handler: w.srv.Handler()}
+	hs := &http.Server{Handler: w.srv.Handler(), ConnContext: ConnContext}
 	go hs.Serve(ln)
 	t.Cleanup(func() { hs.Close() })
-	c, err := Dial("unix:"+sock, "", "chris")
+	c, err := Dial("unix:"+sock, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

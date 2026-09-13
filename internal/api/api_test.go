@@ -184,11 +184,13 @@ func TestDelegateOverTheWire(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hs := &http.Server{Handler: w.srv.Handler()}
+	hs := &http.Server{Handler: w.srv.Handler(), ConnContext: ConnContext}
 	go hs.Serve(ln)
 	t.Cleanup(func() { hs.Close() })
 
-	c, err := Dial("unix:"+sock, "", "chris")
+	// No X-Box-Actor claim: the peer this socket asserts is the whole
+	// identity, exactly what mustActor requires.
+	c, err := Dial("unix:"+sock, "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,9 +234,12 @@ func TestDelegateOverTheWire(t *testing.T) {
 		t.Fatal(err)
 	}
 	// And the stop is a fact with a name on it, not a bit: the room shows
-	// who pressed it and why without a trip through the activity feed.
+	// who pressed it and why without a trip through the activity feed. The
+	// name is the peer SO_PEERCRED asserted for this process's own socket
+	// connection, never a claim — there is none on this client.
+	wantActor := accountName(uint32(os.Getuid()))
 	st, err = c.Status(ctx)
-	if err != nil || !st.Stopped || !st.Claims.Stopped || st.Claims.Reason != "investigating" || st.Claims.Actor != "chris" || st.Claims.At.IsZero() {
+	if err != nil || !st.Stopped || !st.Claims.Stopped || st.Claims.Reason != "investigating" || st.Claims.Actor != wantActor || st.Claims.At.IsZero() {
 		t.Fatalf("status after stop should carry the record: %+v %v", st.Claims, err)
 	}
 	if _, err := c.OpenIngress(ctx, "issues", "issue-10", "more work", ""); err != nil {
