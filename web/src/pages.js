@@ -478,8 +478,14 @@ export function groupFramesBySession(frames) {
  *  `sessions` carries no `session`/`continues` data at all — come back as
  *  roots, in their given order. */
 export function continuationTree(sessions) {
+  // First-wins: a resumed attempt's agent-session record carries the SAME
+  // ACP session id it continued (see acp.Builder), so with an attempts
+  // budget of 4+ several rows can share one `session` value. The first row
+  // to open that session is the one a later row's `continues` should
+  // resolve to — a later write must not steal the entry and misattribute
+  // who continued whom.
   const openedBy = new Map();
-  for (const s of sessions ?? []) if (s.session) openedBy.set(s.session, s.agentref);
+  for (const s of sessions ?? []) if (s.session && !openedBy.has(s.session)) openedBy.set(s.session, s.agentref);
   const childrenOf = new Map();
   const roots = [];
   for (const s of sessions ?? []) {
