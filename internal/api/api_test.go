@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
+	"github.com/ChristopherDavenport/project-box/internal/control"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
@@ -759,6 +761,64 @@ func TestFlakesOverTheWire(t *testing.T) {
 	}
 	if got[0].RefusedHead != "h1" || got[0].PassedHead != "h2" || got[0].WorkItem != "wi-1" {
 		t.Fatalf("the latest proof's detail did not survive the wire: %+v", got[0])
+	}
+}
+
+// TestSectionsOverTheWire: GET /v1/sections serves [control.Room.Sections]
+// per repo, keyed from s.Sections — the declared names an operator wrote
+// into box.yaml, wired at daemon assemble (issue #200) — so a section with
+// no landings yet still appears, at zero, same as the direct-store fold
+// tested in internal/control.
+func TestSectionsOverTheWire(t *testing.T) {
+	w := rig(t)
+	w.srv.Sections = map[string][]string{"app": {"alpha", "beta"}}
+	ts := httptest.NewServer(w.srv.Handler())
+	t.Cleanup(ts.Close)
+
+	ctx := context.Background()
+	q := &queue.Queue{Store: w.srv.Store, Runner: "d", TTL: time.Hour}
+	item, err := q.Submit(ctx, queue.WorkItem{
+		ID: "wi-1", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: "t",
+		Repo: "app", Sections: []string{"alpha"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, lease, err := q.Claim(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.LandedSections, item.LandedPaths = []string{"alpha"}, []string{"alpha/x.go"}
+	if _, err := q.Done(ctx, item, lease, forge.Commit("sha-1")); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := http.Get(ts.URL + "/v1/sections")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatalf("GET /v1/sections: status %d", res.StatusCode)
+	}
+	var out map[string]control.SectionCensus
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		t.Fatal(err)
+	}
+	census, ok := out["app"]
+	if !ok {
+		t.Fatalf("no census for repo app: %+v", out)
+	}
+	byName := map[string]control.SectionStat{}
+	for _, s := range census.Sections {
+		byName[s.Name] = s
+	}
+	if byName["alpha"].Landed != 1 {
+		t.Fatalf("alpha: want 1 landing, got %+v", byName["alpha"])
+	}
+	beta, ok := byName["beta"]
+	if !ok || beta.Landed != 0 {
+		t.Fatalf("beta: declared with no landings yet, want zero not absent: %+v", byName)
 	}
 }
 

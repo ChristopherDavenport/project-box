@@ -290,6 +290,7 @@ func New(path string) (*Daemon, error) {
 		Store: s, Tenant: t, Routes: routes,
 		Router: router,
 		Queue:  d.queue, Meter: d.meter, Box: cfg.Boxes[0].Name, Runner: cfg.Runner,
+		Sections:    declaredSections(cfg),
 		Plans:       d.plans,
 		Live:        d.live,
 		Started:     time.Now(),
@@ -315,6 +316,26 @@ func New(path string) (*Daemon, error) {
 
 // Close releases the daemon's resources.
 func (d *Daemon) Close() error { return d.store.Close() }
+
+// declaredSections builds GET /v1/sections' per-repo declared names from the
+// box configuration (issue #200) — [api.Server.Sections] needs these so a
+// section nobody has landed anything in yet still appears in the census, at
+// zero, rather than being absent because nothing folded ever mentioned it.
+// Keyed by repo across every box the config declares, since a repo's
+// section names are its own regardless of which box builds it.
+func declaredSections(cfg boxcfg.Config) map[string][]string {
+	out := map[string][]string{}
+	for _, bx := range cfg.Boxes {
+		for _, r := range bx.Repos {
+			names := make([]string, 0, len(r.Sections))
+			for _, s := range r.Sections {
+				names = append(names, s.Name)
+			}
+			out[r.Name] = names
+		}
+	}
+	return out
+}
 
 // assemble builds the executor, route and declaration tables from a config —
 // used at New and again at every Reload.

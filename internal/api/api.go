@@ -73,6 +73,13 @@ type Server struct {
 	Meter *capacity.Meter
 	// Box and Runner identify this daemon in /v1/status.
 	Box, Runner string
+	// Sections is each configured repository's declared section names,
+	// keyed by [queue.WorkItem.Repo] — GET /v1/sections needs these to
+	// report a section that has never landed anything at zero rather than
+	// leave it out of the census entirely (issue #200). Wired at assemble
+	// from the box configuration; nil reports every repo as having declared
+	// none.
+	Sections map[string][]string
 	// Objective is the exception queue's response-time objective, reported
 	// on /v1/status beside the measurement so a reader never has to look up
 	// what the number is being judged against. Zero means
@@ -167,6 +174,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/status", s.status)
 	mux.HandleFunc("GET /v1/exceptions", s.exceptions)
 	mux.HandleFunc("GET /v1/flakes", s.flakes)
+	mux.HandleFunc("GET /v1/sections", s.sections)
 	mux.HandleFunc("GET /v1/items", s.items)
 	mux.HandleFunc("GET /v1/items/{id}", s.item)
 	mux.HandleFunc("GET /v1/items/{id}/evidence", s.itemEvidence)
@@ -445,6 +453,25 @@ func (s *Server) flakes(w http.ResponseWriter, r *http.Request) {
 		items = []control.FlakeEntry{}
 	}
 	writeJSON(w, items)
+}
+
+// sections is GET /v1/sections: the per-repository section census folded
+// from the landed chain (issue #200) — what has landed where, what waited
+// on a section and for how long, and which sections tend to change
+// together. Keyed by repo, using s.Sections' declared names so a section
+// that has never landed anything still appears, at zero.
+func (s *Server) sections(w http.ResponseWriter, r *http.Request) {
+	room := s.room(r)
+	out := make(map[string]control.SectionCensus, len(s.Sections))
+	for repo, names := range s.Sections {
+		census, err := room.Sections(r.Context(), repo, names)
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		out[repo] = census
+	}
+	writeJSON(w, out)
 }
 
 // sessions is the per-unit live view: one entry per RUNNING unit, each with
