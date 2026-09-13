@@ -666,6 +666,59 @@ boxes:
 	}
 }
 
+// TestSelfDeployRefusesAnUndeclaredSection: a self_deploy.sections entry that
+// names no section of the target repo is a config the operator should be
+// told about at load, the same way an unknown repo is.
+func TestSelfDeployRefusesAnUndeclaredSection(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main, sections: [nope]}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+        sections:
+          - name: daemon
+            purpose: the daemon
+            paths: [internal/daemon]
+`))
+	if err == nil || !strings.Contains(err.Error(), `self_deploy.sections names "nope", which is not a declared section of repo app`) {
+		t.Fatalf("self_deploy.sections naming an undeclared section: err = %v", err)
+	}
+}
+
+// TestSelfDeployLoadsWithDeclaredSections: naming sections that are all
+// declared on the target repo is the happy path.
+func TestSelfDeployLoadsWithDeclaredSections(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    self_deploy: {from: main, sections: [daemon]}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: 'true'
+        check: 'go test ./...'
+        sections:
+          - name: daemon
+            purpose: the daemon
+            paths: [internal/daemon]
+          - name: room
+            purpose: the room
+            paths: [web]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].SelfDeploy.Sections; len(got) != 1 || got[0] != "daemon" {
+		t.Fatalf("self_deploy.sections = %v, want [daemon]", got)
+	}
+}
+
 // TestApprovalAbsentByDefault: a repo that says nothing about approval keeps
 // today's behavior — no human gate, machine-gated.
 func TestApprovalAbsentByDefault(t *testing.T) {

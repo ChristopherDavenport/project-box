@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -67,9 +68,10 @@ func (s *selfDeployState) refuse(c forge.Commit) {
 // names — boxcfg.Load has already refused a block naming no repo, an unknown
 // repo, or a repo with no check.
 type selfDeployTarget struct {
-	box  string
-	from string
-	repo boxcfg.Repo
+	box      string
+	from     string
+	repo     boxcfg.Repo
+	sections []string
 }
 
 // selfDeployTargets resolves every box that has turned the chore on.
@@ -84,7 +86,10 @@ func (d *Daemon) selfDeployTargets() []selfDeployTarget {
 		}
 		for _, r := range bx.Repos {
 			if r.Name == bx.SelfDeploy.Repo {
-				out = append(out, selfDeployTarget{box: bx.Name, from: bx.SelfDeploy.From, repo: r})
+				out = append(out, selfDeployTarget{
+					box: bx.Name, from: bx.SelfDeploy.From, repo: r,
+					sections: bx.SelfDeploy.Sections,
+				})
 				break
 			}
 		}
@@ -147,6 +152,24 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 	}
 	if d.selfDeploy.isRefused(head) {
 		return nil // already tried this commit; the refusal is on the chain
+	}
+
+	if len(t.sections) > 0 {
+		changed, err := d.mirror.ChangedPaths(ctx, repo, forge.Commit(build.Commit), head)
+		if err != nil {
+			// An unanswerable diff must not stall the box behind a docs
+			// landing forever — proceed to deploy rather than let "unknown"
+			// stand in for "nothing changed".
+			slog.Warn("self-deploy: changed paths — proceeding to deploy rather than guessing", "box", t.box, "err", err)
+		} else if selfDeploySkippable(changed, t.repo.Sections, t.sections) {
+			// The diff is entirely docs/room-shaped. Claims are never
+			// stopped for a landing that will be skipped, and the compare
+			// is always build.Commit->head, so a skipped landing needs no
+			// memory of its own: the next code landing's diff is cumulative
+			// and includes it.
+			slog.Info("self-deploy: landing touched only sections outside self_deploy.sections — skipping", "box", t.box, "commit", head)
+			return nil
+		}
 	}
 
 	why := fmt.Sprintf("self-deploy: box %s %s -> %s", t.box, short(build.Commit), short(string(head)))
@@ -239,6 +262,40 @@ func (d *Daemon) selfDeployBuild(ctx context.Context, t selfDeployTarget, repo f
 		return fmt.Errorf("installing the new binary: %w", err)
 	}
 	return nil
+}
+
+// selfDeploySkippable reports whether every one of changed falls inside some
+// declared section of the repo whose name is NOT in warrant — i.e. the diff
+// is entirely docs/room-shaped and self_deploy.sections says a landing there
+// warrants no deploy. A path that matches no declared section counts as
+// touching the daemon's tree (go.mod, hack/, an unsectioned cmd) and forces
+// a deploy: unknown never reads as zero.
+func selfDeploySkippable(changed []string, sections []boxcfg.Section, warrant []string) bool {
+	warranted := map[string]bool{}
+	for _, n := range warrant {
+		warranted[n] = true
+	}
+	for _, path := range changed {
+		name, ok := sectionOfPath(path, sections)
+		if !ok || warranted[name] {
+			return false
+		}
+	}
+	return true
+}
+
+// sectionOfPath answers the first declared section whose Paths cover path,
+// matched by prefix at a path-segment boundary: "internal/loop" matches
+// "internal/loop" and "internal/loop/x.go", never "internal/loopy".
+func sectionOfPath(path string, sections []boxcfg.Section) (string, bool) {
+	for _, s := range sections {
+		for _, p := range s.Paths {
+			if path == p || strings.HasPrefix(path, p+"/") {
+				return s.Name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // Reexec closes the store and calls Exec, completing a self-deploy after Run

@@ -87,6 +87,70 @@ boxes:
 	}
 }
 
+// addRepoCommit clones remote fresh, writes relPath with content (creating
+// parent directories as needed), commits, and pushes to main, returning the
+// new head — a further landing on top of whatever deployRepo seeded.
+func addRepoCommit(t *testing.T, remote, relPath, content string) forge.Commit {
+	t.Helper()
+	seed := filepath.Join(t.TempDir(), "seed")
+	mustGit(t, "", "clone", remote, seed)
+	full := filepath.Join(seed, filepath.FromSlash(relPath))
+	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(full, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, seed, "add", ".")
+	mustGit(t, seed, "commit", "-m", "add "+relPath)
+	mustGit(t, seed, "push", "origin", "HEAD:refs/heads/main")
+	out := mustGit(t, seed, "rev-parse", "HEAD")
+	return forge.Commit(strings.TrimSpace(out))
+}
+
+// writeSelfDeploySectionedCfg is writeSelfDeployCfg's shape, plus the "app"
+// repo declaring two sections — "code" (cmd) and "docs" (docs) — and
+// self_deploy naming which of them, via warrant, are candidates for deploy.
+func writeSelfDeploySectionedCfg(t *testing.T, path, db, root, workRemote, appRemote, appCheck string, warrant []string) {
+	t.Helper()
+	warrantYAML := "[]"
+	if len(warrant) > 0 {
+		warrantYAML = "[" + strings.Join(warrant, ", ") + "]"
+	}
+	cfg := fmt.Sprintf(`
+tenant: acme
+runner: boxd
+db: %s
+root: %s
+listen: unix:/tmp/never-used.sock
+every: 1s
+drain: 5s
+budget: {max_concurrent: 2}
+boxes:
+  - name: shop
+    self_deploy: {from: main, repo: app, sections: %s}
+    repos:
+      - name: work
+        remote: %s
+        build: '%s'
+        check: 'test -f out.txt'
+      - name: app
+        remote: %s
+        build: 'true'
+        check: '%s'
+        sections:
+          - name: code
+            purpose: code
+            paths: [cmd]
+          - name: docs
+            purpose: docs
+            paths: [docs]
+`, db, root, warrantYAML, workRemote, buildCmd, appRemote, appCheck)
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func waitForFile(t *testing.T, path string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -411,6 +475,134 @@ func TestSelfDeploySettlesBeforeCheckingAndSucceeds(t *testing.T) {
 	}
 	if got := claimsChain(t, d, ctx); len(got) != 2 || got[0] != "stop" || got[1] != "resume" {
 		t.Fatalf("control/claims = %v, want [stop resume]", got)
+	}
+}
+
+// TestSelfDeploySkipsWhenDiffIsEntirelyOutsideNamedSections: a landing whose
+// diff sits wholly inside a declared section self_deploy.sections does not
+// warrant is skipped — and claims are never stopped for it.
+func TestSelfDeploySkipsWhenDiffIsEntirelyOutsideNamedSections(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, base := deployRepo(t, "app", validBoxdMain)
+	addRepoCommit(t, appRem, "docs/readme.md", "docs change\n")
+
+	writeSelfDeploySectionedCfg(t, cfgPath, db, root, workRem, appRem, "true", []string{"code"})
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.build = func() version.Build { return version.Build{Commit: string(base), Known: true} }
+
+	if err := d.selfDeployChore(ctx); err != nil {
+		t.Fatalf("selfDeployChore: %v", err)
+	}
+	if got := claimsChain(t, d, ctx); len(got) != 0 {
+		t.Fatalf("control/claims = %v, want none — a docs-only landing must never stop claims", got)
+	}
+	if got := selfDeployChain(t, d, ctx); len(got) != 0 {
+		t.Fatalf("control/self-deploy = %v, want none", got)
+	}
+}
+
+// TestSelfDeployDeploysWhenDiffTouchesANamedSection: a diff that touches a
+// section named in self_deploy.sections deploys, same as an unsectioned
+// landing always has.
+func TestSelfDeployDeploysWhenDiffTouchesANamedSection(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, base := deployRepo(t, "app", validBoxdMain)
+	addRepoCommit(t, appRem, "cmd/boxd/extra.go", "package main\n\n// extra\n")
+
+	writeSelfDeploySectionedCfg(t, cfgPath, db, root, workRem, appRem, "true", []string{"code"})
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.build = func() version.Build { return version.Build{Commit: string(base), Known: true} }
+	exe := filepath.Join(dir, "boxd-exe")
+	d.exePath = func() (string, error) { return exe, nil }
+
+	err = d.selfDeployChore(ctx)
+	if !errors.Is(err, ErrSelfDeployed) {
+		t.Fatalf("selfDeployChore = %v, want ErrSelfDeployed", err)
+	}
+	kinds := selfDeployChain(t, d, ctx)
+	if len(kinds) != 1 || kinds[0] != "self-deployed" {
+		t.Fatalf("control/self-deploy = %v, want exactly one self-deployed", kinds)
+	}
+}
+
+// TestSelfDeployDeploysWhenDiffTouchesPathInNoDeclaredSection: a path that
+// matches no declared section counts as touching the daemon's tree and
+// deploys, even though self_deploy.sections names something else entirely —
+// unknown never reads as zero.
+func TestSelfDeployDeploysWhenDiffTouchesPathInNoDeclaredSection(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, base := deployRepo(t, "app", validBoxdMain)
+	addRepoCommit(t, appRem, "VERSION", "1.0.0\n")
+
+	writeSelfDeploySectionedCfg(t, cfgPath, db, root, workRem, appRem, "true", []string{"code"})
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.build = func() version.Build { return version.Build{Commit: string(base), Known: true} }
+	exe := filepath.Join(dir, "boxd-exe")
+	d.exePath = func() (string, error) { return exe, nil }
+
+	err = d.selfDeployChore(ctx)
+	if !errors.Is(err, ErrSelfDeployed) {
+		t.Fatalf("selfDeployChore = %v, want ErrSelfDeployed", err)
+	}
+	kinds := selfDeployChain(t, d, ctx)
+	if len(kinds) != 1 || kinds[0] != "self-deployed" {
+		t.Fatalf("control/self-deploy = %v, want exactly one self-deployed", kinds)
+	}
+}
+
+// TestSelfDeployEmptySectionsDeploysOnAnyMovement: self_deploy with no
+// sections: at all keeps #64's original behavior — even a docs-only landing
+// deploys.
+func TestSelfDeployEmptySectionsDeploysOnAnyMovement(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, base := deployRepo(t, "app", validBoxdMain)
+	addRepoCommit(t, appRem, "docs/readme.md", "docs change\n")
+
+	writeSelfDeployCfg(t, cfgPath, db, root, workRem, buildCmd, appRem, "true")
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.build = func() version.Build { return version.Build{Commit: string(base), Known: true} }
+	exe := filepath.Join(dir, "boxd-exe")
+	d.exePath = func() (string, error) { return exe, nil }
+
+	err = d.selfDeployChore(ctx)
+	if !errors.Is(err, ErrSelfDeployed) {
+		t.Fatalf("selfDeployChore = %v, want ErrSelfDeployed — no sections: means every moved head is a candidate", err)
+	}
+	kinds := selfDeployChain(t, d, ctx)
+	if len(kinds) != 1 || kinds[0] != "self-deployed" {
+		t.Fatalf("control/self-deploy = %v, want exactly one self-deployed", kinds)
 	}
 }
 

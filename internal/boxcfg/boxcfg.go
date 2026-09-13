@@ -394,6 +394,11 @@ type SelfDeploy struct {
 	// everywhere else. A box with exactly one repo may leave this empty and
 	// get that repo.
 	Repo string `yaml:"repo"`
+	// Sections names the declared sections of Repo whose landings warrant a
+	// deploy — a moved head whose diff touches only sections outside this
+	// list is skipped rather than rebuilt. Empty means every moved head is a
+	// candidate, the behavior before this field existed.
+	Sections []string `yaml:"sections"`
 }
 
 // Kind is box.yaml's spelling of [kind.Declaration].
@@ -1011,6 +1016,24 @@ func validateSelfDeploy(bx *Box, explicitCheck map[string]bool) error {
 	}
 	if !had {
 		return fmt.Errorf("boxcfg: box %s: self_deploy.repo %s has no check — a self-deploy target with no check cannot be judged, and a commit that cannot be judged must not be deployed", bx.Name, sd.Repo)
+	}
+	if len(sd.Sections) > 0 {
+		var target *Repo
+		for i := range bx.Repos {
+			if bx.Repos[i].Name == sd.Repo {
+				target = &bx.Repos[i]
+				break
+			}
+		}
+		declared := map[string]bool{}
+		for _, s := range target.Sections {
+			declared[s.Name] = true
+		}
+		for _, name := range sd.Sections {
+			if !declared[name] {
+				return fmt.Errorf("boxcfg: box %s: self_deploy.sections names %q, which is not a declared section of repo %s", bx.Name, name, sd.Repo)
+			}
+		}
 	}
 	return nil
 }
