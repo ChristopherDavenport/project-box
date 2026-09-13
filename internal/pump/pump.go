@@ -27,6 +27,13 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
+// DefaultStarveAfter is how many section waits in a row mark a candidate
+// starved when [Pump.StarveAfter] is unset. Small on purpose: a whole-
+// repository unit sharing a box with a stream of narrower ones should surface
+// as the next-in-line within a handful of ticks, not sit through a standing
+// wait long enough for an operator to have to notice it — see issue #109.
+const DefaultStarveAfter = 3
+
 // Pump feeds and drains one tenant's queue.
 type Pump struct {
 	Store  store.Store
@@ -40,6 +47,10 @@ type Pump struct {
 	Loops map[string]*loop.Loop
 	Meter *capacity.Meter
 	Queue *queue.Queue
+	// StarveAfter is how many consecutive section waits mark a candidate as
+	// the starved head of its (Box, Repo) group — see [DefaultStarveAfter].
+	// Zero uses the default.
+	StarveAfter int
 	// Kinds is the declaration set intake resolves an origination's kind
 	// against, and Decomposers the producers those declarations name. Plans
 	// records what each decomposition decided.
@@ -225,6 +236,110 @@ func (p *Pump) intakeOne(ctx context.Context, ingressID string) (int, error) {
 	return created, nil
 }
 
+// drainCandidate is one claimable item together with the executor and Poll
+// answer resolved for it this drain — carried alongside the item so the
+// fairness pass and the dispatch loop that follows it never resolve either
+// twice.
+type drainCandidate struct {
+	item   queue.WorkItem
+	lp     *loop.Loop
+	ok     bool // an executor is configured for this item's (box, repo)
+	polled bool // true unless the item is held on a person's review
+}
+
+// sectionsIntersect reports whether two units could contend for the same
+// section: [queue.WorkItem.Sections] names are plan-declared, compared as
+// plain strings, and empty means every section, so it alone is enough to
+// force an intersection.
+func sectionsIntersect(a, b []string) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return true
+	}
+	for _, x := range a {
+		for _, y := range b {
+			if x == y {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// fairSectionOrder is issue #109's fix: a unit that names no section leases
+// every one, so under a stream of newer, narrower units it can starve —
+// every tick another freed section is grabbed by whoever else is waiting
+// before it gets a turn. This groups this drain's candidates by (box, repo),
+// and within a group whose oldest waiter has reached StarveAfter deferrals in
+// a row, names it the head: every OTHER candidate in the group whose section
+// set could contend with the head's is told, via YieldTo, to step aside this
+// tick without even trying its own lease — and the head is moved to the
+// front of the dispatch order, so the capacity-exhausted break in Drain
+// cannot hand its meter slot to a unit that was told to wait for it anyway.
+//
+// A candidate not [drainCandidate.ok] or not [drainCandidate.polled] is
+// skipped entirely — held on a person or unrouted, it is not contending for
+// a section this tick either way.
+func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
+	bound := p.StarveAfter
+	if bound <= 0 {
+		bound = DefaultStarveAfter
+	}
+	type groupKey struct{ box, repo string }
+	groups := map[groupKey][]int{}
+	var groupOrder []groupKey
+	for i, c := range cands {
+		if !c.ok || !c.polled {
+			continue
+		}
+		k := groupKey{c.item.Box, c.item.Repo}
+		if _, seen := groups[k]; !seen {
+			groupOrder = append(groupOrder, k)
+		}
+		groups[k] = append(groups[k], i)
+	}
+
+	heads := map[int]bool{}
+	for _, k := range groupOrder {
+		idxs := groups[k] // submission order — oldest first, which is the tiebreak
+		head := -1
+		for _, i := range idxs {
+			if cands[i].item.SectionWaits < bound {
+				continue
+			}
+			if head == -1 || cands[i].item.SectionWaits > cands[head].item.SectionWaits {
+				head = i
+			}
+		}
+		if head == -1 {
+			continue // nobody in this group has starved yet
+		}
+		heads[head] = true
+		for _, i := range idxs {
+			if i == head {
+				continue
+			}
+			if sectionsIntersect(cands[head].item.Sections, cands[i].item.Sections) {
+				cands[i].item.YieldTo = cands[head].item.ID
+			}
+		}
+	}
+	if len(heads) == 0 {
+		return cands
+	}
+	ordered := make([]drainCandidate, 0, len(cands))
+	for i, c := range cands {
+		if heads[i] {
+			ordered = append(ordered, c)
+		}
+	}
+	for i, c := range cands {
+		if !heads[i] {
+			ordered = append(ordered, c)
+		}
+	}
+	return ordered
+}
+
 // Drain runs every claimable item, within budget. It returns how many items
 // it settled this pass; blocked, stopped, busy and over-budget items simply
 // remain for the next tick.
@@ -272,12 +387,15 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		}
 	}
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	settled := 0
-	var firstErr error
-	for _, item := range candidates {
+	// lp and polled are resolved once per candidate, here, rather than inside
+	// the dispatch loop below: the fairness pass right after this needs both
+	// to know who is actually contending for a section this tick, and Poll
+	// can call a gate — asking it twice would double the very cost Poll
+	// exists to avoid.
+	dcs := make([]drainCandidate, len(candidates))
+	for i, item := range candidates {
 		lp, ok := p.loopFor(item.Box, item.Repo)
+		dcs[i] = drainCandidate{item: item, lp: lp, ok: ok}
 		if !ok {
 			continue // no executor configured for this target; not this pump's work
 		}
@@ -285,10 +403,21 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		// not, it is left completely alone: no slot taken, no lease, no
 		// record. Running it through the loop to learn "still pending" is how
 		// an idle factory writes thousands of records a day saying nothing
-		// happened.
-		if !lp.Poll(ctx, item) {
+		// happened. It is also not contending for a section this tick, which
+		// is why the fairness pass below skips it too.
+		dcs[i].polled = lp.Poll(ctx, item)
+	}
+	dcs = p.fairSectionOrder(dcs)
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	settled := 0
+	var firstErr error
+	for _, dc := range dcs {
+		if !dc.ok || !dc.polled {
 			continue
 		}
+		item, lp := dc.item, dc.lp
 		release, err := p.Meter.Acquire(ctx, item.ID)
 		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrBusy) ||
 			errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrCredential) {

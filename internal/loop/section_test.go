@@ -206,6 +206,82 @@ func TestOneStartPerRunNotPerClaim(t *testing.T) {
 	}
 }
 
+// TestAYieldedUnitNeverTouchesALease is issue #109's pump-side fairness rule,
+// tested from the loop's half: a claim carrying YieldTo goes straight to
+// waiting on the reservation, naming who it is next in line behind, and never
+// even attempts a section lease — Inspect must find every declared section
+// unheld afterward.
+func TestAYieldedUnitNeverTouchesALease(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	item := e.submit(t, "api-3", func(w *queue.WorkItem) {
+		w.Sections = []string{"api"}
+		w.YieldTo = "wi-whole-1"
+		w.SectionWaits = 2
+	})
+	item, err := e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("a yielded unit should wait, got %s: %s", item.State, item.Note)
+	}
+	for _, want := range []string{"reserved for wi-whole-1", "next in line", "waited 2 turns"} {
+		if !strings.Contains(item.Note, want) {
+			t.Errorf("the wait does not say %q: %s", want, item.Note)
+		}
+	}
+	for _, name := range []string{"api", "web"} {
+		if _, ok, err := e.store.Leaser("runner-1").Inspect(ctx, tn, e.repo.Name, SectionRef(name)); err != nil {
+			t.Fatal(err)
+		} else if ok {
+			t.Fatalf("section %s was held by a unit that yielded without trying", name)
+		}
+	}
+}
+
+// TestSectionWaitsCountsAndResets: a claim deferred by a held section counts
+// the deferral, and a claim that gets through zeroes it — the signal the
+// pump reads to name an oldest waiter must not carry stale history once a
+// unit has actually run.
+func TestSectionWaitsCountsAndResets(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	holder := hold(t, e, "api", "wi-elsewhere")
+
+	item := e.submit(t, "api-4", func(w *queue.WorkItem) {
+		w.Sections = []string{"api"}
+		w.SectionWaits = 2
+	})
+	item, err := e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("want waiting on the held section, got %s: %s", item.State, item.Note)
+	}
+	if item.SectionWaits != 3 {
+		t.Fatalf("a deferred claim should count the wait, got SectionWaits=%d", item.SectionWaits)
+	}
+	if !strings.Contains(item.Note, "waited 2 turns") {
+		t.Errorf("the wait note does not carry the prior count: %s", item.Note)
+	}
+
+	if err := e.store.Leaser("runner-1").Release(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("want done once the section frees, got %s: %s", item.State, item.Note)
+	}
+	if item.SectionWaits != 0 {
+		t.Fatalf("a claim that got through should reset the count, got SectionWaits=%d", item.SectionWaits)
+	}
+}
+
 // TestDisjointSectionsEachChargeTheirOwnStart: two units in disjoint declared
 // sections of the same repo, run without contention, produce exactly two
 // starts — the count is additive across real runs, not shared by the repo.

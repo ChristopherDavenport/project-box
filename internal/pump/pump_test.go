@@ -117,6 +117,44 @@ func (w *world) open(t *testing.T, key, task string) {
 	}
 }
 
+// submitItem opens an ingress and submits a work item under it directly,
+// bypassing intake's own decomposition — the section-fairness tests need
+// control over Sections and SectionWaits that a seeded issue's plan never
+// sets, and Drain (unlike Tick) never runs Intake, so a hand-submitted item
+// is exactly as claimable as one intake would have produced.
+func (w *world) submitItem(t *testing.T, key, task string, shape func(*queue.WorkItem)) queue.WorkItem {
+	t.Helper()
+	ctx := context.Background()
+	ing, _, err := w.router.Open(ctx, ingress.Route{
+		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
+	}, ingress.Delivery{Key: key, Payload: []byte(task)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := loop.ItemFor(ing, "wi-"+key, task)
+	if shape != nil {
+		shape(&item)
+	}
+	item, err = w.q.Submit(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return item
+}
+
+// holdSection acquires a section lease directly, standing in for another
+// run's in-flight hold — the same pattern internal/loop's section tests use.
+func holdSection(t *testing.T, w *world, section, run string) forge.Lease {
+	t.Helper()
+	l, err := w.store.Leaser("pump-runner").Acquire(context.Background(), forge.LeaseRequest{
+		Tenant: tn, Repo: "app", Ref: loop.SectionRef(section), Run: run, TTL: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
+}
+
 // TestStepUpIngressAndStepBack is the contract by name: three issues arrive,
 // nobody submits anything, nobody runs anything — the daemon's ticks turn
 // ingress into landed commits.
@@ -458,5 +496,119 @@ func TestAHandedOffItemIsRedispatched(t *testing.T) {
 		if !strings.Contains(log, want) {
 			t.Fatalf("the landed history lost %q:\n%s", want, log)
 		}
+	}
+}
+
+// sectionedRepo declares two sections on the shared "shop" box's repository,
+// for the fairness tests below.
+func (w *world) sectionedRepo() {
+	w.pump.Loops["shop"].Repo.Sections = []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"api"}},
+		{Name: "web", Purpose: "the room", Paths: []string{"web"}},
+	}
+}
+
+// TestAWholeRepositoryUnitStopsStarving is issue #109 by name: a unit that
+// names no section leases every one, so under a stream of newer, narrower
+// units it can starve — every tick another freed section is taken by
+// whoever else is waiting before its turn comes. Once its deferrals reach
+// the bound, the pump names it the oldest waiter and reserves the section
+// for it: the narrower unit yields even before the held section frees, and
+// once it does, the whole-repository unit — not the narrower one — is the
+// one that claims it.
+func TestAWholeRepositoryUnitStopsStarving(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	whole := w.submitItem(t, "whole-1", "fix module whole", func(wi *queue.WorkItem) {
+		wi.SectionWaits = 3
+	})
+	narrow := w.submitItem(t, "narrow-1", "fix module narrow", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+	})
+	holder := holdSection(t, w, "api", "wi-elsewhere")
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	whole, err := w.q.Load(ctx, tn, whole.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrow, err = w.q.Load(ctx, tn, narrow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whole.State != queue.StateWaiting {
+		t.Fatalf("the whole-repository unit should still wait on the held section, got %s: %s", whole.State, whole.Note)
+	}
+	if narrow.State != queue.StateWaiting {
+		t.Fatalf("the narrower unit should wait behind the reservation, got %s: %s", narrow.State, narrow.Note)
+	}
+	for _, want := range []string{"reserved for " + whole.ID, "next in line"} {
+		if !strings.Contains(narrow.Note, want) {
+			t.Errorf("the narrower unit's wait does not say %q: %s", want, narrow.Note)
+		}
+	}
+
+	if err := w.store.Leaser("pump-runner").Release(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	whole, err = w.q.Load(ctx, tn, whole.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	narrow, err = w.q.Load(ctx, tn, narrow.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if whole.State != queue.StateDone {
+		t.Fatalf("the whole-repository unit should claim once the section frees, got %s: %s", whole.State, whole.Note)
+	}
+	if narrow.State != queue.StateWaiting || !strings.Contains(narrow.Note, "reserved for "+whole.ID) {
+		t.Fatalf("the narrower unit should still yield to the oldest waiter, got %s: %s", narrow.State, narrow.Note)
+	}
+}
+
+// TestDisjointSectionCandidateIsNotYielded: the fairness rule only reserves
+// what could actually contend. A starved unit's own section held elsewhere
+// makes it wait, but a candidate expressed in a genuinely disjoint section
+// is never told to yield, and dispatches — and completes — normally.
+func TestDisjointSectionCandidateIsNotYielded(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	head := w.submitItem(t, "head-1", "fix module head", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.SectionWaits = 3
+	})
+	other := w.submitItem(t, "other-1", "fix module other", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"web"}
+	})
+	holdSection(t, w, "api", "wi-elsewhere")
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	head, err := w.q.Load(ctx, tn, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	other, err = w.q.Load(ctx, tn, other.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.State != queue.StateWaiting {
+		t.Fatalf("the head should wait on the genuinely held section, got %s: %s", head.State, head.Note)
+	}
+	if other.State != queue.StateDone {
+		t.Fatalf("a disjoint-section candidate should dispatch without yielding, got %s: %s", other.State, other.Note)
 	}
 }

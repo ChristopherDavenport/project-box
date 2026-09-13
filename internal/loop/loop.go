@@ -459,8 +459,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		return q.Park(ctx, item, claim, queue.SeverityMedium, err.Error())
 	}
 	if busy != "" {
+		item.SectionWaits++
 		return q.Wait(ctx, item, claim, busy)
 	}
+	item.SectionWaits = 0
 	defer releaseSections()
 
 	leaser := l.Store.Leaser(l.Runner)
@@ -1534,6 +1536,14 @@ func SectionRef(name string) string { return "section/" + name }
 // and who, and means nothing is held. An error names a section the plan and
 // the repository disagree about.
 func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release func(), busy string, err error) {
+	// The pump's fairness rule, read before anything else here is touched: a
+	// unit reserved for an oldest waiter does not even try for a section this
+	// tick, so it cannot win a race the reservation exists to prevent.
+	if item.YieldTo != "" {
+		note := fmt.Sprintf("sections of %s are reserved for %s, next in line; this unit has waited %d turns",
+			l.Repo.Name, item.YieldTo, item.SectionWaits)
+		return nil, note, nil
+	}
 	for _, n := range item.Sections {
 		if _, ok := l.Repo.Section(n); !ok {
 			return nil, "", fmt.Errorf("section %q is not declared by repository %s (declared: %v) — the plan and the repository disagree about where this unit works",
@@ -1566,7 +1576,11 @@ func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release 
 				holder = " by " + cur.Run
 			}
 			release()
-			return nil, fmt.Sprintf("section %s of %s is held%s", n, l.Repo.Name, holder), nil
+			note := fmt.Sprintf("section %s of %s is held%s", n, l.Repo.Name, holder)
+			if item.SectionWaits > 0 {
+				note += fmt.Sprintf("; waited %d turns", item.SectionWaits)
+			}
+			return nil, note, nil
 		}
 		if err != nil {
 			release()

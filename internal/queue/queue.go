@@ -292,6 +292,17 @@ type WorkItem struct {
 	// "still parked by the thing that just landed" from "parked for its own
 	// reasons" or "re-parked by a newer cause".
 	ParkedBy string `json:"parked_by,omitempty"`
+	// SectionWaits counts how many claims in a row went back to Wait because
+	// a section this unit needs was held — the starvation signal the pump's
+	// fairness rule reads to name an oldest waiter. Reset to zero the moment
+	// the sections this unit needs are actually acquired.
+	SectionWaits int `json:"section_waits,omitempty"`
+	// YieldTo is the ID of a starved unit this claim should step aside for on
+	// this tick, set by the pump on the candidate copy it hands to
+	// [loop.Loop.Run]. It is a dispatch hint, not a fact about the item — the
+	// json:"-" tag keeps it off every record, since a hint that survived into
+	// the chain could be replayed onto a fold that never made the decision.
+	YieldTo string `json:"-"`
 }
 
 // ErrStopped reports that the stop button is down: no new claims, tenant-wide,
