@@ -181,6 +181,15 @@ const DefaultAttempts = 2
 // gate into a long wait before the park a person will see anyway.
 const DefaultGateRetries = 2
 
+// MaxAbortedRetries bounds how many more times a build that aborted — the
+// transport dropped the call after session/prompt was sent, never a choice
+// the agent or the box made — is retried before the item parks. Two more
+// tries, three asks in all: the same number [DefaultGateRetries] uses for a
+// gate's own transport trouble, stated as its own const rather than reused
+// because a build's dropped call is a different concern from a gate's
+// (issue #69).
+const MaxAbortedRetries = 2
+
 // defaultGateBackoffUnit is the base of [Loop.gateBackoff]'s default growth:
 // try 1 waits one unit, try 2 waits two, and so on. Seconds, because a gate
 // error is infrastructure trouble worth a short pause, not a rate limit
@@ -625,6 +634,11 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 				var berr error
 				head, berr = l.Builder.Build(bctx, ws, item.Task)
 				if berr == nil {
+					// A build that got all the way to a commit did not abort,
+					// whatever an earlier attempt on this same claim said — an
+					// old abort must not go on counting against a claim that
+					// has since built cleanly.
+					item.AbortedTries = 0
 					l.record(ctx, item, "built", string(head), "")
 				} else if bctx.Err() != nil && ctx.Err() == nil {
 					// The clock ran out, not the caller. Say so plainly: "context
@@ -651,6 +665,24 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 					// An agent declining is a considered act, not an emergency:
 					// somebody has to read it, and it can wait for the morning.
 					item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, esc.Error())
+					return l.settle(ctx, item), nil
+				}
+				var ab *Aborted
+				if errors.As(serr, &ab) {
+					// Nobody decided anything: the transport dropped the call.
+					// Meter.Start already fired above, so the item's start is
+					// counted whether this attempt lands or not — only the
+					// build itself is retried.
+					if item.AbortedTries < MaxAbortedRetries {
+						item.AbortedTries++
+						note := fmt.Sprintf("build aborted (retry %d of %d): %s",
+							item.AbortedTries, MaxAbortedRetries, ab.Reason)
+						item, _ = q.Wait(ctx, item, claim, note)
+						return l.settle(ctx, item), nil
+					}
+					item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+						"build aborted %d times without finishing, and the limit is %d retries — parking rather than trying again: %s",
+						item.AbortedTries+1, MaxAbortedRetries, ab.Reason))
 					return l.settle(ctx, item), nil
 				}
 				item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, "build: "+serr.Error())
@@ -1296,6 +1328,21 @@ type Handoff struct {
 // Error satisfies error.
 func (h *Handoff) Error() string {
 	return fmt.Sprintf("handed off by %s: %s", h.Seat, h.Reason)
+}
+
+// Aborted is the transport dropping a call after the prompt was already
+// sent — acp.ErrAborted's shape on this side of the seam, carrying the
+// transport's own reason (an rpc error mid-response, the child dying before
+// it answered). Distinct from Escalation and Handoff: nobody decided
+// anything here, so the loop retries it up to [MaxAbortedRetries] rather
+// than treating it as the agent's own act (issue #69).
+type Aborted struct {
+	Reason string
+}
+
+// Error satisfies error.
+func (a *Aborted) Error() string {
+	return fmt.Sprintf("build aborted: %s", a.Reason)
 }
 
 // handOff ends the session and returns the item to the queue for a fresh one,

@@ -118,6 +118,34 @@ func TestUnmeteredSurvivesARestart(t *testing.T) {
 	}
 }
 
+// TestAbortedUnreportedSurvivesARestartWithoutRaisingUnmetered: the other
+// half of TestUnmeteredSurvivesARestart. An aborted charge that never
+// reported is a known zero (issue #69) both live and after Restore refolds
+// it from the chain — the flag rides the Spend record itself precisely so a
+// restart cannot read it back as an ordinary unmetered run.
+func TestAbortedUnreportedSurvivesARestartWithoutRaisingUnmetered(t *testing.T) {
+	now := time.Date(2026, 9, 1, 14, 20, 0, 0, time.UTC)
+	clock := func() time.Time { return now }
+	budget := Budget{MaxConcurrent: 1, MaxTokensPerWindow: 6_000_000, Window: time.Hour}
+	m, reopen := meters(t, budget, clock)
+	ctx := context.Background()
+
+	release, _ := m.Acquire(ctx, "run-1")
+	m.Charge(ctx, "run-1", Spend{Aborted: true, Reported: false})
+	release()
+
+	m2 := reopen()
+	if err := m2.Restore(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := m2.Report().Unmetered; got != 0 {
+		t.Fatalf("restore raised unmetered for a known zero: %d", got)
+	}
+	if _, err := m2.Acquire(ctx, "run-2"); err != nil {
+		t.Fatalf("a restored aborted-unreported charge should still admit: %v", err)
+	}
+}
+
 // TestReloadCannotClearTheAccount. SetBudget used to restart the window,
 // which made the brake resettable by editing a file and sending SIGHUP.
 func TestReloadCannotClearTheAccount(t *testing.T) {

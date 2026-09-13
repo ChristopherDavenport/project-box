@@ -177,6 +177,46 @@ func TestAgentBuildsThroughTheWholeLoop(t *testing.T) {
 	}
 }
 
+// TestAbortedRunStillRecordsAndCharges: a run the transport dropped after
+// the prompt was sent still gets its agent-result record and its charge —
+// a dropped call is a known SOMETHING, not nothing to account for
+// (issue #69) — and the loop gets loop.Aborted rather than the raw
+// transport error, so it retries instead of parking on the first flake.
+func TestAbortedRunStillRecordsAndCharges(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "aborted")
+	b := lp.Builder.(*Builder)
+	var spent []Usage
+	b.Spend = func(_ context.Context, _ string, u Usage) {
+		spent = append(spent, u)
+	}
+	item := runItem(t, s, lp, router, "issue-abort", "add the widget package")
+	if item.State != queue.StateWaiting {
+		t.Fatalf("a single aborted attempt should re-queue as waiting, got %s (%s)", item.State, item.Note)
+	}
+	if len(spent) != 1 || !spent[0].Aborted {
+		t.Fatalf("Spend was not called with Aborted usage: %+v", spent)
+	}
+	ctx := context.Background()
+	var body string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/wi-issue-abort", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "agent-result" {
+			body = string(r.Body)
+		}
+	}
+	if body == "" {
+		t.Fatal("no agent-result record for the aborted run")
+	}
+	if !strings.Contains(body, `"stop":"aborted"`) {
+		t.Fatalf("agent-result did not carry stop=aborted: %s", body)
+	}
+	if !strings.Contains(body, "unexpected EOF") {
+		t.Fatalf("agent-result did not carry the transport's own reason: %s", body)
+	}
+}
+
 // TestLazyAgentCannotLookDone: declaring victory over an untouched tree is
 // an error, never a landing.
 func TestLazyAgentCannotLookDone(t *testing.T) {

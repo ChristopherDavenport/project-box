@@ -92,6 +92,28 @@ func TestUnmeteredRunClosesTheWindow(t *testing.T) {
 	}
 }
 
+// TestAbortedUnreportedRunDoesNotCloseTheWindow: a build the transport
+// dropped before anything came back (issue #69) spent a KNOWN nothing — the
+// harness never had a number to price — which is the opposite failure from
+// TestUnmeteredRunClosesTheWindow's silent success. It must not raise
+// Unmetered, and the window keeps admitting.
+func TestAbortedUnreportedRunDoesNotCloseTheWindow(t *testing.T) {
+	ctx := context.Background()
+	m, _ := meter(t, Budget{MaxConcurrent: 1, MaxTokensPerWindow: 1_000_000, Window: time.Hour})
+
+	if err := take(ctx, m, "wi-1"); err != nil {
+		t.Fatalf("first run refused: %v", err)
+	}
+	m.Charge(ctx, "wi-1", Spend{Aborted: true, Reported: false})
+
+	if err := take(ctx, m, "wi-2"); err != nil {
+		t.Fatalf("an aborted-unreported charge should still admit the next run: %v", err)
+	}
+	if r := m.Report(); r.Unmetered != 0 {
+		t.Fatalf("a known zero must not raise unmetered: %d", r.Unmetered)
+	}
+}
+
 // TestUnmeteredStopsEvenWithoutATokenBudget: measurement is the precondition
 // for a budget, not a feature of one. Without a token budget there is no
 // ceiling to enforce — and equally no way to notice a run costing anything at

@@ -65,7 +65,7 @@ func SpendOf(u acp.Usage) capacity.Spend {
 		Input: u.InputTokens, Output: u.OutputTokens,
 		CacheRead: u.CachedReadTokens, CacheWrite: u.CachedWriteTokens,
 		Total: u.Tokens, CostMicros: capacity.Micros(u.CostUSD),
-		Reported: u.Reported,
+		Reported: u.Reported, Aborted: u.Aborted,
 	}
 	if u.RateLimit != nil {
 		s.Limit = &capacity.Limit{Status: u.RateLimit.Status, Window: u.RateLimit.Window,

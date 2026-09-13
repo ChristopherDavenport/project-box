@@ -261,6 +261,15 @@ type WorkItem struct {
 	// here. Scoped to the current claim: a fresh claim starts counting from
 	// nothing, whatever this still says from the one before it.
 	Attempt int `json:"attempt,omitempty"`
+	// AbortedTries counts how many times this claim's build has aborted — the
+	// transport dropping the call after the prompt was sent — and gone back
+	// to waiting rather than parking; see [loop.MaxAbortedRetries]. The queue
+	// is event-sourced and record() marshals the whole item, so this persists
+	// through Wait and folds back in on the next claim for free, the same way
+	// every other in-claim counter here does. Reset to zero by a build that
+	// returns without aborting, so one old abort cannot push a much-later one
+	// over the bound.
+	AbortedTries int `json:"aborted_tries,omitempty"`
 	// PassedGates names the gates that already returned pass on Built.
 	//
 	// They are carried rather than re-run while that head stands. A gate that

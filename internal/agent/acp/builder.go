@@ -390,6 +390,16 @@ func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, c
 		b.Spend(ctx, ws.Run, res.Usage)
 	}
 	if err != nil {
+		if errors.Is(err, ErrAborted) {
+			// Charged above like any other prompted run, and the chain gets
+			// its result record now rather than never: a dropped call still
+			// answers "what did this run cost and how did it end", which is
+			// exactly what a bare error return here has always thrown away.
+			// The loop gets a typed error so it can retry rather than park —
+			// see loop.Aborted.
+			b.record(ctx, ws.Run, "agent-result", bundle.Ref, resultBody(res, elapsed))
+			return "", &loop.Aborted{Reason: res.AbortReason}
+		}
 		return "", err
 	}
 	// The run's shape on the record: what it cost and how it ended, for the
@@ -1025,11 +1035,11 @@ func resultBody(res Result, elapsed time.Duration) string {
 	if res.Usage.RateLimit != nil {
 		rateLimit, _ = json.Marshal(res.Usage.RateLimit)
 	}
-	return fmt.Sprintf(`{"stop":%q,"tool_calls":%d,"unenforced":%d,"denied":%d,"escalated":%v,"wall_ms":%d,`+
+	return fmt.Sprintf(`{"stop":%q,"aborted_reason":%q,"tool_calls":%d,"unenforced":%d,"denied":%d,"escalated":%v,"wall_ms":%d,`+
 		`"tokens":%d,"input_tokens":%d,"output_tokens":%d,"cached_read_tokens":%d,"cached_write_tokens":%d,`+
 		`"cost_usd":%.4f,"metered":%v,"model":%q,"context_used":%d,"context_size":%d,"rate_limit":%s,`+
 		`"unknown_updates":%s,"tools":%s,"denied_tools":%s}`,
-		res.StopReason, len(res.ToolCalls), res.Unenforced, len(res.Denied), res.Escalated != "", elapsed.Milliseconds(),
+		res.StopReason, res.AbortReason, len(res.ToolCalls), res.Unenforced, len(res.Denied), res.Escalated != "", elapsed.Milliseconds(),
 		res.Usage.Total(), res.Usage.InputTokens, res.Usage.OutputTokens,
 		res.Usage.CachedReadTokens, res.Usage.CachedWriteTokens,
 		res.Usage.CostUSD, res.Usage.Reported, res.Session.Model(), res.Usage.ContextUsed, res.Usage.ContextSize, rateLimit,

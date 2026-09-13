@@ -267,6 +267,33 @@ func TestSilenceIsNotZeroSpend(t *testing.T) {
 	}
 }
 
+// TestTransportDropMidResponseIsAborted: round 10's "Server error
+// mid-response" and a dying child are the same shape from here — the
+// transport dropped session/prompt after it was sent. That is a known
+// SOMETHING, not [Result.Prompted] false's known nothing and not a silent
+// success's unknown either, and the caller retries on [ErrAborted] rather
+// than treating it as one of the box's own kills (issue #69).
+func TestTransportDropMidResponseIsAborted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	res, err := runtimeFor(t, "aborted").Run(ctx, bundle(), "do the work")
+	if !errors.Is(err, ErrAborted) {
+		t.Fatalf("err = %v, want ErrAborted", err)
+	}
+	if res.StopReason != "aborted" {
+		t.Fatalf("StopReason = %q, want %q", res.StopReason, "aborted")
+	}
+	if res.AbortReason == "" {
+		t.Fatal("the transport's own reason was dropped")
+	}
+	if !res.Usage.Aborted {
+		t.Fatal("Usage.Aborted was not set — the meter would see this as a silent success")
+	}
+	if !res.Prompted {
+		t.Fatal("this is the prompt-sent case, not the never-prompted one")
+	}
+}
+
 // TestDialectDriftIsLoud: the last drift zeroed a metric across eight
 // experiment runs and nobody noticed until a human read the column. An
 // unrecognised update kind is now a fact on the result, and a tool call
@@ -1064,6 +1091,17 @@ func fakeAgent(scenario string) {
 					"update":    map[string]any{"sessionUpdate": "tool_call", "toolCallId": "t-1", "title": "DeleteProd", "kind": "execute", "status": "in_progress"},
 				})
 				time.Sleep(time.Minute)
+			case "aborted":
+				// The transport dropping the call after session/prompt was
+				// sent (issue #69): stream something, then die without ever
+				// answering. The real side's read loop hits EOF with this
+				// call still pending, which io.ErrUnexpectedEOF reports.
+				f.notify("session/update", map[string]any{
+					"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "starting the widget..."}},
+				})
+				os.Exit(1)
 			}
 		}
 	}

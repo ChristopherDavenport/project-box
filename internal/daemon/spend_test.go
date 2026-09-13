@@ -51,3 +51,26 @@ func TestCredentialDerivationsAgree(t *testing.T) {
 		})
 	}
 }
+
+// TestSpendOfCarriesAborted pins the other deliberate seam crossing SpendOf
+// makes: acp.Usage.Aborted must reach capacity.Spend.Aborted, because that
+// flag is the only reason a dropped call (issue #69) reads as a known zero
+// instead of raising the meter's unmetered count.
+func TestSpendOfCarriesAborted(t *testing.T) {
+	cases := []struct {
+		name string
+		u    acp.Usage
+		want bool
+	}{
+		{name: "aborted and unreported", u: acp.Usage{Aborted: true, Reported: false}, want: true},
+		{name: "aborted and reported", u: acp.Usage{Aborted: true, Reported: true, CostUSD: 1.23}, want: true},
+		{name: "ordinary run", u: acp.Usage{Reported: true, CostUSD: 1.23}, want: false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := SpendOf(c.u).Aborted; got != c.want {
+				t.Fatalf("SpendOf(%+v).Aborted = %v, want %v", c.u, got, c.want)
+			}
+		})
+	}
+}

@@ -103,6 +103,17 @@ var ErrSessionConfig = errors.New("acp: session configuration refused")
 // to a cold session rather than fail the build outright.
 var ErrResume = errors.New("acp: session resume failed")
 
+// ErrAborted reports that the transport dropped session/prompt after it was
+// sent: an rpc error mid-response, the child dying before it answered, or the
+// connection reading io.ErrUnexpectedEOF. Distinct from [Result.Prompted]
+// false, which is a known zero spent on nothing — this is a known SOMETHING,
+// unpriced because nothing ever said the number, and distinct again from a
+// silent success that reports no usage, which is still unknown and still
+// stops the box (issue #69). A caller retries on this sentinel rather than
+// treating it as the box's own kill, which [ErrPolicyViolation] and
+// [ErrTokenCeiling] already are.
+var ErrAborted = errors.New("acp: transport dropped the call after the prompt was sent")
+
 // UpdateKind names what the stream said an agent did. The set is closed and
 // small on purpose: a live view is a timeline, not a log dump, and every kind
 // here is something an operator can act on.
@@ -196,6 +207,13 @@ type Usage struct {
 	// own meter cannot produce: a subscription's window is shared with
 	// whoever else is using the account, and the meter sees only its half.
 	RateLimit *RateLimit
+	// Aborted is true when the transport dropped session/prompt after it was
+	// sent — see [ErrAborted]. It rides Usage rather than Result because
+	// [Builder.Spend]'s signature is func(ctx, run string, u Usage) and that
+	// is the only path to the meter: a flag anywhere else would never reach
+	// capacity.accrue, which is what turns this into a known zero instead of
+	// an unmetered one.
+	Aborted bool
 }
 
 // Credential is which account this usage says a run spent against: [CredentialPlan]
@@ -502,6 +520,10 @@ type Result struct {
 	// charging it as unmetered would stop the factory for an hour over a
 	// run that never reached a model.
 	Prompted bool
+	// AbortReason is the transport's own account of why the call dropped,
+	// set together with StopReason "aborted" — see [ErrAborted]. Empty on
+	// every other stop.
+	AbortReason string
 	// UnknownUpdates lists session update kinds this runtime does not
 	// understand, deduped in first-seen order, plus "tool_call:untitled" for
 	// a tool call that arrived with no title for policy to match on.
@@ -1040,7 +1062,16 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		return res, overspent
 	}
 	if err != nil {
-		return res, fmt.Errorf("acp: prompt: %w", err)
+		// The prompt was sent — Prompted is already true — and the transport
+		// dropped the call: round 10's "Server error mid-response", or
+		// io.ErrUnexpectedEOF when the child died. Nobody decided this, so it
+		// is neither of the two kills above; it is a known something whose
+		// price nothing ever said, and the caller retries it rather than
+		// treating it as a build the box refused.
+		res.StopReason = "aborted"
+		res.AbortReason = err.Error()
+		res.Usage.Aborted = true
+		return res, fmt.Errorf("%w: %v", ErrAborted, err)
 	}
 	res.StopReason = promptRes.StopReason
 	return res, nil

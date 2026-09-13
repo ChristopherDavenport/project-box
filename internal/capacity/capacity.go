@@ -97,6 +97,19 @@ type Spend struct {
 	// Limit is the account's own limit as the run reported it, when it did.
 	// It rides the charge record so a restart restores it with the rest.
 	Limit *Limit `json:"limit,omitempty"`
+	// Aborted is true when the run's own transport dropped the call after it
+	// had sent its prompt — see acp.ErrAborted. It must live here rather than
+	// on the Charge call, because the charge record's body IS this Spend
+	// verbatim and [Meter.Restore] refolds the window from those records: a
+	// flag anywhere else would silently read back as an ordinary unmetered
+	// run on the next boxd restart, which is the exact failure this issue
+	// (#69) exists to close. An aborted run that never reported (Reported
+	// false) is a KNOWN zero — nothing was answered, so nothing was spent
+	// that could be priced — and does not raise [Meter.unmetered]; an aborted
+	// run that DID report (Reported true) accrues exactly like any other
+	// spend, because the box knows what that attempt cost even though it did
+	// not finish.
+	Aborted bool `json:"aborted,omitempty"`
 }
 
 // Limit is the provider account's rate-limit state as an agent reported it:
@@ -278,6 +291,7 @@ type Meter struct {
 	split       Spend // the same tokens, by kind — what makes the total priceable
 	unmetered   int   // runs this window that finished without saying what they cost
 	unpriced    int   // runs this window that reported tokens and no money
+	aborted     int   // runs this window the transport dropped after the prompt was sent
 	// mismatch is the kind a charge reported THIS window when it was a real
 	// kind and not the one Budget.Credential names; CredentialUnknown means
 	// no mismatch yet. Window-scoped like unmetered and unpriced, so a
@@ -612,8 +626,17 @@ func (m *Meter) accrue(s Spend) {
 			m.mismatch = k
 		}
 	}
+	if s.Aborted {
+		m.aborted++
+	}
 	if !s.Reported {
-		m.unmetered++
+		if !s.Aborted {
+			m.unmetered++
+		}
+		// An aborted run that never reported spent a known nothing — the
+		// transport dropped the call before anything came back to price —
+		// and stops here without touching spent, cost, or the split: there
+		// is nothing to accrue, and it must not raise unmetered either.
 		return
 	}
 	m.spent += s.Tokens()
@@ -646,10 +669,15 @@ type Report struct {
 	// CostMicros is the window's spend in millionths of a dollar, as the runs
 	// themselves reported it. Unpriced travels beside it for the reason
 	// Unmetered travels beside Tokens.
-	CostMicros    int64         `json:"cost_micros"`
-	MaxCostMicros int64         `json:"max_cost_micros"`
-	Unpriced      int           `json:"unpriced"`
-	Unmetered     int           `json:"unmetered"`
+	CostMicros    int64 `json:"cost_micros"`
+	MaxCostMicros int64 `json:"max_cost_micros"`
+	Unpriced      int   `json:"unpriced"`
+	Unmetered     int   `json:"unmetered"`
+	// Aborted is how many runs this window the transport dropped after the
+	// prompt was sent, reported or not — an operator's count of a distinct
+	// symptom (a flaky call, a dying child) from Unmetered's (nobody said
+	// what a finished run cost).
+	Aborted       int           `json:"aborted"`
 	MaxTokens     int64         `json:"max_tokens"`
 	Running       int           `json:"running"`
 	Started       int           `json:"started"`
@@ -694,7 +722,7 @@ func (m *Meter) Report() Report {
 		maxC = 1
 	}
 	return Report{
-		Tokens: m.spent, Unmetered: m.unmetered, MaxTokens: m.Budget.MaxTokensPerWindow,
+		Tokens: m.spent, Unmetered: m.unmetered, Aborted: m.aborted, MaxTokens: m.Budget.MaxTokensPerWindow,
 		Input: m.split.Input, Output: m.split.Output,
 		CacheRead: m.split.CacheRead, CacheWrite: m.split.CacheWrite,
 		CostMicros: m.cost, MaxCostMicros: m.Budget.MaxCostPerWindow, Unpriced: m.unpriced,
@@ -743,7 +771,7 @@ func (m *Meter) wouldRefuse() bool {
 func (m *Meter) resetWindow(start time.Time) {
 	m.windowStart, m.started, m.refused = start, 0, false
 	m.spent, m.cost, m.split = 0, 0, Spend{}
-	m.unmetered, m.unpriced = 0, 0
+	m.unmetered, m.unpriced, m.aborted = 0, 0, 0
 	m.mismatch = CredentialUnknown
 }
 
