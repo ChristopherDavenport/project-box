@@ -176,7 +176,28 @@ type Loop struct {
 	// acquired slot turned into a real build. Nil skips charging, which is
 	// safe: most test constructions of Loop do not set it.
 	Meter *capacity.Meter
+	// Widen names how the loop answers a structured [Escalation] that names
+	// sections it needs beyond what the item already holds. [WidenTests] lets
+	// a test-files-only need be granted in-claim, widening item.Sections and
+	// spending the next attempt on a rebuild instead of parking (see
+	// [Loop.RunHolding]). The zero value behaves exactly like [WidenNone] —
+	// today's only behavior, Park-as-exception — so every caller that never
+	// sets this field keeps meaning what it always meant. The daemon wires
+	// this from box configuration; this package only enforces it.
+	Widen string
 }
+
+// WidenTests is the [Loop.Widen] policy that grants a structured
+// escalation's needed sections in-claim when the need is provably
+// test-files-only: every path the agent named ends in _test.go or lies
+// under a testdata/ directory. Anything else — an undeclared section, no
+// paths named, a path that touches non-test code — still parks.
+const WidenTests = "tests"
+
+// WidenNone is the [Loop.Widen] policy that never widens: every escalation
+// parks, exactly as before this field existed. The zero value of
+// [Loop.Widen] means the same thing.
+const WidenNone = "none"
 
 // DefaultBuildTimeout bounds a build when the Box states none. Long enough
 // for real work, short enough that a wedged session is an incident tonight
@@ -827,6 +848,47 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 						OnBehalfOf: item.Requester, Body: []byte(esc.Reason),
 						Trace: telemetry.TraceID(ctx),
 					})
+					if attempt < budget {
+						if widened, ok := l.widenGrant(item, esc); ok {
+							missing := missingSections(item.Sections, widened)
+							releaseExtra, busy, aerr := l.acquireSections(ctx, item, missing)
+							if aerr != nil {
+								return q.Fail(ctx, item, claim, "widen: "+aerr.Error())
+							}
+							if busy != "" {
+								item.Sections = widened
+								note := fmt.Sprintf("widening for %s needs a section that is busy: %s", esc.Error(), busy)
+								item, _ = q.Wait(ctx, item, claim, note)
+								return l.settle(ctx, item), nil
+							}
+							defer releaseExtra()
+							before := item.Sections
+							item.Sections = widened
+							body, _ := json.Marshal(struct {
+								Reason         string   `json:"reason"`
+								NeedsSections  []string `json:"needs_sections"`
+								Paths          []string `json:"paths"`
+								SectionsBefore []string `json:"sections_before"`
+								SectionsAfter  []string `json:"sections_after"`
+							}{esc.Error(), esc.NeedsSections, esc.Paths, before, item.Sections})
+							l.record(ctx, item, "plan-amended", item.ID, string(body))
+
+							next := attempt + 1
+							history = append(history, fmt.Sprintf("attempt %d escalated: %s", attempt, esc.Error()))
+							prior := &agent.Prior{
+								Run: item.ID, Repo: l.Repo.Name,
+								Reason:  fmt.Sprintf("attempt %d of %d; %s", next, budget, strings.Join(history, "; ")),
+								Attempt: next,
+								Of:      budget,
+							}
+							var rerr error
+							item, claim, rerr = q.Retain(ctx, item, claim, prior, next)
+							if rerr != nil {
+								return q.Fail(ctx, item, claim, fmt.Sprintf("retaining attempt %d of %d: %v", next, budget, rerr))
+							}
+							continue
+						}
+					}
 					// An agent declining is a considered act, not an emergency:
 					// somebody has to read it, and it can wait for the morning.
 					item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, esc.Error())
@@ -1652,10 +1714,23 @@ func (l *Loop) authorize(ctx context.Context, item queue.WorkItem, action authz.
 
 // Escalation is an agent declining or escalating instead of grinding: a
 // recorded act with the agent's own reason, not a contrived failure. The
-// loop parks the item with the reason attributed to the seat.
+// loop parks the item with the reason attributed to the seat — unless
+// [Loop.Widen] says the need can be granted in-claim instead; see
+// [Loop.RunHolding].
 type Escalation struct {
 	Seat   string
 	Reason string
+	// NeedsSections names the sections, declared by the repository, the
+	// agent says the change needs beyond what this item already holds.
+	// Empty means the agent said nothing structured — free text only, the
+	// only shape this ever had before — and the loop parks exactly as it
+	// always has.
+	NeedsSections []string
+	// Paths are the files the agent says it would touch in NeedsSections,
+	// when it can say. Empty means unstated, and unstated never reads as
+	// "nothing outside tests": [Loop.RunHolding]'s widen policy refuses a
+	// NeedsSections with no Paths rather than guessing.
+	Paths []string
 }
 
 // Error satisfies error.
@@ -2484,6 +2559,108 @@ func (l *Loop) TakeSections(ctx context.Context, item queue.WorkItem) (grant *Se
 	return &SectionGrant{release: release}, busy, err
 }
 
+// widenGrant decides whether esc may be granted in-claim under l.Widen and,
+// when it may, the sections item.Sections would become. It never leases
+// anything and never blocks — see the escalation branch in
+// [Loop.RunHolding] for what happens once this says yes.
+//
+// An item with no Sections is already the whole repository — every section
+// it could ask for it already holds — so that is refused here rather than
+// read as "nothing to widen, proceed": [Loop.RunHolding] parks it exactly as
+// it always has.
+func (l *Loop) widenGrant(item queue.WorkItem, esc *Escalation) (sections []string, ok bool) {
+	if len(item.Sections) == 0 {
+		return nil, false
+	}
+	// The policy and the shape of the ask: [WidenTests] only ever grants a
+	// need the agent named sections for AND named paths for. An escalation
+	// with needed sections but no paths is not test-only by omission — this
+	// repository's rule is that unknown never reads as zero — so it is
+	// refused here, not guessed at.
+	widen := l.Widen == WidenTests &&
+		len(esc.NeedsSections) > 0 &&
+		len(esc.Paths) > 0
+	if !widen {
+		return nil, false
+	}
+	for _, n := range esc.NeedsSections {
+		if _, ok := l.Repo.Section(n); !ok {
+			// The plan and the repository disagree about a section that
+			// does not exist here — parks exactly as a declared-but-busy
+			// miss elsewhere in this file does, not a hard error: nothing
+			// about the item is wrong, only what it asked for.
+			return nil, false
+		}
+	}
+	for _, p := range esc.Paths {
+		if !isTestOnlyPath(p) {
+			return nil, false
+		}
+	}
+	return unionSections(item.Sections, esc.NeedsSections), true
+}
+
+// isTestOnlyPath reports whether p can only ever be test surface: it ends in
+// _test.go, or it lies under a testdata/ directory. Anything else — a path
+// go build would still compile into the binary — is not test-only, because
+// [WidenTests] exists to grant a need without another gate seeing the
+// change first, and that is only safe when the change cannot be anything
+// but tests.
+func isTestOnlyPath(p string) bool {
+	if strings.HasSuffix(p, "_test.go") {
+		return true
+	}
+	for _, part := range strings.Split(p, "/") {
+		if part == "testdata" {
+			return true
+		}
+	}
+	return false
+}
+
+// unionSections returns current's names with needed's appended, each name
+// kept once and in the order it was first seen — current first, so an item
+// widened from [loop] by a need for [agent] reads [loop agent], the order a
+// human reading the amendment expects, not an alphabetized shuffle they
+// would have to explain.
+func unionSections(current, needed []string) []string {
+	seen := make(map[string]bool, len(current)+len(needed))
+	union := make([]string, 0, len(current)+len(needed))
+	for _, s := range current {
+		if !seen[s] {
+			seen[s] = true
+			union = append(union, s)
+		}
+	}
+	for _, s := range needed {
+		if !seen[s] {
+			seen[s] = true
+			union = append(union, s)
+		}
+	}
+	return union
+}
+
+// missingSections returns the names in needed that current does not already
+// hold, deduplicated and in needed's own order — exactly the leases a widen
+// has to acquire beyond what the claim already holds.
+func missingSections(current, needed []string) []string {
+	have := make(map[string]bool, len(current))
+	for _, s := range current {
+		have[s] = true
+	}
+	seen := make(map[string]bool, len(needed))
+	var missing []string
+	for _, s := range needed {
+		if have[s] || seen[s] {
+			continue
+		}
+		seen[s] = true
+		missing = append(missing, s)
+	}
+	return missing
+}
+
 // leaseSections takes the section leases a unit needs, in one order for every
 // taker so two units cannot deadlock over two sections. It returns a release
 // for what it holds; a non-empty busy names the section somebody else holds,
@@ -2508,6 +2685,21 @@ func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release 
 	if len(names) == 0 {
 		names = l.Repo.SectionNames() // the whole repository is every section
 	}
+	return l.acquireSections(ctx, item, names)
+}
+
+// acquireSections is leaseSections' core: it takes the leases for exactly
+// the names given, in one sorted order so two takers can never deadlock over
+// the same two sections, reaping a ghost the same way leaseSections always
+// has and releasing everything it took the moment one name is busy rather
+// than holding a partial set while it waits (it never waits at all — a busy
+// name is returned, not blocked on).
+//
+// Split out from leaseSections so a mid-claim widen (see [Loop.RunHolding]'s
+// escalation branch) can take only the sections an accepted escalation adds,
+// without re-acquiring — or re-validating YieldTo against — what the claim
+// already holds.
+func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names []string) (release func(), busy string, err error) {
 	if len(names) == 0 {
 		return func() {}, "", nil
 	}
