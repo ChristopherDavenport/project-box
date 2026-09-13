@@ -195,6 +195,132 @@ func TestRetryWithRebuildInTheNoteDropsTheResumePoint(t *testing.T) {
 	}
 }
 
+// parkKeepingAfterRebases is parkKeeping with a nonzero RebaseCount already
+// on the item, the way it looks after the rebase bound has parked it: a kept
+// candidate that has already been replayed onto a moving branch some number
+// of times.
+func parkKeepingAfterRebases(t *testing.T, qu *Queue, id, reason string, rebaseCount int) WorkItem {
+	t.Helper()
+	w := submit(t, qu, id)
+	w, lease, err := qu.Claim(context.Background(), w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.KeepCandidate("sha-built", "sha-base", []string{"build-and-test"})
+	w.RebaseCount = rebaseCount
+	w, err = qu.ParkKeeping(context.Background(), w, lease, SeverityMedium, reason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// TestRetryOfAKeptCommitResetsTheRebaseCount. The rebase bound parks a kept
+// candidate once it has been replayed onto a moving branch too many times;
+// an operator's plain "try again" must hand the retry a fresh budget of
+// rebases, exactly as a rebuild retry gets a fresh budget of attempts via
+// dropResume — otherwise the very same count comes right back and the next
+// branch move parks it again with the identical words, as if the retry had
+// done nothing.
+func TestRetryOfAKeptCommitResetsTheRebaseCount(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	parkKeepingAfterRebases(t, qu, "wi-1",
+		"rebased onto a moving branch 2 times, at the attempt budget of 2 — parking rather than chasing it again", 2)
+
+	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RebaseCount != 0 {
+		t.Fatalf("rebase count = %d, want reset to 0", got.RebaseCount)
+	}
+	if got.Built != "sha-built" || got.BuiltBase != "sha-base" || len(got.PassedGates) != 1 {
+		t.Fatalf("resetting the rebase count must not drop the kept resume point: %+v", got)
+	}
+	if !strings.Contains(got.Note, "try again") {
+		t.Fatalf("note lost the operator's own words: %q", got.Note)
+	}
+	if !strings.Contains(got.Note, "rebase count of 2 reset — a fresh budget of rebases") {
+		t.Fatalf("note did not carry the reset statement: %q", got.Note)
+	}
+
+	reloaded, err := qu.Load(ctx, tn, "wi-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.RebaseCount != 0 || reloaded.Note != got.Note {
+		t.Fatalf("the reset did not survive the fold: %+v", reloaded)
+	}
+}
+
+// TestRetryOfAKeptCommitWithNoRebasesLeavesTheNotePlain. A count of zero has
+// nothing to report — the machine suffix only belongs on the record when it
+// actually did something.
+func TestRetryOfAKeptCommitWithNoRebasesLeavesTheNotePlain(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	parkKeeping(t, qu, "wi-1", "gate refused")
+
+	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "let's ask the gate again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Note != "let's ask the gate again" {
+		t.Fatalf("note = %q, want the operator's words untouched", got.Note)
+	}
+}
+
+// TestRetryWithRebuildResetsTheRebaseCountWithoutTheMachineSuffix. A rebuild
+// retry already gets a fresh rebase budget for free, via dropResume — the
+// reset statement is only for the kept-commit path, where dropResume never
+// runs.
+func TestRetryWithRebuildResetsTheRebaseCountWithoutTheMachineSuffix(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	parkKeepingAfterRebases(t, qu, "wi-1", "gate refused", 2)
+
+	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "rebuild from scratch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RebaseCount != 0 {
+		t.Fatalf("rebase count = %d, want reset to 0", got.RebaseCount)
+	}
+	if got.Note != "rebuild from scratch" {
+		t.Fatalf("note = %q, want the operator's words untouched — dropResume already resets the count", got.Note)
+	}
+}
+
+// TestRetryOfAFailedItemResetsTheRebaseCountWithoutTheMachineSuffix. A
+// failed item's retry is always a rebuild, whatever the note says, so it
+// takes the same dropResume path as an explicit rebuild note.
+func TestRetryOfAFailedItemResetsTheRebaseCountWithoutTheMachineSuffix(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	w := submit(t, qu, "wi-1")
+	w, lease, err := qu.Claim(context.Background(), w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.KeepUnfinished("sha-built", "sha-base")
+	w.RebaseCount = 2
+	w, err = qu.Fail(context.Background(), w, lease, "the runner died mid-build")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.RebaseCount != 0 {
+		t.Fatal("setup: Fail should already drop the resume point, including the rebase count")
+	}
+
+	got, err := qu.Retry(ctx, tn, "wi-1", "chris", "try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RebaseCount != 0 {
+		t.Fatalf("rebase count = %d, want 0", got.RebaseCount)
+	}
+	if got.Note != "try again" {
+		t.Fatalf("note = %q, want the operator's words untouched", got.Note)
+	}
+}
+
 // TestResolveAlwaysDropsTheResumePoint. Closing an exception is final: there
 // is no retry left to hand a kept commit to, so unlike Retry, Resolve drops
 // it regardless of what the note says.
@@ -208,6 +334,26 @@ func TestResolveAlwaysDropsTheResumePoint(t *testing.T) {
 	}
 	if got.Built != "" || got.BuiltBase != "" || got.PassedGates != nil {
 		t.Fatalf("resolve kept a resume point: %+v", got)
+	}
+}
+
+// TestResolveDoesNotAddARebaseResetNote. Resolve is not a retry, and its
+// dropResume already resets the rebase count as part of clearing the resume
+// point entirely — it must not also grow the note with the retry-only
+// machine suffix.
+func TestResolveDoesNotAddARebaseResetNote(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	parkKeepingAfterRebases(t, qu, "wi-1", "gate refused", 2)
+
+	got, err := qu.Resolve(ctx, tn, "wi-1", "chris", "already implemented, nothing to rebuild")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RebaseCount != 0 {
+		t.Fatalf("rebase count = %d, want 0", got.RebaseCount)
+	}
+	if got.Note != "already implemented, nothing to rebuild" {
+		t.Fatalf("note = %q, want the operator's words untouched", got.Note)
 	}
 }
 

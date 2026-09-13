@@ -609,9 +609,10 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 			// free rebase-and-regate cycles, one claim after another, with the
 			// loop always one step behind. Past the bound a person decides.
 			if budget := l.attemptBudget(item); item.RebaseCount >= budget {
-				return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+				note := fmt.Sprintf(
 					"rebased onto a moving branch %d times, at the attempt budget of %d — parking rather than chasing it again",
-					item.RebaseCount, budget))
+					item.RebaseCount, budget)
+				return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, note+l.landingsClause(ctx, wsLease, forge.Commit(item.BuiltBase), base))
 			}
 			// The OLD patch-id, read while item.Built is still HEAD in this
 			// tree and its objects are certainly reachable: git.Rebase is
@@ -1702,6 +1703,41 @@ func (l *Loop) attemptBudget(item queue.WorkItem) int {
 		return l.Attempts
 	default:
 		return DefaultAttempts
+	}
+}
+
+// maxLandingsListed bounds how many commits a rebase-bound park note names:
+// a park note must not be unbounded, however far the branch moved.
+const maxLandingsListed = 10
+
+// landingsClause names, for a rebase-bound park note, the landings that
+// moved the branch out from under the kept commit — the range from the old
+// base it was built on to the new one it would have rebased onto. A listing
+// that errors is never silence: unknown never reads as zero, so the note
+// says the landings could not be listed rather than implying none did.
+//
+// It checks out `to` fresh rather than reading the adopted workspace as it
+// stands: Adopt only reattaches to a leftover tree, and the one place this
+// clause is called is exactly the one that never calls Rebase — the bound
+// is what stopped it — so that tree may hold nothing past the base it was
+// last kept against. A fresh checkout comes straight from the mirror, which
+// Fetch has already advanced, and carries the whole range by construction.
+func (l *Loop) landingsClause(ctx context.Context, wsLease forge.Lease, from, to forge.Commit) string {
+	ws, err := l.Mirror.Checkout(ctx, wsLease, to)
+	if err != nil {
+		return "; the landings that moved the branch could not be listed: " + err.Error()
+	}
+	commits, err := git.Commits(ctx, ws.Dir, from, to)
+	switch {
+	case err != nil:
+		return "; the landings that moved the branch could not be listed: " + err.Error()
+	case len(commits) == 0:
+		return ""
+	case len(commits) > maxLandingsListed:
+		return fmt.Sprintf("; landings that moved the branch: %s (and %d more)",
+			strings.Join(commits[:maxLandingsListed], "; "), len(commits)-maxLandingsListed)
+	default:
+		return "; landings that moved the branch: " + strings.Join(commits, "; ")
 	}
 }
 

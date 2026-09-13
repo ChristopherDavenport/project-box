@@ -1603,6 +1603,81 @@ func TestRebaseCounterResetsOnAFreshBuild(t *testing.T) {
 	}
 }
 
+// interlopeMsg is interlope with a caller-chosen commit subject, so a test
+// can later look for that subject in a park note and know it is looking at
+// the right landing rather than a coincidence.
+func interlopeMsg(t *testing.T, remote, file, body, msg string) {
+	t.Helper()
+	other := filepath.Join(t.TempDir(), "other")
+	mustSh(t, "", "git", "clone", remote, other)
+	if err := os.WriteFile(filepath.Join(other, file), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustSh(t, other, "git", "add", ".")
+	mustSh(t, other, "git", "commit", "-m", msg)
+	mustSh(t, other, "git", "push", "origin", "HEAD:refs/heads/main")
+}
+
+// TestRebaseBoundParkNamesTheLandingsThatMovedTheBranch extends issue #95's
+// bound (TestRebaseCounterOverItsBoundParksInsteadOfChasingTheBranch): the
+// park note must not just say a count and a budget, it must name the
+// landings that moved the branch while this candidate sat waiting — the
+// range between the base it was last kept against and the base it would
+// have rebased onto next. An operator retrying blind, with no idea what
+// landed underneath the parked candidate, is exactly the gap this closes.
+func TestRebaseBoundParkNamesTheLandingsThatMovedTheBranch(t *testing.T) {
+	e := setup(t, []string{"true"}) // Attempts: 1, so the bound is one rebase
+	ctx := context.Background()
+	approved := false // never answers: every tick stays pending
+	e.loop.Builder = &countingBuilder{}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{holdingGate{approved: &approved}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-95f"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-carry-f", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting, got %s (%s)", item.State, item.Note)
+	}
+
+	interlopeMsg(t, e.remote, "far1.txt", "moved once\n", "landing the first fix")
+	loaded, _ := q.Load(ctx, tn, "wi-carry-f")
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected still waiting after the first rebase, got %s (%s)", item.State, item.Note)
+	}
+
+	// This is the landing between the rebased-onto base and the next one —
+	// the range the park note below must name.
+	interlopeMsg(t, e.remote, "far2.txt", "moved twice\n", "landing the second fix")
+	loaded, _ = q.Load(ctx, tn, "wi-carry-f")
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("expected the second rebase to park at the bound, got %s (%s)", item.State, item.Note)
+	}
+	if !strings.Contains(item.Note, "landing the second fix") {
+		t.Fatalf("park note should name the landing that moved the branch past the bound: %q", item.Note)
+	}
+	if strings.Contains(item.Note, "landing the first fix") {
+		t.Fatalf("park note should only name landings since the last kept base, not the whole history: %q", item.Note)
+	}
+}
+
 // passExceptOnceGate fails on exactly its failOn'th call and passes every
 // other one — the shape needed to force a genuine rebuild inside a claim
 // that already carried a rebase's diff-judging gate, without ever failing

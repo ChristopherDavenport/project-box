@@ -884,6 +884,16 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 	// the commit is the problem, not the gate.
 	if kind != "retried" || rebuild {
 		w.dropResume()
+	} else if w.RebaseCount != 0 {
+		// A kept commit's retry is the operator's "try again", and a fresh
+		// attempt is owed a fresh budget of rebases — exactly as a rebuild
+		// gets a fresh budget of attempts via dropResume above. Without
+		// this the retry silently inherits the count that already tripped
+		// the rebase bound, and the very next branch move parks it right
+		// back with the same words, as if the retry had done nothing.
+		reset := w.RebaseCount
+		w.RebaseCount = 0
+		w.Note = fmt.Sprintf("%s; rebase count of %d reset — a fresh budget of rebases", w.Note, reset)
 	}
 	// Off the exception queue is off it. Leaving the severity behind would
 	// have a retried item come back already shouting, and would restart a
