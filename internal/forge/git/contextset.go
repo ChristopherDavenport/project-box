@@ -60,7 +60,14 @@ func (m *Mirror) MaterializeContext(ctx context.Context, dir string, set agent.C
 		if err := untar.Start(); err != nil {
 			return err
 		}
-		if err := archive.Run(); err != nil {
+		// The read lock covers only the archive subprocess: it is the one
+		// step that reads the mirror directory, and a concurrent Fetch must
+		// not be excluded for the tar extraction that follows.
+		lk := m.fetchLock(cr.Repo)
+		lk.RLock()
+		err = archive.Run()
+		lk.RUnlock()
+		if err != nil {
 			return fmt.Errorf("git: archive %s@%s: %w", cr.Repo, cr.Commit, err)
 		}
 		if err := untar.Wait(); err != nil {

@@ -39,10 +39,10 @@ type Mirror struct {
 	leaser forge.Leaser
 
 	mu       sync.Mutex
-	repos    map[string]forge.Repo  // name -> repo, established by Fetch
-	leased   map[string]forge.Lease // workspace dir -> lease, for Prune
-	held     map[string]bool        // workspace dir -> exempt from Prune, for Adopt
-	fetching map[string]*sync.Mutex // repo name -> lock serializing mirror updates
+	repos    map[string]forge.Repo    // name -> repo, established by Fetch
+	leased   map[string]forge.Lease   // workspace dir -> lease, for Prune
+	held     map[string]bool          // workspace dir -> exempt from Prune, for Adopt
+	fetching map[string]*sync.RWMutex // repo name -> lock excluding mirror writers from mirror readers
 }
 
 // NewMirror returns the mirror set for one tenant. The handle is tenant-bound
@@ -63,7 +63,7 @@ func NewMirror(root string, tn tenant.ID, leaser forge.Leaser) (*Mirror, error) 
 	return &Mirror{
 		root: root, tenant: tn, leaser: leaser,
 		repos: map[string]forge.Repo{}, leased: map[string]forge.Lease{},
-		held: map[string]bool{}, fetching: map[string]*sync.Mutex{},
+		held: map[string]bool{}, fetching: map[string]*sync.RWMutex{},
 	}, nil
 }
 
@@ -75,13 +75,14 @@ func (m *Mirror) workDir(run, repo string) string {
 	return filepath.Join(m.root, "work", string(m.tenant), run, repo)
 }
 
-// fetchLock returns the lock that serializes updates of one repo's mirror.
-func (m *Mirror) fetchLock(repo string) *sync.Mutex {
+// fetchLock returns the lock excluding one repo's mirror writers from its
+// mirror readers.
+func (m *Mirror) fetchLock(repo string) *sync.RWMutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	lk, ok := m.fetching[repo]
 	if !ok {
-		lk = &sync.Mutex{}
+		lk = &sync.RWMutex{}
 		m.fetching[repo] = lk
 	}
 	return lk
@@ -90,14 +91,24 @@ func (m *Mirror) fetchLock(repo string) *sync.Mutex {
 // Fetch clones the mirror on first sight and updates it after, remembering
 // the repo so Checkout and the Lander can resolve it from a name.
 //
-// Updates of one mirror serialize. `git remote update` racing itself in the
-// same directory fails to lock the refs the other run just moved — "cannot
-// lock ref 'refs/heads/main': is at X but expected Y" — and the loser reports
-// infrastructure trouble for what is only two runs sharing a directory. This
-// used to be free: the branch lease was held across the whole run, so one run
-// touched the mirror at a time. Narrowing that lease made the sharing visible,
-// and the lock is where it belongs — a mirror root is one daemon's own working
-// area, so the contention is within this process.
+// Updates of one mirror exclude every reader of it. `git remote update`
+// racing itself in the same directory fails to lock the refs the other run
+// just moved — "cannot lock ref 'refs/heads/main': is at X but expected Y" —
+// and the loser reports infrastructure trouble for what is only two runs
+// sharing a directory; a concurrent reader (Resolve, Checkout, Adopt,
+// ChangedPaths, MaterializeContext) fares no better, since `remote update`
+// can move or prune a ref mid-read. This used to be free: the branch lease
+// was held across the whole run, so one run touched the mirror at a time.
+// Narrowing that lease made the sharing visible, and the lock is where it
+// belongs — a mirror root is one daemon's own working area, so the
+// contention is within this process.
+//
+// The lock is a RWMutex for exactly this reason: Fetch holds the write side
+// for its update, and readers hold the read side only for the duration of
+// their own git subprocess against the mirror directory — never across a
+// whole build or agent session. Serializing readers behind writers for
+// longer than that is the regression #18 removed (holding the branch lease,
+// and so the mirror, across a whole run); this lock must not bring it back.
 func (m *Mirror) Fetch(ctx context.Context, repo forge.Repo) error {
 	lk := m.fetchLock(repo.Name)
 	lk.Lock()
@@ -128,8 +139,14 @@ func (m *Mirror) Repo(name string) (forge.Repo, bool) {
 }
 
 // Resolve turns a ref into the commit it names right now in the mirror.
+//
+// It holds the mirror's read lock for the rev-parse alone, so a Fetch moving
+// refs concurrently cannot hand this call a ref mid-move.
 func (m *Mirror) Resolve(ctx context.Context, repo forge.Repo, ref string) (forge.Commit, error) {
+	lk := m.fetchLock(repo.Name)
+	lk.RLock()
 	out, err := run(ctx, m.mirrorDir(repo.Name), "rev-parse", ref+"^{commit}")
+	lk.RUnlock()
 	if err != nil {
 		return "", fmt.Errorf("git: resolve %s in %s: %w", ref, repo.Name, err)
 	}
@@ -143,7 +160,10 @@ func (m *Mirror) Resolve(ctx context.Context, repo forge.Repo, ref string) (forg
 // repo's unknown-never-reads-as-zero rule). It does not fetch: it reads what
 // the mirror already has, and callers fetch first.
 func (m *Mirror) ChangedPaths(ctx context.Context, repo forge.Repo, from, to forge.Commit) ([]string, error) {
+	lk := m.fetchLock(repo.Name)
+	lk.RLock()
 	out, err := run(ctx, m.mirrorDir(repo.Name), "diff", "--name-only", string(from), string(to))
+	lk.RUnlock()
 	if err != nil {
 		return nil, fmt.Errorf("git: changed paths %s..%s in %s: %w", from, to, repo.Name, err)
 	}
@@ -184,7 +204,14 @@ func (m *Mirror) Checkout(ctx context.Context, l forge.Lease, at forge.Commit) (
 	if err := RemoveContext(forge.SkillsDir(dir)); err != nil {
 		return forge.Workspace{}, err
 	}
-	if _, err := run(ctx, "", "clone", "--no-checkout", m.mirrorDir(l.Repo), dir); err != nil {
+	// The clone reads the mirror directory; the read lock covers only this
+	// subprocess, not the checkout below, which touches only the new
+	// workspace.
+	lk := m.fetchLock(l.Repo)
+	lk.RLock()
+	_, err := run(ctx, "", "clone", "--no-checkout", m.mirrorDir(l.Repo), dir)
+	lk.RUnlock()
+	if err != nil {
 		return forge.Workspace{}, fmt.Errorf("git: materialize workspace: %w", err)
 	}
 	if _, err := run(ctx, dir, "checkout", "--detach", string(at)); err != nil {

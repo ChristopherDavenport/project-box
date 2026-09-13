@@ -3,6 +3,7 @@ package git
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -282,6 +283,99 @@ func TestConcurrentLandersOneWins(t *testing.T) {
 	n := strings.TrimSpace(mustGit(t, f.remote, "rev-list", "--count", string(f.base)+"..refs/heads/main"))
 	if n != "1" {
 		t.Fatalf("main advanced by %s commits, want 1", n)
+	}
+}
+
+// TestMirrorReadersSurviveAConcurrentFetch races a remote that keeps
+// advancing against readers of the SAME mirror, unlike
+// TestConcurrentLandersOneWins above, which gives each runner its own root
+// specifically to avoid this contention. One goroutine keeps calling Fetch,
+// whose `git remote update` moves refs in the mirror directory; several
+// others concurrently Resolve and Checkout against that same directory,
+// fenced by their own ref so the lease never serializes them — only the
+// mirror directory does. Before the mirror's lock grew a read side, a
+// reader's rev-parse or clone --no-checkout could land in the middle of
+// Fetch's update and error out; that is the shape behind issue #119's
+// flake, where TestTheCountAndTheListingAreOneFold saw an item FAILED
+// instead of landing with neither the test nor internal/api changed.
+func TestMirrorReadersSurviveAConcurrentFetch(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+	leaser := f.store.Leaser("runner-a")
+
+	const iterations = 15
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		clone := filepath.Join(t.TempDir(), "advance")
+		if _, err := run2(ctx, "", "clone", f.remote, clone); err != nil {
+			errs <- fmt.Errorf("clone: %w", err)
+			return
+		}
+		for i := 0; i < iterations; i++ {
+			path := filepath.Join(clone, fmt.Sprintf("advance-%d.txt", i))
+			if err := os.WriteFile(path, []byte("x\n"), 0o644); err != nil {
+				errs <- err
+				return
+			}
+			if _, err := run2(ctx, clone, "add", "."); err != nil {
+				errs <- fmt.Errorf("add: %w", err)
+				return
+			}
+			if _, err := run2(ctx, clone, "commit", "-m", fmt.Sprintf("advance %d", i)); err != nil {
+				errs <- fmt.Errorf("commit: %w", err)
+				return
+			}
+			if _, err := run2(ctx, clone, "push", "origin", "HEAD:refs/heads/main"); err != nil {
+				errs <- fmt.Errorf("push: %w", err)
+				return
+			}
+			if err := m.Fetch(ctx, f.repo); err != nil {
+				errs <- fmt.Errorf("fetch: %w", err)
+				return
+			}
+		}
+	}()
+
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func(r int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				if _, err := m.Resolve(ctx, f.repo, "refs/heads/main"); err != nil {
+					errs <- fmt.Errorf("resolve: %w", err)
+					return
+				}
+				lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+					Tenant: tn, Repo: "app",
+					Ref: fmt.Sprintf("refs/heads/reader-%d", r),
+					Run: fmt.Sprintf("run-reader-%d-%d", r, i),
+					TTL: time.Hour,
+				})
+				if err != nil {
+					errs <- fmt.Errorf("acquire: %w", err)
+					return
+				}
+				if _, err := m.Checkout(ctx, lease, f.base); err != nil {
+					errs <- fmt.Errorf("checkout: %w", err)
+					return
+				}
+				if err := leaser.Release(ctx, lease); err != nil {
+					errs <- fmt.Errorf("release: %w", err)
+					return
+				}
+			}
+		}(r)
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("reader raced the mirror's writer: %v", err)
 	}
 }
 

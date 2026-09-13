@@ -125,22 +125,31 @@ func (m *Mirror) MaterializeSkills(ctx context.Context, dir string, refs []agent
 // ensureSkillCommit makes sure a skill repo's mirror holds a commit, cloning
 // or fetching only when it does not, and returns the mirror directory.
 //
-// The presence check runs outside [Mirror.fetchLock] because Fetch takes that
-// lock itself and a Go mutex is not reentrant. Two runs racing the check both
-// call Fetch, which serializes them — a duplicated `remote update`, never a
-// deadlock, and the second one finds the commit and returns.
+// Each presence check takes only the mirror's read lock, released before
+// Fetch is ever called: Fetch takes the write side itself, and a Go RWMutex
+// is not reentrant, so holding the read lock across the call would deadlock
+// a goroutine against itself. Two runs racing the check both call Fetch,
+// which serializes them — a duplicated `remote update`, never a deadlock —
+// and the second one finds the commit and returns.
 func (m *Mirror) ensureSkillCommit(ctx context.Context, remote, commit string) (string, error) {
 	name := skillMirrorName(remote)
 	dir := m.mirrorDir(name)
+	lk := m.fetchLock(name)
 	if _, err := os.Stat(dir); err == nil {
-		if _, err := run(ctx, dir, "cat-file", "-e", commit+"^{commit}"); err == nil {
+		lk.RLock()
+		_, err := run(ctx, dir, "cat-file", "-e", commit+"^{commit}")
+		lk.RUnlock()
+		if err == nil {
 			return dir, nil
 		}
 	}
 	if err := m.Fetch(ctx, forge.Repo{Name: name, Remote: remote}); err != nil {
 		return "", fmt.Errorf("git: skill source %s: %w", remote, err)
 	}
-	if _, err := run(ctx, dir, "cat-file", "-e", commit+"^{commit}"); err != nil {
+	lk.RLock()
+	_, err := run(ctx, dir, "cat-file", "-e", commit+"^{commit}")
+	lk.RUnlock()
+	if err != nil {
 		return "", fmt.Errorf("git: commit %s is not in %s even after fetching — check the pin", commit, remote)
 	}
 	return dir, nil
