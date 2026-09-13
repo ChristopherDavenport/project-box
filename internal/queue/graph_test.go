@@ -51,8 +51,8 @@ func TestDiamondExecutesInTopologicalOrder(t *testing.T) {
 	}
 
 	var mu sync.Mutex
-	var order []string
 	done := map[string]bool{}
+	drained := 0
 
 	var wg sync.WaitGroup
 	for w := range 3 { // three concurrent runners racing the same graph
@@ -62,7 +62,7 @@ func TestDiamondExecutesInTopologicalOrder(t *testing.T) {
 			runner := &Queue{Store: qu.Store, Runner: "runner-" + string(rune('a'+w)), TTL: time.Hour}
 			for range 40 {
 				mu.Lock()
-				if len(order) == 4 {
+				if drained == 4 {
 					mu.Unlock()
 					return
 				}
@@ -93,7 +93,7 @@ func TestDiamondExecutesInTopologicalOrder(t *testing.T) {
 				mu.Lock()
 				if !done[pick.ID] {
 					done[pick.ID] = true
-					order = append(order, pick.ID)
+					drained++
 				}
 				mu.Unlock()
 			}
@@ -101,16 +101,35 @@ func TestDiamondExecutesInTopologicalOrder(t *testing.T) {
 	}
 	wg.Wait()
 
-	if len(order) != 4 {
-		t.Fatalf("graph did not drain: %v", order)
+	// The order goroutines happened to reach a mutex is not the order the
+	// queue produced. Read that back from each item's own chain instead:
+	// Claim appends "claimed" and Done appends "done" to scope(id), and the
+	// store stamps At at Append time, so At (not Seq, which only orders
+	// within one scope) is what lets records from different items compare.
+	firstAt := func(id, kind string) time.Time {
+		t.Helper()
+		for rec, err := range qu.Store.Log().Since(ctx, tn, scope(id), 0) {
+			if err != nil {
+				t.Fatalf("read %s chain: %v", id, err)
+			}
+			if rec.Kind == kind {
+				return rec.At
+			}
+		}
+		t.Fatalf("%s has no %q record", id, kind)
+		return time.Time{}
 	}
-	pos := map[string]int{}
-	for i, id := range order {
-		pos[id] = i
+
+	for id := range items {
+		firstAt(id, "claimed")
+		firstAt(id, "done")
 	}
 	for _, edge := range [][2]string{{"A", "B"}, {"A", "C"}, {"B", "D"}, {"C", "D"}} {
-		if pos[edge[0]] > pos[edge[1]] {
-			t.Fatalf("edge %s->%s violated: order %v", edge[0], edge[1], order)
+		doneX := firstAt(edge[0], "done")
+		claimedY := firstAt(edge[1], "claimed")
+		if claimedY.Before(doneX) {
+			t.Fatalf("edge %s->%s violated: %s claimed at %s before %s done at %s",
+				edge[0], edge[1], edge[1], claimedY, edge[0], doneX)
 		}
 	}
 }
