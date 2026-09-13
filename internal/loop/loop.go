@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
@@ -465,10 +466,50 @@ func (l *Loop) Poll(ctx context.Context, item queue.WorkItem) bool {
 	return outstanding == 0
 }
 
+// WaitOnSection records item as waiting on a busy section without spending a
+// meter seat (issue #120): Drain calls this the moment [Loop.TakeSections]
+// reports busy, before Meter.Acquire is ever reached, so a unit that cannot
+// take its section yet never spends a seat to learn that. It claims the item
+// exactly as Run does — queue.Wait needs the claim lease, and Loop is what
+// holds Store, Runner and TTL to take one — increments SectionWaits exactly
+// as leaseSections' busy path does inside Run, and waits on the same busy
+// note. Built is untouched, same as every other wait path here, so a resume
+// point already kept survives this wait too.
+func (l *Loop) WaitOnSection(ctx context.Context, item queue.WorkItem, busy string) (queue.WorkItem, error) {
+	q := &queue.Queue{Store: l.Store, Runner: l.Runner, TTL: l.TTL}
+	item, claim, err := q.Claim(ctx, item)
+	if err != nil {
+		return item, fmt.Errorf("loop: claim: %w", err)
+	}
+	item.SectionWaits++
+	return q.Wait(ctx, item, claim, busy)
+}
+
 // Run drives one item from claim to settled state. The returned item reports
 // where it ended: done, parked, waiting, or failed — an error return means
 // the loop itself broke, not that the change was judged and refused.
 func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem, rerr error) {
+	return l.RunHolding(ctx, item, nil)
+}
+
+// RunHolding is Run for a unit whose section grant the pump already took via
+// [Loop.TakeSections] (issue #120): the section lease and the meter seat must
+// be acquired together or not at all, because a unit that cannot take its
+// section yet still spent a seat to learn that, stranding every runnable
+// candidate dispatched after it in Drain's break.
+//
+// A nil grant is today's Run, byte for byte: leaseSections still runs here,
+// in the seat, exactly as it always has, so ladder, deployloop, api and
+// every existing caller are untouched. A non-nil grant means the pump
+// already holds the sections this item needs; RunHolding skips its own
+// acquisition, treats the grant as free (a unit only ever reaches here
+// because Drain found it so), and releases it — exactly once, the grant's
+// Release is idempotent — on every exit this function has, including one
+// that fails before a build ever starts.
+func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, grant *SectionGrant) (out queue.WorkItem, rerr error) {
+	if grant != nil {
+		defer grant.Release()
+	}
 	if err := forge.ValidateLane(l.Lane, l.Repo.Role); err != nil {
 		return item, err
 	}
@@ -515,16 +556,24 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	// conflict, and a conflicting replay is rebuilt by an agent, which is the
 	// most expensive thing the factory does. The lease spends a tick to save
 	// a session.
-	releaseSections, busy, err := l.leaseSections(ctx, item)
-	if err != nil {
-		return q.Park(ctx, item, claim, queue.SeverityMedium, err.Error())
+	if grant != nil {
+		// The pump already took these sections in Drain, before it spent a
+		// meter seat on this item — this call is the one place that grant is
+		// ever spent. item.SectionWaits = 0 for the same reason the direct
+		// path below zeroes it: this run of the item is not waiting.
+		item.SectionWaits = 0
+	} else {
+		releaseSections, busy, err := l.leaseSections(ctx, item)
+		if err != nil {
+			return q.Park(ctx, item, claim, queue.SeverityMedium, err.Error())
+		}
+		if busy != "" {
+			item.SectionWaits++
+			return q.Wait(ctx, item, claim, busy)
+		}
+		item.SectionWaits = 0
+		defer releaseSections()
 	}
-	if busy != "" {
-		item.SectionWaits++
-		return q.Wait(ctx, item, claim, busy)
-	}
-	item.SectionWaits = 0
-	defer releaseSections()
 
 	leaser := l.Store.Leaser(l.Runner)
 	ref := "refs/heads/" + l.Branch
@@ -2325,6 +2374,42 @@ func (l *Loop) HoldsSection(ctx context.Context, item queue.WorkItem) bool {
 		}
 	}
 	return false
+}
+
+// SectionGrant is the section leases a unit holds, taken by [Loop.TakeSections]
+// before a meter seat is spent on the unit and consumed by [Loop.RunHolding]
+// once the unit actually runs (issue #120). Release is idempotent: Drain
+// releases a grant directly when the meter refuses the seat it was taken
+// for, and RunHolding releases it again — unconditionally, on every exit —
+// so only the first call does anything.
+type SectionGrant struct {
+	release func()
+	once    sync.Once
+}
+
+// Release frees the sections this grant holds, exactly once. A nil grant
+// (the direct-Run path never takes one) is a no-op.
+func (g *SectionGrant) Release() {
+	if g == nil {
+		return
+	}
+	g.once.Do(g.release)
+}
+
+// TakeSections is leaseSections' pump-facing half: it lets Drain take the
+// section leases a candidate needs BEFORE spending a meter seat on it, so a
+// unit that cannot take its section yet never spends a seat to learn that
+// (issue #120). It reuses leaseSections verbatim — the YieldTo fairness
+// check, the sorted-order deadlock avoidance, and reapGhost's ghost-reaping
+// all keep their exact behavior — and wraps what it takes in a [SectionGrant]
+// for RunHolding to spend later. A non-empty busy or a non-nil err both mean
+// no grant was taken, matching leaseSections' own contract.
+func (l *Loop) TakeSections(ctx context.Context, item queue.WorkItem) (grant *SectionGrant, busy string, err error) {
+	release, busy, err := l.leaseSections(ctx, item)
+	if release == nil {
+		return nil, busy, err
+	}
+	return &SectionGrant{release: release}, busy, err
 }
 
 // leaseSections takes the section leases a unit needs, in one order for every

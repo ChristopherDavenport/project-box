@@ -289,8 +289,11 @@ func sectionsIntersect(a, b []string) bool {
 // a row, names it the head: every OTHER candidate in the group whose section
 // set could contend with the head's is told, via YieldTo, to step aside this
 // tick without even trying its own lease — and the head is moved to the
-// front of the dispatch order, so the capacity-exhausted break in Drain
-// cannot hand its meter slot to a unit that was told to wait for it anyway.
+// front of the dispatch order, so that among candidates who DO hold a
+// section this tick, the head is the one Drain spends a seat on first.
+// A yielded unit no longer needs protecting from the capacity-exhausted
+// break at all: issue #120 moved the section check ahead of Meter.Acquire,
+// so a unit told to wait for it anyway never consumes a slot to learn that.
 //
 // Issue #143: a candidate that already [drainCandidate.holder]s one of the
 // sections in play is never told to yield, no matter whose head it would
@@ -440,8 +443,10 @@ func landReady(item queue.WorkItem) bool {
 }
 
 // Drain runs every claimable item, within budget. It returns how many items
-// it settled this pass; blocked, stopped, busy and over-budget items simply
-// remain for the next tick.
+// it settled this pass; blocked, stopped, section-busy and over-budget items
+// simply remain for the next tick. A section-busy item never spends a seat
+// to learn it must wait (issue #120): its section is taken, and checked,
+// before the meter is ever asked.
 func (p *Pump) Drain(ctx context.Context) (int, error) {
 	var candidates []queue.WorkItem
 	// One unreadable item must not cost every other item its tick. Aborting
@@ -513,11 +518,42 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 	var mu sync.Mutex
 	settled := 0
 	var firstErr error
+	recordErr := func(item queue.WorkItem, err error) {
+		switch {
+		case err == nil, errors.Is(err, queue.ErrStopped),
+			errors.Is(err, queue.ErrBlocked),
+			errors.Is(err, queue.ErrDependencyFailed),
+			errors.Is(err, forge.ErrHeld):
+			// The queue said "not now" or "not ever" and has already
+			// recorded why; the pump moves on.
+		default:
+			if firstErr == nil {
+				firstErr = fmt.Errorf("pump: item %s: %w", item.ID, err)
+			}
+		}
+	}
 	for _, dc := range dcs {
 		if !dc.ok || !dc.polled {
 			continue
 		}
 		item, lp := dc.item, dc.lp
+
+		// Sections are taken BEFORE a seat is spent (issue #120): a candidate
+		// whose section is busy learns that for the cost of a claim and a
+		// wait, never a meter seat, and a busy section is not meter pacing —
+		// it does not break the dispatch order for whoever comes after.
+		grant, busy, terr := lp.TakeSections(ctx, item)
+		if terr == nil && busy != "" {
+			_, err := lp.WaitOnSection(ctx, item, busy)
+			mu.Lock()
+			recordErr(item, err)
+			mu.Unlock()
+			continue
+		}
+		// A hard error (an undeclared section) is rare and belongs to Run's
+		// existing park path, exactly as before: dispatched with a seat and
+		// no grant, so leaseSections runs again inside Run and parks it.
+
 		release, err := p.Meter.Acquire(ctx, item.ID)
 		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrBusy) ||
 			errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrCredential) {
@@ -529,37 +565,27 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			// factory that has stopped on purpose because it no longer knows
 			// — or was never told — which account it is spending, not a
 			// tick that failed.
+			grant.Release()
 			break
 		}
 		if err != nil {
+			grant.Release()
 			return settled, err
 		}
 		wg.Add(1)
 		p.inflight.Add(1)
-		go func(item queue.WorkItem) {
+		go func(item queue.WorkItem, grant *loop.SectionGrant) {
 			defer wg.Done()
 			defer p.inflight.Done()
 			defer release()
-			out, err := lp.Run(ctx, item)
+			out, err := lp.RunHolding(ctx, item, grant)
 			mu.Lock()
 			defer mu.Unlock()
-			switch {
-			case err == nil:
-				if !queue.Claimable(out.State) {
-					settled++
-				}
-			case errors.Is(err, queue.ErrStopped),
-				errors.Is(err, queue.ErrBlocked),
-				errors.Is(err, queue.ErrDependencyFailed),
-				errors.Is(err, forge.ErrHeld):
-				// The queue said "not now" or "not ever" and has already
-				// recorded why; the pump moves on.
-			default:
-				if firstErr == nil {
-					firstErr = fmt.Errorf("pump: item %s: %w", item.ID, err)
-				}
+			if err == nil && !queue.Claimable(out.State) {
+				settled++
 			}
-		}(item)
+			recordErr(item, err)
+		}(item, grant)
 	}
 	wg.Wait()
 	return settled, errors.Join(unreadable, firstErr)
