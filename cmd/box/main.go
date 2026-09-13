@@ -54,7 +54,7 @@ func run(args []string) error {
 		return contextCmd(fs.Args()[1:])
 	}
 	if *tn == "" || fs.NArg() == 0 {
-		return fmt.Errorf("usage: box -tenant <id> [-db path|-daemon addr] <status|queue|exceptions|submit|item|provenance|stop|resume|room|context> ...")
+		return fmt.Errorf("usage: box -tenant <id> [-db path|-daemon addr] <status|queue|exceptions|flakes|submit|item|provenance|stop|resume|room|context> ...")
 	}
 	t := tenant.ID(*tn)
 	if err := t.Validate(); err != nil {
@@ -112,6 +112,12 @@ func run(args []string) error {
 			return err
 		}
 		printExceptions(items)
+	case "flakes":
+		items, err := room.Flakes(ctx)
+		if err != nil {
+			return err
+		}
+		printFlakes(items)
 	case "stop":
 		if len(rest) == 0 {
 			return fmt.Errorf("stop needs a reason — it becomes the record")
@@ -449,6 +455,23 @@ func printExceptions(items []control.Exception) {
 	fmt.Printf("\n%d exception(s); ! is past the response-time objective\n", len(items))
 }
 
+// printFlakes renders every test the loop has proven flaky, newest
+// occurrence first — the count is the point: a test flaked once is the
+// gate doing its job, and a test flaked twice or more is why it also shows
+// up on the exceptions list.
+func printFlakes(items []control.FlakeEntry) {
+	if len(items) == 0 {
+		fmt.Println("no flakes — nothing has failed then passed on an identical patch")
+		return
+	}
+	for _, it := range items {
+		fmt.Printf("x%-3d %-22s last=%s\n    refused=%s passed=%s work_item=%s\n",
+			it.Count, it.Subject, it.LastSeen.Format(time.RFC3339),
+			short(it.RefusedHead), short(it.PassedHead), it.WorkItem)
+	}
+	fmt.Printf("\n%d flaky test(s)\n", len(items))
+}
+
 func age(sec int64) string {
 	switch {
 	case sec < 90:
@@ -552,6 +575,12 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 			return err
 		}
 		printExceptions(items)
+	case "flakes":
+		items, err := c.Flakes(ctx)
+		if err != nil {
+			return err
+		}
+		printFlakes(items)
 	case "submit":
 		sub := flag.NewFlagSet("submit", flag.ContinueOnError)
 		route := sub.String("route", "issues", "configured route name")
@@ -626,7 +655,7 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		fmt.Printf("%s %s state=%s\n%s\n", cmd, out.ID, out.State, out.Note)
 		return nil
 	default:
-		return fmt.Errorf("daemon mode supports status|queue|exceptions|submit|item|resolve|retry|provenance|stop|resume, got %q", cmd)
+		return fmt.Errorf("daemon mode supports status|queue|exceptions|flakes|submit|item|resolve|retry|provenance|stop|resume, got %q", cmd)
 	}
 	return nil
 }

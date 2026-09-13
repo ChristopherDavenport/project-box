@@ -137,6 +137,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/status", s.status)
 	mux.HandleFunc("GET /v1/exceptions", s.exceptions)
+	mux.HandleFunc("GET /v1/flakes", s.flakes)
 	mux.HandleFunc("GET /v1/items", s.items)
 	mux.HandleFunc("GET /v1/items/{id}", s.item)
 	mux.HandleFunc("GET /v1/items/{id}/evidence", s.itemEvidence)
@@ -344,6 +345,20 @@ func (s *Server) exceptions(w http.ResponseWriter, r *http.Request) {
 	}
 	if items == nil {
 		items = []control.Exception{}
+	}
+	writeJSON(w, items)
+}
+
+// flakes lists every test the loop has proven flaky, newest occurrence
+// first, each row carrying its count and the detail of the latest proof.
+func (s *Server) flakes(w http.ResponseWriter, r *http.Request) {
+	items, err := s.room(r).Flakes(r.Context())
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if items == nil {
+		items = []control.FlakeEntry{}
 	}
 	writeJSON(w, items)
 }

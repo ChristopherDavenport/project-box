@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
+	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
@@ -713,6 +714,46 @@ func TestExceptionQueueOverTheWire(t *testing.T) {
 	}
 	if !st.ExceptionQueue.Met || st.ExceptionQueue.Oldest == "" {
 		t.Fatalf("exception health: %+v", st.ExceptionQueue)
+	}
+}
+
+// TestFlakesOverTheWire: GET /v1/flakes serves [control.Room.Flakes] —
+// registered beside GET /v1/exceptions — grouped by subject with its count
+// and the latest proof's detail, same as the direct-store fold tested in
+// internal/control.
+func TestFlakesOverTheWire(t *testing.T) {
+	w := rig(t)
+	ctx := context.Background()
+	ts := httptest.NewServer(w.srv.Handler())
+	t.Cleanup(ts.Close)
+
+	subject := "acme/repo/pkg/TestFlipFlop"
+	body := []byte(`{"test":"TestFlipFlop","package":"pkg","repo":"acme/repo","refused_head":"h1","passed_head":"h2","refused_record":"r1","passed_record":"r2","work_item":"wi-1"}`)
+	for range 2 {
+		if _, err := w.srv.Store.Log().Append(ctx, evidence.Record{
+			Tenant: tn, Scope: "index/flakes", Kind: "flaky",
+			Subject: subject, Actor: "runner-1", Body: body,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	c, err := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := c.Flakes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("want 1 grouped flake, got %d: %+v", len(got), got)
+	}
+	if got[0].Subject != subject || got[0].Count != 2 {
+		t.Fatalf("the wire does not group by subject or count occurrences: %+v", got[0])
+	}
+	if got[0].RefusedHead != "h1" || got[0].PassedHead != "h2" || got[0].WorkItem != "wi-1" {
+		t.Fatalf("the latest proof's detail did not survive the wire: %+v", got[0])
 	}
 }
 

@@ -100,6 +100,13 @@ func (c *Client) Exceptions(ctx context.Context) ([]control.Exception, error) {
 	return out, c.do(ctx, "GET", "/v1/exceptions", nil, &out)
 }
 
+// Flakes lists every test the loop has proven flaky, newest occurrence
+// first, with a count and the latest proof's detail.
+func (c *Client) Flakes(ctx context.Context) ([]control.FlakeEntry, error) {
+	var out []control.FlakeEntry
+	return out, c.do(ctx, "GET", "/v1/flakes", nil, &out)
+}
+
 // Items lists the work queue, narrowed to the given states or unfiltered when
 // none are given.
 func (c *Client) Items(ctx context.Context, states ...string) ([]control.QueueEntry, error) {

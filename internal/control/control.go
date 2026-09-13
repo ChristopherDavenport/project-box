@@ -155,6 +155,22 @@ func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
 			}
 			continue
 		}
+		if strings.HasPrefix(rec.Subject, flakeSubjectPrefix) {
+			// A test the loop proved flaky twice — see
+			// [Loop.foldFlakeException], the only writer of this subject
+			// shape. Folded from the live index/flakes count rather than
+			// this index record's own body, so the note's count keeps
+			// climbing as the test flakes a third and fourth time instead
+			// of freezing at the count that first crossed the line.
+			ex, live, err := r.flakeException(ctx, rec.Subject, now, objective, told)
+			if err != nil {
+				return nil, err
+			}
+			if live {
+				out = append(out, ex)
+			}
+			continue
+		}
 		if ingress.IsID(rec.Subject) {
 			// An origination whose judgement failed before it had any item.
 			// Listed like an item — same columns, same verbs — because to
@@ -900,6 +916,136 @@ func (r *Room) selfDeployException(ctx context.Context, head string, now time.Ti
 		},
 		Parked: latest.At, AgeSec: int64(age.Seconds()),
 		Escalations: countAfter(told[id], latest.At),
+		Overdue:     age >= objective,
+	}, true, nil
+}
+
+// flakeSubjectPrefix marks an index/exceptions record as a test the loop
+// proved flaky twice, rather than a work item, an origination, or a
+// self-deploy rollback — duplicated from internal/loop's own literal rather
+// than imported, the same tradeoff selfDeploySubjectPrefix documents above:
+// this stays the read-only room, loop stays the writer, and the string is
+// the only contract between them.
+const flakeSubjectPrefix = "flake/"
+
+// flakeBody mirrors the JSON body internal/loop's flakeRecord writes to
+// "index/flakes" — duplicated rather than imported for the same layering
+// reason as flakeSubjectPrefix: loop reaches into forge and agent to run
+// gates, and this package stays the read model.
+type flakeBody struct {
+	Test          string `json:"test"`
+	Package       string `json:"package"`
+	Repo          string `json:"repo"`
+	RefusedHead   string `json:"refused_head"`
+	PassedHead    string `json:"passed_head"`
+	RefusedRecord string `json:"refused_record"`
+	PassedRecord  string `json:"passed_record"`
+	WorkItem      string `json:"work_item"`
+}
+
+// FlakeEntry is one flaky test as an operator needs it: which test, how
+// many times the loop has proven it flaky, and the detail of the latest
+// proof.
+type FlakeEntry struct {
+	// Subject is "<repo>/<package>/<TestName>" — the same string
+	// [Loop.proveFlake] names each "flaky" record's subject with.
+	Subject string `json:"subject"`
+	Repo    string `json:"repo"`
+	Package string `json:"package"`
+	Test    string `json:"test"`
+	// Count is how many "flaky" records this subject has on index/flakes.
+	// See [Room.Flakes]: it is that listing's own tally, never a second
+	// walk of the same chain.
+	Count int `json:"count"`
+	// LastSeen and the rest of this entry are the latest flaky record's own
+	// detail — the two verdicts it names, never a restatement synthesized
+	// from somewhere else.
+	LastSeen      time.Time `json:"last_seen"`
+	RefusedHead   string    `json:"refused_head"`
+	PassedHead    string    `json:"passed_head"`
+	RefusedRecord string    `json:"refused_record"`
+	PassedRecord  string    `json:"passed_record"`
+	WorkItem      string    `json:"work_item"`
+}
+
+// Flakes lists every test [Loop.proveFlake] has recorded flaky at least
+// once, newest occurrence first, one row per subject with a count over
+// every "flaky" record it has and the detail of the latest one.
+//
+// Grouped rather than raw: the tenant-wide "index/flakes" scope holds one
+// record per proof, and a test proven flaky five times is one line an
+// operator reads once, not five they have to notice are the same test.
+func (r *Room) Flakes(ctx context.Context) ([]FlakeEntry, error) {
+	byName := map[string]*FlakeEntry{}
+	var order []string
+	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/flakes", 0) {
+		if err != nil {
+			return nil, err
+		}
+		var body flakeBody
+		if json.Unmarshal(rec.Body, &body) != nil {
+			continue
+		}
+		e, ok := byName[rec.Subject]
+		if !ok {
+			e = &FlakeEntry{Subject: rec.Subject}
+			byName[rec.Subject] = e
+			order = append(order, rec.Subject)
+		}
+		e.Count++
+		e.Repo, e.Package, e.Test = body.Repo, body.Package, body.Test
+		e.LastSeen = rec.At
+		e.RefusedHead, e.PassedHead = body.RefusedHead, body.PassedHead
+		e.RefusedRecord, e.PassedRecord = body.RefusedRecord, body.PassedRecord
+		e.WorkItem = body.WorkItem
+	}
+	out := make([]FlakeEntry, 0, len(order))
+	for _, s := range order {
+		out = append(out, *byName[s])
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].LastSeen.After(out[j].LastSeen) })
+	return out, nil
+}
+
+// flakeException folds the same "index/flakes" scope [Room.Flakes] reads
+// into the exception shape the room already renders, for one "flake/"
+// subject off the index/exceptions walk in [Room.Exceptions].
+//
+// subject — the full "flake/<repo>/<package>/<test>" string — is kept as
+// the exception's own ID rather than shortened. Contrast
+// [Room.selfDeployException]'s shortCommit, whose mismatch against the
+// escalation key silently zeroed Escalations forever (see its comment):
+// keeping this ID identical to what recordEscalation will key future
+// escalations by is what keeps that bug from recurring here.
+func (r *Room) flakeException(ctx context.Context, subject string, now time.Time, objective time.Duration, told map[string][]time.Time) (Exception, bool, error) {
+	test := strings.TrimPrefix(subject, flakeSubjectPrefix)
+	count := 0
+	var latest evidence.Record
+	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/flakes", 0) {
+		if err != nil {
+			return Exception{}, false, err
+		}
+		if rec.Subject != test {
+			continue
+		}
+		count++
+		if latest.Seq == 0 || rec.Seq > latest.Seq {
+			latest = rec
+		}
+	}
+	if count == 0 {
+		return Exception{}, false, nil
+	}
+	note := fmt.Sprintf("%s flaked %d times — needs fixing, not re-rolling", test, count)
+	age := now.Sub(latest.At)
+	return Exception{
+		WorkItem: queue.WorkItem{
+			ID: subject, Tenant: r.Tenant,
+			Kind: "flake", State: queue.StateParked,
+			Note: note, Severity: queue.SeverityMedium,
+		},
+		Parked: latest.At, AgeSec: int64(age.Seconds()),
+		Escalations: countAfter(told[subject], latest.At),
 		Overdue:     age >= objective,
 	}, true, nil
 }
