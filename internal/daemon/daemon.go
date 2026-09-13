@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -171,6 +172,11 @@ type Daemon struct {
 	// so a test substitutes a fixed fact rather than depending on how the
 	// test binary itself happened to be built.
 	build func() version.Build
+	// bootIDPath is where the host's boot id is read from at start —
+	// /proc/sys/kernel/random/boot_id in production. A test substitutes a
+	// path of its own, including one that does not exist, to exercise the
+	// unreadable case without depending on the real kernel file.
+	bootIDPath string
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -204,6 +210,7 @@ func New(path string) (*Daemon, error) {
 		selfDeploy: &selfDeployState{},
 		exePath:    os.Executable,
 		build:      version.ThisBuild,
+		bootIDPath: defaultBootIDPath,
 		router:     router,
 		poller: &ingress.Poller{
 			Lister: newGHIssueLister(ghAuthToken), Router: router, Log: s.Log(),
@@ -796,6 +803,9 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// path [RecoverFromFailedStart] never reaches — that seam only runs when
 	// startup fails before this point, and this only runs when it does not.
 	d.resolveSelfDeployMarker(ctx)
+	if err := d.recordStarted(ctx); err != nil {
+		slog.Error("daemon-started: recording", "err", err)
+	}
 	httpSrv := &http.Server{Handler: d.API.Handler()}
 	go func() {
 		if err := httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -948,6 +958,7 @@ var StandingScopes = []string{
 	"control/capacity",
 	"control/claims",
 	"control/config",
+	"control/daemon",
 	"control/escalations",
 	"control/review",
 	"index/ingress",
@@ -964,6 +975,72 @@ func (d *Daemon) drain() time.Duration {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	return d.cfg.DrainDuration()
+}
+
+// defaultBootIDPath is the kernel's own record of this boot, regenerated
+// every time the host boots — the production value of [Daemon.bootIDPath].
+const defaultBootIDPath = "/proc/sys/kernel/random/boot_id"
+
+// daemonStartedScope is the standing chain a daemon-started record is
+// appended to. One record per process start grows without bound, so it is
+// in [StandingScopes] and swept like the rest.
+const daemonStartedScope = "control/daemon"
+
+// daemonStartedBody is the JSON body of a daemon-started record. BootIDKnown
+// and BuildKnown carry the fact of unknown-ness explicitly, mirroring
+// [version.Build] itself: an unreadable boot-id file or an unstamped build
+// must never be presented as a zero value indistinguishable from a real one.
+type daemonStartedBody struct {
+	BootID      string `json:"boot_id,omitempty"`
+	BootIDKnown bool   `json:"boot_id_known"`
+	BuildCommit string `json:"build_commit,omitempty"`
+	BuildDirty  bool   `json:"build_dirty,omitempty"`
+	BuildKnown  bool   `json:"build_known"`
+}
+
+// readBootID reads the host's boot id from path, trimmed of the trailing
+// newline the kernel file carries. Any read failure — missing file, denied
+// permission, a path that is not this kernel's boot-id file at all — reports
+// unknown rather than guessing from an empty read.
+func readBootID(path string) (string, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	id := strings.TrimSpace(string(b))
+	if id == "" {
+		return "", false
+	}
+	return id, true
+}
+
+// recordStarted appends the daemon-started record: this process came up,
+// identified by the host's boot id and the binary's own build. Called from
+// Run once the listener is bound — never from New, which every test
+// constructs without running — so a gap between a stop-with-reason and the
+// next daemon-started record is the record of the box being down, not an
+// inference from log silence.
+func (d *Daemon) recordStarted(ctx context.Context) error {
+	body := daemonStartedBody{}
+	bootID, ok := readBootID(d.bootIDPath)
+	body.BootID, body.BootIDKnown = bootID, ok
+	build := d.build()
+	if build.Known {
+		body.BuildCommit, body.BuildDirty, body.BuildKnown = build.Commit, build.Dirty, true
+	}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("daemon: encoding daemon-started record: %w", err)
+	}
+	subject := bootID
+	if !ok {
+		subject = "unknown"
+	}
+	_, err = d.store.Log().Append(ctx, evidence.Record{
+		Tenant: d.tenant, Scope: daemonStartedScope, Kind: "daemon-started",
+		Subject: subject, Actor: d.cfgRunner(), Body: encoded,
+	})
+	return err
 }
 
 func firstLine(s string) string {
