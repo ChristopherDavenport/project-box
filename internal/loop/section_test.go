@@ -83,6 +83,34 @@ func TestDisjointSectionsRunAtOnce(t *testing.T) {
 	}
 }
 
+// TestALandReadyUnitDeferredByAHeldSectionNamesTheOwedRebase. Issue #143: a
+// unit that already has a kept, buildable commit owes only a rebase and a
+// push, never an agent session — losing that fact to the section-busy note
+// makes it read the same as a unit that has not started at all.
+func TestALandReadyUnitDeferredByAHeldSectionNamesTheOwedRebase(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	hold(t, e, "api", "wi-elsewhere")
+
+	api := e.submit(t, "api-1", func(w *queue.WorkItem) {
+		w.Sections = []string{"api"}
+		w.Built = "deadbeefdeadbeef"
+		w.BuiltBase = "base"
+	})
+	api, err := e.loop.Run(ctx, api)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if api.State != queue.StateWaiting {
+		t.Fatalf("a unit in a held section should wait, got %s: %s", api.State, api.Note)
+	}
+	for _, want := range []string{"kept commit deadbeefdead", "is owed", "section api", "held by wi-elsewhere"} {
+		if !strings.Contains(api.Note, want) {
+			t.Errorf("the wait does not say %q: %s", want, api.Note)
+		}
+	}
+}
+
 // TestAnUnsectionedUnitIsTheWholeRepository. A unit that names no section
 // leases every declared one, so it can never run beside a sectioned unit —
 // in either order.

@@ -2395,6 +2395,13 @@ func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release 
 				}
 			}
 			result := fmt.Sprintf("section %s of %s is %s", n, l.Repo.Name, reason)
+			if item.Built != "" && !item.Unfinished {
+				// A land-ready wait owes a rebase and a push, never a build —
+				// losing that fact to the section-busy note makes a unit one
+				// step from landing read the same as one that has not started,
+				// which is exactly the misprice issue #143 is about.
+				result = fmt.Sprintf("a rebase and push of kept commit %s is owed; %s", short(forge.Commit(item.Built)), result)
+			}
 			if item.SectionWaits > 0 {
 				result += fmt.Sprintf("; waited %d turns", item.SectionWaits)
 			}

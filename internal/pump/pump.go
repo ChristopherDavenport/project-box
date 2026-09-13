@@ -307,6 +307,20 @@ func sectionsIntersect(a, b []string) bool {
 // skipped entirely — held on a person or unrouted, it is not contending for
 // a section this tick either way.
 //
+// Issue #143 (corrected): under a full capacity budget, Drain's dispatch
+// loop breaks the moment a slot is busy or exhausted (see the break below),
+// so whoever sits first in this order takes the only seat — and submission
+// order alone prices a unit that owes only a rebase, a re-gate, and a push
+// the same as one that has not even started a build. A [landReady] candidate
+// is moved ahead of every non-head, non-holder candidate that would start a
+// fresh build, even when nobody in its group has starved: finishing a
+// landing frees its section sooner than any build does, and every build
+// that lands first is a rebase the waiter pays for. It still yields to a
+// starved head whose sections it shares, the same as any other candidate —
+// a starved head and a land-ready waiter are both already waiting, and the
+// head is by definition the older of the two — but among the rest it goes
+// first.
+//
 // Issue #166: the same shape applies to the land window. A group's land
 // window is one branch (Branch is repo-level config, so the (box, repo)
 // group is already the right granularity), and a candidate parked there with
@@ -392,9 +406,6 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 			}
 		}
 	}
-	if len(heads) == 0 {
-		return cands
-	}
 	ordered := make([]drainCandidate, 0, len(cands))
 	for i, c := range cands {
 		if c.holder && !heads[i] {
@@ -407,11 +418,25 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 		}
 	}
 	for i, c := range cands {
-		if !heads[i] && !c.holder {
+		if !heads[i] && !c.holder && landReady(c.item) {
+			ordered = append(ordered, c)
+		}
+	}
+	for i, c := range cands {
+		if !heads[i] && !c.holder && !landReady(c.item) {
 			ordered = append(ordered, c)
 		}
 	}
 	return ordered
+}
+
+// landReady reports whether item is a kept commit already offered for
+// judgement — a re-claim that owes only a rebase, a re-gate, and a push,
+// never a fresh agent session. Unfinished excludes a mid-session handoff:
+// that Built commit is unreviewable work in progress and still owes a build.
+// See [queue.WorkItem.Built] and [queue.WorkItem.Unfinished].
+func landReady(item queue.WorkItem) bool {
+	return item.Built != "" && !item.Unfinished
 }
 
 // Drain runs every claimable item, within budget. It returns how many items

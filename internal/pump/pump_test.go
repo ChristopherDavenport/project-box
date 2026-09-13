@@ -793,3 +793,152 @@ func TestAHolderIsNeverYieldedToTheLandHead(t *testing.T) {
 		t.Fatalf("the land head should claim the seat once the holder frees it, got %s: %s", head.State, head.Note)
 	}
 }
+
+// TestALandReadyCandidateGoesBeforeAFreshBuild is the corrected issue #143 by
+// name: a unit one rebase from landing sat unclaimed while a sibling that had
+// not even started building took the section, because fairSectionOrder only
+// reordered candidates once someone had starved. A land-ready candidate
+// (Built set, not Unfinished — a kept commit offered for judgement, owing
+// only a rebase, a re-gate and a push) now wins the one seat over a fresh
+// sibling naming the same section even though it was submitted later and
+// nobody has starved yet: finishing its landing frees the section sooner
+// than the sibling's build ever would.
+func TestALandReadyCandidateGoesBeforeAFreshBuild(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 1})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	unbuilt := w.submitItem(t, "unbuilt-1", "fix module unbuilt", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+	})
+	ready := w.submitItem(t, "ready-1", "fix module ready", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.Built, wi.BuiltBase = "deadbeef", "cafebabe"
+		wi.PassedGates = []string{"post-land"}
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	unbuilt, err := w.q.Load(ctx, tn, unbuilt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err = w.q.Load(ctx, tn, ready.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.State != queue.StateDone {
+		t.Fatalf("the land-ready candidate should claim the one seat and land, got %s: %s", ready.State, ready.Note)
+	}
+	if unbuilt.State != queue.StatePending {
+		t.Fatalf("the unbuilt sibling should not even have been tried this tick (the seat went to the land-ready candidate), got %s: %s", unbuilt.State, unbuilt.Note)
+	}
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	unbuilt, err = w.q.Load(ctx, tn, unbuilt.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unbuilt.State != queue.StateDone {
+		t.Fatalf("the unbuilt sibling should claim the section once it frees, got %s: %s", unbuilt.State, unbuilt.Note)
+	}
+}
+
+// TestAStarvedHeadStillWinsOverALandReadyWaiter: a land-ready candidate is
+// still just a waiter next to a head that has already reached the starve
+// bound — the head is by definition the older of the two waits — so it goes
+// first, and the land-ready candidate yields to it exactly like any other
+// contender whose sections intersect the head's.
+func TestAStarvedHeadStillWinsOverALandReadyWaiter(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	head := w.submitItem(t, "head-1", "fix module head", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.SectionWaits = 3
+	})
+	ready := w.submitItem(t, "ready-1", "fix module ready", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.Built, wi.BuiltBase = "deadbeef", "cafebabe"
+		wi.PassedGates = []string{"post-land"}
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	head, err := w.q.Load(ctx, tn, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err = w.q.Load(ctx, tn, ready.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.State != queue.StateDone {
+		t.Fatalf("the starved head should dispatch and land, got %s: %s", head.State, head.Note)
+	}
+	if ready.State != queue.StateWaiting {
+		t.Fatalf("the land-ready candidate should yield to the starved head, got %s: %s", ready.State, ready.Note)
+	}
+	for _, want := range []string{"reserved for " + head.ID, "next in line"} {
+		if !strings.Contains(ready.Note, want) {
+			t.Errorf("the land-ready candidate's wait does not say %q: %s", want, ready.Note)
+		}
+	}
+}
+
+// TestAHolderIsNeverOutrankedByALandReadyNonHolder extends the #143 holder
+// exemption to the new class: a holder is the only thing that can free its
+// own section, so it dispatches ahead of a land-ready non-holder contending
+// for that same section too — even though, submitted first and with nobody
+// starved, the land-ready candidate would otherwise win the reorder.
+func TestAHolderIsNeverOutrankedByALandReadyNonHolder(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 1})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	ready := w.submitItem(t, "ready-1", "fix module ready", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.Built, wi.BuiltBase = "deadbeef", "cafebabe"
+		wi.PassedGates = []string{"post-land"}
+	})
+
+	holder := w.submitItem(t, "holder-1", "fix module holder", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+	})
+	claimed, lease, err := w.q.Claim(ctx, holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed.KeepCandidate("deadbeef", "cafebabe", nil)
+	holder, err = w.q.Wait(ctx, claimed, lease, "mid-flight, needs re-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	holdSection(t, w, "api", holder.ID)
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	holder, err = w.q.Load(ctx, tn, holder.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err = w.q.Load(ctx, tn, ready.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if holder.State != queue.StateDone {
+		t.Fatalf("the holder should claim the one seat ahead of a land-ready non-holder, got %s: %s", holder.State, holder.Note)
+	}
+	if ready.State != queue.StatePending {
+		t.Fatalf("the land-ready non-holder should not even have been tried this tick (the seat went to the holder), got %s: %s", ready.State, ready.Note)
+	}
+}
