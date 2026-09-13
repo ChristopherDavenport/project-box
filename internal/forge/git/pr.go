@@ -438,9 +438,18 @@ func (p *PRLander) tokenScopes(ctx context.Context, tok string) (scopes []string
 		return nil, false, err
 	}
 	defer resp.Body.Close()
-	io.Copy(io.Discard, resp.Body)
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, false, err
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, false, fmt.Errorf("github: GET %s: %s", endpoint, resp.Status)
+		return nil, false, &HTTPError{
+			Method:     http.MethodGet,
+			Endpoint:   endpoint,
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       strings.TrimSpace(string(data)),
+		}
 	}
 	values := resp.Header.Values("X-OAuth-Scopes")
 	if values == nil {
@@ -844,7 +853,13 @@ func (p *PRLander) call(ctx context.Context, method, endpoint, token string, in,
 		return err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("github: %s %s: %s: %s", method, endpoint, resp.Status, strings.TrimSpace(string(data)))
+		return &HTTPError{
+			Method:     method,
+			Endpoint:   endpoint,
+			StatusCode: resp.StatusCode,
+			Status:     resp.Status,
+			Body:       strings.TrimSpace(string(data)),
+		}
 	}
 	if out != nil {
 		return json.Unmarshal(data, out)

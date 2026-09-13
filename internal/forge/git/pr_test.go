@@ -3,7 +3,9 @@ package git
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -79,6 +81,16 @@ type fakeGitHub struct {
 	// issueGet500 makes GET .../issues/{n} answer 500, for the "an issues
 	// API failure must not fail the landing" test.
 	issueGet500 bool
+	// postPRStatus, when nonzero, makes POST .../pulls answer this status
+	// instead of creating anything — a request GitHub never acted on, for
+	// tests of a validation failure (422) or a plain server error (500)
+	// that leaves no PR behind.
+	postPRStatus int
+	// postPRLoseAckOnce makes the FIRST POST .../pulls create and record the
+	// PR exactly as it would in production, but answer 500 instead of 201 —
+	// the ack lost, not the write. It resets itself after firing once, so a
+	// retried create behaves normally.
+	postPRLoseAckOnce bool
 }
 
 // ghIssueState is one issue's mutable state, as [PRLander.closeDrivingIssue]
@@ -206,6 +218,10 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		json.NewEncoder(w).Encode(out)
 	case len(parts) == 4 && parts[3] == "pulls" && r.Method == http.MethodPost:
+		if g.postPRStatus != 0 {
+			http.Error(w, "boom", g.postPRStatus)
+			return
+		}
 		var in struct{ Title, Head, Base, Body string }
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -216,6 +232,11 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		g.creates++
 		pr := ghPR{Number: g.next, Title: in.Title, Body: in.Body, URL: "https://github.com/" + owner + "/" + repo + "/pull/" + strconv.Itoa(g.next)}
 		g.byHead[key] = pr
+		if g.postPRLoseAckOnce {
+			g.postPRLoseAckOnce = false
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(pr)
 	case len(parts) == 4 && parts[3] == "check-runs" && r.Method == http.MethodPost:
@@ -1636,5 +1657,189 @@ func TestPRIssuesAPIFailureDoesNotFailLandingOrCloseIssue(t *testing.T) {
 	}
 	if landing.Landed[0].IssueClosed {
 		t.Fatal("Landed[0].IssueClosed = true, want false: the issues API never answered")
+	}
+}
+
+// landThroughPR builds a one-member ChangeSet on a fresh feature commit and
+// lands it through x.pr, for tests that only care about the error the PR
+// stage itself returns, not about closing a driving issue.
+func landThroughPR(t *testing.T, x *prFix) (forge.Landing, error) {
+	t.Helper()
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	return x.pr.Land(ctx, cs)
+}
+
+// TestPRLandSurfacesTypedTransientErrorOn500 is issue #161: a 500 answering
+// the PR-create call must reach PRLander.Land as the typed *HTTPError — not
+// a plain fmt.Errorf nobody downstream can classify — and Transient must
+// call it retriable: the forge's own bad minute, not a fact about the
+// change.
+func TestPRLandSurfacesTypedTransientErrorOn500(t *testing.T) {
+	x := fixPR(t)
+	x.gh.postPRStatus = http.StatusInternalServerError
+
+	_, err := landThroughPR(t, x)
+	if err == nil {
+		t.Fatal("want error from a 500 on PR create")
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("errors.As did not find *HTTPError in: %v", err)
+	}
+	if httpErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("StatusCode = %d, want 500", httpErr.StatusCode)
+	}
+	if !Transient(err) {
+		t.Fatalf("Transient(%v) = false, want true for a 500", err)
+	}
+}
+
+// TestPRLandNonTransientOn422 is the other half of #161: a 422 (validation,
+// e.g. the workflow-scope check from #78) is a fact about the request, not
+// the forge's trouble, and must never be retried.
+func TestPRLandNonTransientOn422(t *testing.T) {
+	x := fixPR(t)
+	x.gh.postPRStatus = http.StatusUnprocessableEntity
+
+	_, err := landThroughPR(t, x)
+	if err == nil {
+		t.Fatal("want error from a 422 on PR create")
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) {
+		t.Fatalf("errors.As did not find *HTTPError in: %v", err)
+	}
+	if httpErr.StatusCode != http.StatusUnprocessableEntity {
+		t.Fatalf("StatusCode = %d, want 422", httpErr.StatusCode)
+	}
+	if Transient(err) {
+		t.Fatalf("Transient(%v) = true, want false for a 422", err)
+	}
+}
+
+// resetConnectionServer answers every request by hijacking the connection
+// and closing it with SO_LINGER 0, which forces a TCP RST rather than a
+// clean FIN — the deterministic way to make an HTTP client observe a
+// connection reset rather than a timeout or a clean EOF.
+func resetConnectionServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			return
+		}
+		if tcp, ok := conn.(*net.TCPConn); ok {
+			tcp.SetLinger(0)
+		}
+		conn.Close()
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// TestPRLandTransientOnConnectionReset is #161's transport-level case: a
+// connection reset never reaches GitHub's answer at all, so there is no
+// *HTTPError to type-assert on, but Transient must still call it retriable
+// — it is unambiguously the forge's own trouble reaching GitHub, not a fact
+// about the change.
+func TestPRLandTransientOnConnectionReset(t *testing.T) {
+	x := fixPR(t)
+	reset := resetConnectionServer(t)
+	x.pr.apiBase = reset.URL
+	x.pr.httpClient = reset.Client()
+
+	_, err := landThroughPR(t, x)
+	if err == nil {
+		t.Fatal("want error from a reset connection")
+	}
+	if !Transient(err) {
+		t.Fatalf("Transient(%v) = false, want true for a connection reset", err)
+	}
+}
+
+// TestTransientFalseOnContextCanceled is #161's explicit exclusion: context
+// cancellation must never read as the forge's own trouble, including when
+// it surfaces wrapped in a *url.Error the way httpClient.Do reports it.
+func TestTransientFalseOnContextCanceled(t *testing.T) {
+	x := fixPR(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	var out any
+	err := x.pr.call(ctx, http.MethodGet, x.gh.URL+"/rate_limit", "test-token", nil, &out)
+	if err == nil {
+		t.Fatal("want error from a call made with an already-canceled context")
+	}
+	if Transient(err) {
+		t.Fatalf("Transient(%v) = true, want false for context.Canceled", err)
+	}
+}
+
+// TestPRLandRetriesAfterLostCreateAck is the idempotency case #161 names
+// directly: the first POST /pulls creates the PR on GitHub's side but the
+// forge only sees a 500 (the ack lost, not the write). A retried Land must
+// find the already-created PR through the list-open-PRs-by-head lookup in
+// ensurePR rather than create a second one.
+func TestPRLandRetriesAfterLostCreateAck(t *testing.T) {
+	x := fixPR(t)
+	x.gh.postPRLoseAckOnce = true
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+
+	if _, err := x.pr.Land(ctx, cs); err == nil {
+		t.Fatal("want error from the first land: the create ack was lost")
+	} else if !Transient(err) {
+		t.Fatalf("Transient(%v) = false, want true: a lost ack is the forge's own trouble", err)
+	}
+
+	// Same ChangeSet, same still-held lease: a retried tick resumes the
+	// same run rather than acquiring a new one.
+	landing, err := x.pr.Land(ctx, cs)
+	if err != nil {
+		t.Fatalf("retried land: %v", err)
+	}
+	if !landing.Complete() {
+		t.Fatalf("retried landing incomplete: %+v", landing)
+	}
+
+	posts := 0
+	for _, r := range x.gh.requests {
+		if r == "POST /repos/acme/app/pulls" {
+			posts++
+		}
+	}
+	if posts != 1 {
+		t.Fatalf("POST .../pulls seen %d times across both attempts, want exactly 1", posts)
 	}
 }
