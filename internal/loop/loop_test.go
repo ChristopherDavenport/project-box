@@ -2466,3 +2466,461 @@ func TestGateMeterRefusalWaitsWithoutRetryingOrParking(t *testing.T) {
 		t.Fatal("waiting on a meter refusal should keep the resume point, like any other wait")
 	}
 }
+
+// shapedFailGate refuses its first failFor evaluations with the exact
+// go-test transcript shape flake detection parses — a "--- FAIL: <test>"
+// line closed out by a "FAIL\t<pkg>" summary — then passes every call after.
+type shapedFailGate struct {
+	name    string
+	n       *int
+	failFor int
+	test    string
+	pkg     string
+}
+
+func (g shapedFailGate) Name() string { return g.name }
+
+func (g shapedFailGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	*g.n++
+	if *g.n <= g.failFor {
+		return forge.Verdict{
+			Gate: g.name, Decision: forge.DecisionFail,
+			Reason: fmt.Sprintf("--- FAIL: %s (0.00s)\nFAIL\t%s\t0.004s\n", g.test, g.pkg),
+		}, nil
+	}
+	return forge.Verdict{Gate: g.name, Decision: forge.DecisionPass, Reason: "green now"}, nil
+}
+
+// revisingSubdirBuilder writes a new file every call, all under a fixed
+// subdirectory, so a package name equal to that directory stays "inside the
+// diff" across every attempt while still producing a genuinely new commit
+// each time (unlike scriptedBuilder's determinism-on-the-task-text).
+type revisingSubdirBuilder struct {
+	dir string
+	n   int
+}
+
+func (b *revisingSubdirBuilder) Build(_ context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	b.n++
+	full := filepath.Join(ws.Dir, b.dir)
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		return "", err
+	}
+	name := fmt.Sprintf("attempt-%d.txt", b.n)
+	if err := os.WriteFile(filepath.Join(full, name), []byte(task+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "commit", "-m", fmt.Sprintf("%s (attempt %d)", scriptedCommitSubject(task), b.n)); err != nil {
+		return "", err
+	}
+	out, err := sh(ws.Dir, "git", "rev-parse", "HEAD")
+	return forge.Commit(strings.TrimSpace(out)), err
+}
+
+// resettingBuilder rewinds the workspace to a fixed base before writing the
+// same content every call: two attempts produce two different commits (a
+// new commit message each time keeps the sha distinct) with an IDENTICAL
+// diff against base — the shape flake detection's patch-id comparison needs
+// to prove a same-claim retry is the same change, not a different one.
+type resettingBuilder struct {
+	base string
+	n    int
+}
+
+func (b *resettingBuilder) Build(_ context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	b.n++
+	if _, err := sh(ws.Dir, "git", "reset", "--hard", b.base); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, "answer.txt"), []byte(task+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "commit", "-m", fmt.Sprintf("%s (attempt %d)", scriptedCommitSubject(task), b.n)); err != nil {
+		return "", err
+	}
+	out, err := sh(ws.Dir, "git", "rev-parse", "HEAD")
+	return forge.Commit(strings.TrimSpace(out)), err
+}
+
+// gateRecordBody loads the "gate" record body on item's chain for subject,
+// unmarshalled as a gateVerdictRecord — the same body shape [Loop.Run]
+// itself writes.
+func gateRecordBody(t *testing.T, e *env, itemID, subject string) gateVerdictRecord {
+	t.Helper()
+	ctx := context.Background()
+	var found gateVerdictRecord
+	got := false
+	for r, err := range e.store.Log().Since(ctx, tn, "workitem/"+itemID, 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind != "gate" || r.Subject != subject {
+			continue
+		}
+		if err := json.Unmarshal(r.Body, &found); err != nil {
+			t.Fatalf("gate record did not parse: %v", err)
+		}
+		got = true
+	}
+	if !got {
+		t.Fatalf("no gate record found on %s for subject %s", itemID, subject)
+	}
+	return found
+}
+
+// flakeRecords reads every "flaky" record on the tenant-wide index whose
+// Subject matches subject.
+func flakeRecords(t *testing.T, e *env, subject string) []flakeRecord {
+	t.Helper()
+	ctx := context.Background()
+	var out []flakeRecord
+	for r, err := range e.store.Log().Since(ctx, tn, "index/flakes", 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Subject != subject {
+			continue
+		}
+		var fr flakeRecord
+		if err := json.Unmarshal(r.Body, &fr); err != nil {
+			t.Fatalf("flaky record did not parse: %v", err)
+		}
+		out = append(out, fr)
+	}
+	return out
+}
+
+// exceptionSubjects reads every Subject on the tenant-wide "index/exceptions"
+// chain.
+func exceptionSubjects(t *testing.T, e *env) []string {
+	t.Helper()
+	ctx := context.Background()
+	var out []string
+	for r, err := range e.store.Log().Since(ctx, tn, "index/exceptions", 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, r.Subject)
+	}
+	return out
+}
+
+// TestOutsideDiffRefusalIsAnnotatedWithTheFailingTest is issue #131's part
+// (1): a refusal whose Reason names a failing Go test in a package this
+// change's diff never touched is annotated on the gate record itself, so a
+// later pass on the identical patch has something to prove a flake against.
+func TestOutsideDiffRefusalIsAnnotatedWithTheFailingTest(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	var calls int
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{shapedFailGate{
+			name: "build-and-test", n: &calls, failFor: 99,
+			test: "TestFoo", pkg: "github.com/example/otherpkg",
+		}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-flake-a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flake-a", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("expected parked, got %s (%s)", item.State, item.Note)
+	}
+
+	vr := gateRecordBody(t, e, "wi-flake-a", item.Built)
+	if !vr.OutsideDiff {
+		t.Fatalf("a refusal naming a test outside the diff should be annotated: %+v", vr)
+	}
+	if len(vr.FailedTests) != 1 || vr.FailedTests[0] != "TestFoo" {
+		t.Fatalf("expected FailedTests=[TestFoo], got %v", vr.FailedTests)
+	}
+}
+
+// TestRefusalInsideTheDiffNeverFlakes is issue #131's negative case: a
+// refusal naming a test in a package the diff itself touched is never a
+// flake candidate, however the gate later answers — annotating it, or
+// recording a flake from it, would blame a test for a change that touched
+// its own package.
+func TestRefusalInsideTheDiffNeverFlakes(t *testing.T) {
+	e := setup(t, []string{"true"})
+	e.loop.Attempts = 2
+	ctx := context.Background()
+	var calls int
+	e.loop.Builder = &revisingSubdirBuilder{dir: "widget"}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{shapedFailGate{
+			name: "build-and-test", n: &calls, failFor: 1,
+			test: "TestFoo", pkg: "widget",
+		}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-flake-b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flake-b", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("the second attempt should pass and land, got %s (%s)", item.State, item.Note)
+	}
+
+	if records := flakeRecords(t, e, e.repo.Name+"/widget/TestFoo"); len(records) != 0 {
+		t.Fatalf("a refusal inside the diff must never be recorded as flaky: %+v", records)
+	}
+}
+
+// TestRefuseThenPassOnIdenticalPatchRecordsOneFlake is issue #131's part (2)
+// and (3): a refusal outside the diff, followed within the SAME claim by a
+// pass on a commit with an identical patch-id, proves the failure was
+// flaky — exactly one record per failed test, naming both verdicts.
+func TestRefuseThenPassOnIdenticalPatchRecordsOneFlake(t *testing.T) {
+	e := setup(t, []string{"true"})
+	e.loop.Attempts = 2
+	ctx := context.Background()
+	base := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main"))
+	var calls int
+	e.loop.Builder = &resettingBuilder{base: base}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{shapedFailGate{
+			name: "build-and-test", n: &calls, failFor: 1,
+			test: "TestFoo", pkg: "github.com/example/otherpkg",
+		}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-flake-c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flake-c", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("expected the second, identical-patch attempt to pass and land, got %s (%s)", item.State, item.Note)
+	}
+
+	subject := e.repo.Name + "/github.com/example/otherpkg/TestFoo"
+	records := flakeRecords(t, e, subject)
+	if len(records) != 1 {
+		t.Fatalf("expected exactly one flaky record, got %d: %+v", len(records), records)
+	}
+	fr := records[0]
+	if fr.RefusedHead == "" || fr.PassedHead == "" || fr.RefusedHead == fr.PassedHead {
+		t.Fatalf("expected two distinct commits, refused and passed: %+v", fr)
+	}
+	if fr.RefusedRecord == "" || fr.PassedRecord == "" || fr.RefusedRecord == fr.PassedRecord {
+		t.Fatalf("expected two distinct verdict record ids: %+v", fr)
+	}
+	if fr.Test != "TestFoo" || fr.Package != "github.com/example/otherpkg" || fr.Repo != e.repo.Name {
+		t.Fatalf("unexpected test/package/repo on flaky record: %+v", fr)
+	}
+	if fr.WorkItem != "wi-flake-c" {
+		t.Fatalf("expected the work item id on the flaky record, got %q", fr.WorkItem)
+	}
+}
+
+// TestRefuseThenPassOnADifferentPatchRecordsNothing is issue #131's part (2)
+// negative case: a refusal outside the diff, followed by a pass whose
+// rebuild actually changed the patch, proves nothing — a different change
+// merely also passing is not the same change being flaky.
+func TestRefuseThenPassOnADifferentPatchRecordsNothing(t *testing.T) {
+	e := setup(t, []string{"true"})
+	e.loop.Attempts = 2
+	ctx := context.Background()
+	var calls int
+	e.loop.Builder = &revisingBuilder{}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{shapedFailGate{
+			name: "build-and-test", n: &calls, failFor: 1,
+			test: "TestFoo", pkg: "github.com/example/otherpkg",
+		}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-flake-d"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flake-d", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("expected the second, rebuilt attempt to pass and land, got %s (%s)", item.State, item.Note)
+	}
+
+	if records := flakeRecords(t, e, e.repo.Name+"/github.com/example/otherpkg/TestFoo"); len(records) != 0 {
+		t.Fatalf("a rebuild that changed the patch must never be recorded as flaky: %+v", records)
+	}
+}
+
+// TestARefusalWithNoLaterPassRecordsNothing is issue #131's rule that a
+// flake is proven only from a refused-then-passed pair, never inferred from
+// one failure alone.
+func TestARefusalWithNoLaterPassRecordsNothing(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	var calls int
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{shapedFailGate{
+			name: "build-and-test", n: &calls, failFor: 99,
+			test: "TestFoo", pkg: "github.com/example/otherpkg",
+		}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-flake-e"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flake-e", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("expected parked, got %s (%s)", item.State, item.Note)
+	}
+
+	if records := flakeRecords(t, e, e.repo.Name+"/github.com/example/otherpkg/TestFoo"); len(records) != 0 {
+		t.Fatalf("a single refusal must never be recorded as flaky: %+v", records)
+	}
+}
+
+// TestSameCommitFreeRecheckPassRecordsFlaky is issue #131's cross-claim case:
+// a gate-refusal park's free recheck (issue #81) re-asks the gate on the
+// EXACT same commit a refusal already judged, and a pass there is the same
+// patch by identity — no patch-id needed to prove it.
+func TestSameCommitFreeRecheckPassRecordsFlaky(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	var calls int
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{shapedFailGate{
+			name: "build-and-test", n: &calls, failFor: 1,
+			test: "TestFoo", pkg: "github.com/example/otherpkg",
+		}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-flake-g"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flake-g", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("first gate failure should park, got %s (%s)", item.State, item.Note)
+	}
+	refusedHead := item.Built
+
+	retried, err := q.Retry(ctx, tn, "wi-flake-g", "chris", "gate was probably flaky; try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = e.loop.Run(ctx, retried)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("the free recheck should pass and land, got %s (%s)", item.State, item.Note)
+	}
+	if item.Head != refusedHead {
+		t.Fatalf("the free recheck must not rebuild: landed %s, expected the refused %s", item.Head, refusedHead)
+	}
+
+	subject := e.repo.Name + "/github.com/example/otherpkg/TestFoo"
+	records := flakeRecords(t, e, subject)
+	if len(records) != 1 {
+		t.Fatalf("expected exactly one flaky record, got %d: %+v", len(records), records)
+	}
+	fr := records[0]
+	if fr.RefusedHead != refusedHead || fr.PassedHead != refusedHead {
+		t.Fatalf("the same-commit recheck should name the SAME head both ways: %+v", fr)
+	}
+	if fr.RefusedRecord == "" || fr.PassedRecord == "" || fr.RefusedRecord == fr.PassedRecord {
+		t.Fatalf("expected two distinct verdict record ids on the same commit: %+v", fr)
+	}
+}
+
+// TestSecondFlakeOpensAnException is issue #131's part (3): the second flaky
+// record for the SAME test writes a tenant-wide exception naming it, so
+// #116's discovered originations have a stopgap until they exist.
+func TestSecondFlakeOpensAnException(t *testing.T) {
+	e := setup(t, []string{"true"})
+	e.loop.Attempts = 2
+	ctx := context.Background()
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	subject := e.repo.Name + "/github.com/example/otherpkg/TestFoo"
+
+	runOnce := func(key, id string) queue.WorkItem {
+		base := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main"))
+		var calls int
+		e.loop.Builder = &resettingBuilder{base: base}
+		e.loop.Gates = func(forge.Workspace) []forge.Gate {
+			return []forge.Gate{shapedFailGate{
+				name: "build-and-test", n: &calls, failFor: 1,
+				test: "TestFoo", pkg: "github.com/example/otherpkg",
+			}}
+		}
+		ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: key})
+		if err != nil {
+			t.Fatal(err)
+		}
+		item, _ := q.Submit(ctx, ItemFor(ing, id, "add "+id))
+		item, err = e.loop.Run(ctx, item)
+		if err != nil {
+			t.Fatalf("loop: %v", err)
+		}
+		if item.State != queue.StateDone {
+			t.Fatalf("expected %s to land, got %s (%s)", id, item.State, item.Note)
+		}
+		return item
+	}
+
+	runOnce("issue-flake-f1", "wi-flake-f1")
+	if records := flakeRecords(t, e, subject); len(records) != 1 {
+		t.Fatalf("expected exactly one flaky record after the first item, got %d", len(records))
+	}
+	if subs := exceptionSubjects(t, e); slices.Contains(subs, "flake/"+subject) {
+		t.Fatalf("one flake alone should not open an exception: %v", subs)
+	}
+
+	runOnce("issue-flake-f2", "wi-flake-f2")
+	if records := flakeRecords(t, e, subject); len(records) != 2 {
+		t.Fatalf("expected exactly two flaky records after the second item, got %d", len(records))
+	}
+	subs := exceptionSubjects(t, e)
+	if !slices.Contains(subs, "flake/"+subject) {
+		t.Fatalf("the second flake should open an exception naming the flake subject: %v", subs)
+	}
+}

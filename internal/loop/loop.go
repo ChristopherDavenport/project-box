@@ -12,6 +12,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -614,6 +616,15 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	budget := l.attemptBudget(item)
 	attempt := 0
 	var history []string
+	// flaking holds the most recent outside-diff refusal as a flake
+	// candidate across this claim's attempts (issue #131): set when the
+	// gate stage below annotates a refusal, consumed the moment a LATER
+	// attempt passes the same gate on a patch proven identical, and nil
+	// otherwise. It answers only the same-claim, different-commit half of
+	// flake detection — the cross-claim, same-commit half is answered by
+	// reading the chain directly (see [Loop.priorOutsideDiffRefusal]),
+	// because this variable does not survive past this one Run call.
+	var flaking *flakeCandidate
 	for {
 		if !skipBuild {
 			attempt++
@@ -808,6 +819,30 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 					if tries > 1 {
 						vr.Try = tries
 					}
+					var candidatePairs []failingTest
+					if v.Decision == forge.DecisionFail {
+						// A refusal is a flake candidate only when its Reason
+						// parses as a go-test failure and every package it
+						// names sits outside this change's own diff (issue
+						// #131) — keyed on the exact lines gate.Command's own
+						// isFailureLine keeps, never on the gate's name, so a
+						// gate that never ran `go test` simply never parses.
+						// Parsing nothing, or ChangedPaths erroring, annotates
+						// nothing: unknown never reads as zero.
+						if pairs := parseFailingTests(v.Reason); len(pairs) > 0 {
+							pkgs := make([]string, 0, len(pairs))
+							for _, p := range pairs {
+								pkgs = append(pkgs, p.Package)
+							}
+							if changed, cerr := git.ChangedPaths(ctx, ws.Dir, base, head); cerr == nil && outsideDiff(pkgs, changed) {
+								vr.OutsideDiff = true
+								for _, p := range pairs {
+									vr.FailedTests = append(vr.FailedTests, p.Name)
+								}
+								candidatePairs = pairs
+							}
+						}
+					}
 					body, _ := json.Marshal(vr)
 					rec := l.recordEvidence(ctx, item, "gate", string(head), string(body))
 					if rec.ID != "" {
@@ -818,8 +853,35 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 						// just an assertion.
 						v.Evidence = append(v.Evidence, forge.EvidenceRef{Kind: forge.EvidenceKindRecord, URI: rec.ID})
 					}
+					if candidatePairs != nil {
+						// Held for a later attempt in THIS claim: a pass on an
+						// identical, non-empty patch-id is what proves this
+						// refusal was flaky rather than fixed (matched below).
+						patchID, _ := git.PatchID(ctx, ws.Dir, base, head)
+						flaking = &flakeCandidate{Gate: g.Name(), Tests: candidatePairs, Head: head, PatchID: patchID, RecordID: rec.ID}
+					}
 					if v.Decision == forge.DecisionPass {
 						passedNow = append(passedNow, g.Name())
+						if flaking != nil && flaking.Gate == g.Name() {
+							// Same claim, later attempt: only an identical,
+							// non-empty patch-id proves the SAME change passed
+							// this time — PatchID's own doc says two empty ids
+							// are never treated as equal, so a rebuild that
+							// produced no diff at all never counts either.
+							if newPatchID, nerr := git.PatchID(ctx, ws.Dir, base, head); nerr == nil && newPatchID != "" && newPatchID == flaking.PatchID {
+								l.proveFlake(ctx, item, flaking, head, rec.ID)
+							}
+							flaking = nil
+						}
+						if resumed {
+							// Cross-claim, same commit: a free recheck of a kept
+							// commit reaches this gate on the exact head an
+							// earlier claim's refusal already judged — the same
+							// patch by identity, no patch-id needed.
+							if pairs, refID, ok := l.priorOutsideDiffRefusal(ctx, item, g.Name(), head); ok {
+								l.proveFlake(ctx, item, &flakeCandidate{Gate: g.Name(), Tests: pairs, Head: head, RecordID: refID}, head, rec.ID)
+							}
+						}
 					}
 					verdicts = append(verdicts, v)
 					if v.Decision == forge.DecisionFail {
@@ -1497,9 +1559,183 @@ func (l *Loop) gateBackoff(try int) time.Duration {
 // is the one that answered. forge.Verdict itself carries no such field —
 // how many times the loop had to ask is the loop's bookkeeping, not the
 // gate's judgement.
+//
+// OutsideDiff and FailedTests are the same kind of loop-local annotation
+// (issue #131): set only on a refusal whose Reason parsed as a go-test
+// failure naming packages this change's diff never touched. The gate's own
+// verdict stands exactly as given; this is the loop's own record of why the
+// refusal is a flake candidate, never a change to the judgement itself.
 type gateVerdictRecord struct {
 	forge.Verdict
-	Try int `json:"try,omitempty"`
+	Try         int      `json:"try,omitempty"`
+	OutsideDiff bool     `json:"outside_diff,omitempty"`
+	FailedTests []string `json:"failed_tests,omitempty"`
+}
+
+// failTestLine and failPkgLine mirror the exact shapes gate.Command's own
+// isFailureLine hunts for in a `go test` transcript: a failing test's own
+// report line, and the failing package's one-line summary that closes it
+// out. Flake detection keys on these two shapes rather than on the gate's
+// name, so it works for any gate that runs `go test` and says nothing about
+// one that never did.
+var (
+	failTestLine = regexp.MustCompile(`^--- FAIL: (\S+)`)
+	failPkgLine  = regexp.MustCompile(`^FAIL\t(\S+)`)
+)
+
+// failingTest pairs a failing Go test with the package `go test` reported it
+// under.
+type failingTest struct {
+	Name    string
+	Package string
+}
+
+// parseFailingTests reads a gate verdict's Reason for the go-test failure
+// shape above, pairing each failing test name with the package summary line
+// that follows it in transcript order. A test name never closed out by a
+// following package line is dropped rather than guessed at — unknown never
+// reads as zero, and a guess here would be exactly that.
+func parseFailingTests(reason string) []failingTest {
+	var out []failingTest
+	var pending []string
+	for _, line := range strings.Split(reason, "\n") {
+		if m := failTestLine.FindStringSubmatch(line); m != nil {
+			pending = append(pending, m[1])
+			continue
+		}
+		if m := failPkgLine.FindStringSubmatch(line); m != nil {
+			for _, name := range pending {
+				out = append(out, failingTest{Name: name, Package: m[1]})
+			}
+			pending = nil
+		}
+	}
+	return out
+}
+
+// outsideDiff reports whether every package in pkgs lies outside every
+// directory changed touches. A package is inside the diff when some changed
+// file's directory D satisfies pkg == D or pkg has D as a path suffix
+// ("/"+D) — the closest a loop that never resolves import paths to
+// filesystem directories can get to "this package is rooted where the diff
+// touched."
+func outsideDiff(pkgs, changed []string) bool {
+	for _, p := range changed {
+		d := path.Dir(p)
+		for _, pkg := range pkgs {
+			if pkg == d || strings.HasSuffix(pkg, "/"+d) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// flakeCandidate is Run's own memory of an outside-diff refusal, held across
+// this claim's attempts (see the `flaking` variable in [Loop.Run]) so a
+// later attempt that passes the same gate on an identical patch can prove
+// the failure was flaky rather than fixed. Consumed and cleared the moment
+// it is matched or superseded by a fresh refusal.
+type flakeCandidate struct {
+	Gate     string
+	Tests    []failingTest
+	Head     forge.Commit
+	PatchID  string
+	RecordID string
+}
+
+// flakeRecord is the body of one "flaky" record on the tenant-wide
+// "index/flakes" scope: a projection over the two verdicts named within it,
+// never a restatement of either.
+type flakeRecord struct {
+	Test          string `json:"test"`
+	Package       string `json:"package"`
+	Repo          string `json:"repo"`
+	RefusedHead   string `json:"refused_head"`
+	PassedHead    string `json:"passed_head"`
+	RefusedRecord string `json:"refused_record"`
+	PassedRecord  string `json:"passed_record"`
+	WorkItem      string `json:"work_item"`
+}
+
+// priorOutsideDiffRefusal scans item's chain for the latest "gate" record on
+// subject naming gate with a fail annotated outside_diff — the chain-based
+// half of flake detection (issue #131), needed because the cross-claim free
+// recheck of a kept commit runs in a separate [Loop.Run] call from the one
+// that recorded the refusal, so no in-memory candidate survives to meet it.
+// Mirrors the read pattern in [Loop.findGateVerdict]: keep scanning, the
+// latest match on this exact subject wins.
+func (l *Loop) priorOutsideDiffRefusal(ctx context.Context, item queue.WorkItem, gate string, subject forge.Commit) ([]failingTest, string, bool) {
+	var pairs []failingTest
+	recID := ""
+	for r, err := range l.Store.Log().Since(ctx, item.Tenant, "workitem/"+item.ID, 0) {
+		if err != nil {
+			return nil, "", false
+		}
+		if r.Kind != "gate" || r.Subject != string(subject) {
+			continue
+		}
+		var vr gateVerdictRecord
+		if json.Unmarshal(r.Body, &vr) != nil {
+			continue
+		}
+		if vr.Gate == gate && vr.Decision == forge.DecisionFail && vr.OutsideDiff {
+			pairs, recID = parseFailingTests(vr.Reason), r.ID
+		}
+	}
+	return pairs, recID, recID != ""
+}
+
+// proveFlake is reached only once a refused-then-passed pair on an identical
+// patch is in hand: it appends one tenant-wide "flaky" record per failed
+// test, naming both verdicts rather than restating either, then folds the
+// count for each test to decide whether an exception is due.
+func (l *Loop) proveFlake(ctx context.Context, item queue.WorkItem, candidate *flakeCandidate, passedHead forge.Commit, passRecordID string) {
+	for _, test := range candidate.Tests {
+		subject := l.Repo.Name + "/" + test.Package + "/" + test.Name
+		body, _ := json.Marshal(flakeRecord{
+			Test: test.Name, Package: test.Package, Repo: l.Repo.Name,
+			RefusedHead: string(candidate.Head), PassedHead: string(passedHead),
+			RefusedRecord: candidate.RecordID, PassedRecord: passRecordID,
+			WorkItem: item.ID,
+		})
+		if _, err := l.Store.Log().Append(ctx, evidence.Record{
+			Tenant: item.Tenant, Scope: "index/flakes", Kind: "flaky",
+			Subject: subject, Actor: l.Runner, OnBehalfOf: item.Requester,
+			Body: body, Trace: telemetry.TraceID(ctx),
+		}); err != nil {
+			continue
+		}
+		l.foldFlakeException(ctx, item, subject)
+	}
+}
+
+// foldFlakeException is issue #131's stopgap for issue #116's discovered
+// originations: this repo has no first-class origination for a flaky test
+// yet, so a test proven flaky twice writes a tenant-wide exception directly,
+// the same shape [queue.Queue]'s own index() writes, naming the test and the
+// count so a person decides to fix it rather than the loop re-rolling it
+// forever. [control.Room.Exceptions] dedupes by subject, so writing again
+// past the second flake is tolerable — this still prefers writing exactly
+// once, at the count that first crosses the line.
+func (l *Loop) foldFlakeException(ctx context.Context, item queue.WorkItem, subject string) {
+	count := 0
+	for r, err := range l.Store.Log().Since(ctx, item.Tenant, "index/flakes", 0) {
+		if err != nil {
+			return
+		}
+		if r.Subject == subject {
+			count++
+		}
+	}
+	if count != 2 {
+		return
+	}
+	note := fmt.Sprintf("%s flaked twice — needs fixing, not re-rolling", subject)
+	l.Store.Log().Append(ctx, evidence.Record{
+		Tenant: item.Tenant, Scope: "index/exceptions", Kind: "indexed",
+		Subject: "flake/" + subject, Actor: l.Runner, Body: []byte(note),
+	})
 }
 
 // evaluateGate re-asks g about cs while it returns an error, up to
