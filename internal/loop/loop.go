@@ -1998,6 +1998,38 @@ func indexByte(s string, b byte) int {
 // SectionRef is the lease ref a section of a repository is held under.
 func SectionRef(name string) string { return "section/" + name }
 
+// HoldsSection reports whether item's own run already holds any section
+// lease it would need to proceed — an in-flight rebase, re-gate, or push
+// still finishing, or a stale grant surviving a lost release (restart,
+// cancelled ctx). It is the fact issue #143's fairness fix needs: the pump
+// must never tell a holder to yield its own section to a waiter, because the
+// holder is the only thing that can free it, and yielding it away is a wait
+// with no exit.
+//
+// [forge.Leaser.Inspect] deliberately reports an expired-but-unreleased grant
+// as outstanding, and that is the right answer here too: a stale own-grant
+// still marks a holder.
+func (l *Loop) HoldsSection(ctx context.Context, item queue.WorkItem) bool {
+	names := item.Sections
+	if len(names) == 0 {
+		names = l.Repo.SectionNames() // the whole repository is every section
+	}
+	if len(names) == 0 {
+		return false
+	}
+	leaser := l.Store.Leaser(l.Runner)
+	for _, n := range names {
+		cur, ok, err := leaser.Inspect(ctx, item.Tenant, l.Repo.Name, SectionRef(n))
+		if err != nil || !ok {
+			continue
+		}
+		if cur.Run == item.ID {
+			return true
+		}
+	}
+	return false
+}
+
 // leaseSections takes the section leases a unit needs, in one order for every
 // taker so two units cannot deadlock over two sections. It returns a release
 // for what it holds; a non-empty busy names the section somebody else holds,
@@ -2030,8 +2062,14 @@ func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release 
 	leaser := l.Store.Leaser(l.Runner)
 	var held []forge.Lease
 	release = func() {
+		// Released under a context that survives this claim's cancellation:
+		// a release lost to a cancelled ctx (restart, deadline) is exactly
+		// the stale-grant state the self-takeover below exists to recover
+		// from, so closing that gap at the source is worth the belt and
+		// suspenders.
+		rctx := context.WithoutCancel(ctx)
 		for _, h := range held {
-			leaser.Release(ctx, h)
+			leaser.Release(rctx, h)
 		}
 	}
 	for _, n := range names {
@@ -2039,8 +2077,30 @@ func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release 
 			Tenant: item.Tenant, Repo: l.Repo.Name, Ref: SectionRef(n), Run: item.ID, TTL: l.TTL,
 		})
 		if errors.Is(err, forge.ErrHeld) {
+			cur, ok, ierr := leaser.Inspect(ctx, item.Tenant, l.Repo.Name, SectionRef(n))
+			if ierr == nil && ok && cur.Run == item.ID {
+				// The sqlite leaser refuses a same-run re-acquire by design
+				// (sqlite.go), so ErrHeld naming this item's own run means the
+				// grant is this run's own, surviving a lost release rather
+				// than another unit's claim. A unit must never wait on
+				// itself — a re-claim that only finishes a landing on
+				// leases it already holds (rebase, re-gate, push) must never
+				// be told busy. Preempt takes the grant over rather than
+				// waiting on it; this is not breaking a holder's lease out
+				// from under it, since the holder and the taker are the same
+				// run.
+				taken, perr := leaser.Preempt(ctx, forge.LeaseRequest{
+					Tenant: item.Tenant, Repo: l.Repo.Name, Ref: SectionRef(n), Run: item.ID, TTL: l.TTL,
+				})
+				if perr != nil {
+					release()
+					return nil, "", perr
+				}
+				held = append(held, taken)
+				continue
+			}
 			holder := ""
-			if cur, ok, ierr := leaser.Inspect(ctx, item.Tenant, l.Repo.Name, SectionRef(n)); ierr == nil && ok {
+			if ierr == nil && ok {
 				holder = " by " + cur.Run
 			}
 			release()

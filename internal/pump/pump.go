@@ -254,6 +254,13 @@ type drainCandidate struct {
 	lp     *loop.Loop
 	ok     bool // an executor is configured for this item's (box, repo)
 	polled bool // true unless the item is held on a person's review
+	// holder reports whether this candidate's own run already holds one of
+	// its section leases — mid-flight on a rebase, re-gate, or push that
+	// only needs a re-claim to finish and free the section. See issue #143:
+	// the holder is the only thing that can free the section, so telling it
+	// to yield to whoever is waiting on that same section is a wait with no
+	// exit.
+	holder bool
 }
 
 // sectionsIntersect reports whether two units could contend for the same
@@ -284,6 +291,17 @@ func sectionsIntersect(a, b []string) bool {
 // tick without even trying its own lease — and the head is moved to the
 // front of the dispatch order, so the capacity-exhausted break in Drain
 // cannot hand its meter slot to a unit that was told to wait for it anyway.
+//
+// Issue #143: a candidate that already [drainCandidate.holder]s one of the
+// sections in play is never told to yield, no matter whose head it would
+// otherwise defer to — the holder is the only thing that can free its
+// section, so yielding it to the head is a wait with no exit. Holders are
+// moved to the very front of the dispatch order, ahead of the head itself:
+// finishing a holder's re-claim (rebase, re-gate, push) is what actually
+// frees the section the head is waiting on, and with a tight capacity budget
+// the dispatch-loop's break on a busy or exhausted meter would otherwise hand
+// the only seat to the head every tick, leaving the holder — the one thing
+// that could unblock it — never claimed at all.
 //
 // A candidate not [drainCandidate.ok] or not [drainCandidate.polled] is
 // skipped entirely — held on a person or unrouted, it is not contending for
@@ -324,7 +342,7 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 		}
 		heads[head] = true
 		for _, i := range idxs {
-			if i == head {
+			if i == head || cands[i].holder {
 				continue
 			}
 			if sectionsIntersect(cands[head].item.Sections, cands[i].item.Sections) {
@@ -337,12 +355,17 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 	}
 	ordered := make([]drainCandidate, 0, len(cands))
 	for i, c := range cands {
+		if c.holder && !heads[i] {
+			ordered = append(ordered, c)
+		}
+	}
+	for i, c := range cands {
 		if heads[i] {
 			ordered = append(ordered, c)
 		}
 	}
 	for i, c := range cands {
-		if !heads[i] {
+		if !heads[i] && !c.holder {
 			ordered = append(ordered, c)
 		}
 	}
@@ -415,6 +438,7 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		// happened. It is also not contending for a section this tick, which
 		// is why the fairness pass below skips it too.
 		dcs[i].polled = lp.Poll(ctx, item)
+		dcs[i].holder = lp.HoldsSection(ctx, item)
 	}
 	dcs = p.fairSectionOrder(dcs)
 

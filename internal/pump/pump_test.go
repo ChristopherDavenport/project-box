@@ -612,3 +612,71 @@ func TestDisjointSectionCandidateIsNotYielded(t *testing.T) {
 		t.Fatalf("a disjoint-section candidate should dispatch without yielding, got %s: %s", other.State, other.Note)
 	}
 }
+
+// TestAHolderIsNeverYieldedToItsOwnWaiter is issue #143 by name: a candidate
+// that already holds the section a starved head is waiting on is the only
+// thing that can free it, so telling it to yield — as plain #109 fairness
+// would — is a wait with no exit. The holder (a kept candidate: waiting,
+// with a resume point already built) dispatches ahead of the head under a
+// one-seat budget, finishes and frees the section, and only then does the
+// head run.
+func TestAHolderIsNeverYieldedToItsOwnWaiter(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 1})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	holder := w.submitItem(t, "holder-1", "fix module holder", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+	})
+	claimed, lease, err := w.q.Claim(ctx, holder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed.KeepCandidate("deadbeef", "cafebabe", nil)
+	holder, err = w.q.Wait(ctx, claimed, lease, "mid-flight, needs re-claim")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The section lease itself survived independently of the claim above —
+	// a prior session's grant that a lost release left standing, which is
+	// exactly the shape a restart or a cancelled ctx produces.
+	holdSection(t, w, "api", holder.ID)
+
+	head := w.submitItem(t, "head-1", "fix module head", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.SectionWaits = 3
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	holder, err = w.q.Load(ctx, tn, holder.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	head, err = w.q.Load(ctx, tn, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(holder.Note, "reserved for") {
+		t.Fatalf("the holder was told to yield to its own waiter: %s", holder.Note)
+	}
+	if holder.State != queue.StateDone {
+		t.Fatalf("the holder should claim the one seat and finish, got %s: %s", holder.State, holder.Note)
+	}
+	if head.State != queue.StatePending {
+		t.Fatalf("the head should not even have been tried this tick (one-seat budget went to the holder), got %s: %s", head.State, head.Note)
+	}
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	head, err = w.q.Load(ctx, tn, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.State != queue.StateDone {
+		t.Fatalf("the head should claim the section once the holder frees it, got %s: %s", head.State, head.Note)
+	}
+}

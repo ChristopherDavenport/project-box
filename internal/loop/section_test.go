@@ -240,6 +240,36 @@ func TestAYieldedUnitNeverTouchesALease(t *testing.T) {
 	}
 }
 
+// TestASelfHeldSectionIsTakenOverNotWaitedOn is issue #143 by name: a claim
+// whose own run already holds the section lease — a rebase, re-gate, or push
+// still finishing, or a stale grant surviving a lost release — must never
+// wait on itself. leaseSections takes the grant over instead of reporting
+// busy, and proceeds through to a real run.
+func TestASelfHeldSectionIsTakenOverNotWaitedOn(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	item := e.submit(t, "api-5", func(w *queue.WorkItem) { w.Sections = []string{"api"} })
+	hold(t, e, "api", item.ID) // this run's own grant, surviving a lost release
+
+	item, err := e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("a self-held section should be taken over and the run completed, got %s: %s", item.State, item.Note)
+	}
+	if strings.Contains(item.Note, item.ID) {
+		t.Fatalf("the note names the item itself as its own blocker: %s", item.Note)
+	}
+	// The section is free again, taken over under this run's own token and
+	// released at settle like any other hold.
+	if _, err := e.store.Leaser("runner-1").Acquire(ctx, forge.LeaseRequest{
+		Tenant: tn, Repo: e.repo.Name, Ref: SectionRef("api"), Run: "probe", TTL: time.Hour,
+	}); err != nil {
+		t.Fatalf("api stayed held after the self-takeover settled: %v", err)
+	}
+}
+
 // TestSectionWaitsCountsAndResets: a claim deferred by a held section counts
 // the deferral, and a claim that gets through zeroes it — the signal the
 // pump reads to name an oldest waiter must not carry stale history once a
