@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
@@ -51,6 +52,54 @@ func TestSelfDeployRollbackAppearsAsAnException(t *testing.T) {
 	}
 	if ex.State != queue.StateParked {
 		t.Fatalf("state = %q, want parked — the room's existing shape", ex.State)
+	}
+}
+
+// TestSelfDeployExceptionCountsItsOwnEscalation: recordEscalation keys the
+// escalation chain by the exception's ID — the short-head synthetic id, not
+// the full head — so the fold's own lookup into that chain must use the same
+// key. It used to look up the full head, which never matched a record
+// recordEscalation ever wrote, so Escalations stayed 0 forever and
+// Escalator.Sweep's nth reset to 1 on every pass: an unbounded,
+// unsilenceable re-escalation.
+func TestSelfDeployExceptionCountsItsOwnEscalation(t *testing.T) {
+	r, _ := setup(t)
+	ctx := context.Background()
+	head := "deadbeefcafefeed"
+
+	if _, err := r.Store.Log().Append(ctx, evidence.Record{
+		Tenant: tn, Scope: selfDeployScope, Kind: selfDeployRolledBackKind,
+		Subject: head, Actor: "boxd", Body: []byte("did not come up"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Store.Log().Append(ctx, evidence.Record{
+		Tenant: tn, Scope: "index/exceptions", Kind: "indexed",
+		Subject: selfDeploySubjectPrefix + head, Actor: "boxd", Body: []byte("did not come up"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	id := selfDeploySubjectPrefix + shortCommit(head)
+	body, err := json.Marshal(Notice{Tenant: tn, Item: id, Nth: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Store.Log().Append(ctx, evidence.Record{
+		Tenant: tn, Scope: escalationScope, Kind: escalationKind,
+		Subject: id, Actor: "boxd", Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.Exceptions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("exceptions: %+v", got)
+	}
+	if got[0].Escalations != 1 {
+		t.Fatalf("escalations = %d, want 1 — recordEscalation's own key must count", got[0].Escalations)
 	}
 }
 

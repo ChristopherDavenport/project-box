@@ -884,16 +884,22 @@ func (r *Room) selfDeployException(ctx context.Context, head string, now time.Ti
 	if latest.Kind != selfDeployRolledBackKind {
 		return Exception{}, false, nil
 	}
-	subject := selfDeploySubjectPrefix + head
+	// id is what recordEscalation keys told by — Sweep records escalations
+	// under x.ID, the short form below, never the full head. Counting
+	// against the full head here always missed, so Escalations stayed 0
+	// forever and Sweep's nth reset to 1 on every pass: an unbounded,
+	// unsilenceable re-escalation of the exact kind Escalator.Max exists to
+	// prevent.
+	id := selfDeploySubjectPrefix + shortCommit(head)
 	age := now.Sub(latest.At)
 	return Exception{
 		WorkItem: queue.WorkItem{
-			ID: selfDeploySubjectPrefix + shortCommit(head), Tenant: r.Tenant,
+			ID: id, Tenant: r.Tenant,
 			Kind: "self-deploy", State: queue.StateParked,
 			Note: string(latest.Body), Severity: queue.SeverityHigh,
 		},
 		Parked: latest.At, AgeSec: int64(age.Seconds()),
-		Escalations: countAfter(told[subject], latest.At),
+		Escalations: countAfter(told[id], latest.At),
 		Overdue:     age >= objective,
 	}, true, nil
 }
