@@ -95,20 +95,29 @@ func (m *Mirror) fetchLock(repo string) *sync.RWMutex {
 // racing itself in the same directory fails to lock the refs the other run
 // just moved — "cannot lock ref 'refs/heads/main': is at X but expected Y" —
 // and the loser reports infrastructure trouble for what is only two runs
-// sharing a directory; a concurrent reader (Resolve, Checkout, Adopt,
-// ChangedPaths, MaterializeContext) fares no better, since `remote update`
-// can move or prune a ref mid-read. This used to be free: the branch lease
-// was held across the whole run, so one run touched the mirror at a time.
-// Narrowing that lease made the sharing visible, and the lock is where it
-// belongs — a mirror root is one daemon's own working area, so the
-// contention is within this process.
+// sharing a directory; a concurrent reader (Resolve, Checkout, ChangedPaths,
+// MaterializeContext) fares no better, since `remote update` can move or
+// prune a ref mid-read. This used to be free: the branch lease was held
+// across the whole run, so one run touched the mirror at a time. Narrowing
+// that lease made the sharing visible, and the lock is where it belongs — a
+// mirror root is one daemon's own working area, so the contention is within
+// this process.
 //
-// The lock is a RWMutex for exactly this reason: Fetch holds the write side
-// for its update, and readers hold the read side only for the duration of
-// their own git subprocess against the mirror directory — never across a
-// whole build or agent session. Serializing readers behind writers for
-// longer than that is the regression #18 removed (holding the branch lease,
-// and so the mirror, across a whole run); this lock must not bring it back.
+// Fetch is not the mirror's only writer: the Lander's push collects a
+// member's head with `git fetch <workspace>` run in the mirror directory,
+// and its compensate mints a revert-forward commit with `rev-parse` and
+// `commit-tree` against the same directory — both mutate it exactly as an
+// update does, and both take this same lock's write side for that
+// subprocess alone.
+//
+// The lock is a RWMutex for exactly this reason: every mirror-dir writer
+// holds the write side for its own subprocess, and readers hold the read
+// side only for the duration of theirs — never across a whole build or
+// agent session, and never across a network call (a push or a fetch from a
+// real remote) once the mirror-dir subprocess it depends on has finished.
+// Serializing readers behind writers for longer than that is the regression
+// #18 removed (holding the branch lease, and so the mirror, across a whole
+// run); this lock must not bring it back.
 func (m *Mirror) Fetch(ctx context.Context, repo forge.Repo) error {
 	lk := m.fetchLock(repo.Name)
 	lk.Lock()
@@ -410,11 +419,23 @@ func (l *Lander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing, e
 
 // push collects the member's head from its workspace and lands it with the
 // expected old value presented.
+//
+// Collecting the head is a mirror write — it fetches new objects and refs
+// into the mirror directory, the same directory Resolve/Checkout/Adopt/
+// ChangedPaths/MaterializeContext read — so it holds the mirror's write lock
+// for that subprocess alone. The push itself is a network call against the
+// remote, not the mirror directory, and stays outside the lock: holding it
+// across the push would serialize landing behind every reader for no reason
+// tied to the mirror.
 func (l *Lander) push(ctx context.Context, cs forge.ChangeSet, mem forge.Member) error {
 	repo, _ := l.m.Repo(mem.Repo)
 	mirror := l.m.mirrorDir(mem.Repo)
 	ws := l.m.workDir(cs.Run, mem.Repo)
-	if _, err := run(ctx, mirror, "fetch", ws, string(mem.Head)); err != nil {
+	lk := l.m.fetchLock(mem.Repo)
+	lk.Lock()
+	_, err := run(ctx, mirror, "fetch", ws, string(mem.Head))
+	lk.Unlock()
+	if err != nil {
 		return fmt.Errorf("collect %s from workspace: %w", mem.Head, err)
 	}
 	lease := fmt.Sprintf("--force-with-lease=refs/heads/%s:%s", mem.Branch, mem.Base)
@@ -434,12 +455,20 @@ func (l *Lander) compensate(ctx context.Context, cs forge.ChangeSet, landed []fo
 		p := landed[i]
 		repo, _ := l.m.Repo(p.Repo)
 		mirror := l.m.mirrorDir(p.Repo)
+		// rev-parse and commit-tree both read and write the mirror's object
+		// store directly, so both hold the write lock — the same one push
+		// takes — for exactly that pair of subprocesses. The push below is
+		// the network call and stays outside it.
+		lk := l.m.fetchLock(p.Repo)
+		lk.Lock()
 		tree, err := run(ctx, mirror, "rev-parse", string(p.Was)+"^{tree}")
 		if err != nil {
+			lk.Unlock()
 			return out, err
 		}
 		msg := fmt.Sprintf("Revert forward: undo %s of changeset %s\n\nMember %s failed to land; every member must be independently safe,\nso the landed members are restored to their pre-changeset trees.", p.Now, cs.ID, "later")
 		rev, err := run(ctx, mirror, "commit-tree", strings.TrimSpace(tree), "-p", string(p.Now), "-m", msg)
+		lk.Unlock()
 		if err != nil {
 			return out, err
 		}

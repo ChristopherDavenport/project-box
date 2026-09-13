@@ -341,7 +341,14 @@ func (p *PRLander) pushRunBranch(ctx context.Context, cs forge.ChangeSet, mem fo
 	}
 	mirror := p.inner.m.mirrorDir(mem.Repo)
 	ws := p.inner.m.workDir(cs.Run, mem.Repo)
-	if _, err := run(ctx, mirror, "fetch", ws, string(mem.Head)); err != nil {
+	// Collecting the head fetches into the mirror directory, exactly as
+	// [Lander.push] does, so it holds the same write lock for the same
+	// reason: a concurrent reader of this mirror must never see it mid-move.
+	lk := p.inner.m.fetchLock(mem.Repo)
+	lk.Lock()
+	_, err := run(ctx, mirror, "fetch", ws, string(mem.Head))
+	lk.Unlock()
+	if err != nil {
 		return forge.Repo{}, fmt.Errorf("collect %s from workspace: %w", mem.Head, err)
 	}
 	if _, err := run(ctx, mirror, "push", "--force", repo.Remote, string(mem.Head)+":refs/heads/"+branch); err != nil {

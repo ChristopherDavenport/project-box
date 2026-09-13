@@ -379,6 +379,125 @@ func TestMirrorReadersSurviveAConcurrentFetch(t *testing.T) {
 	}
 }
 
+// TestMirrorReadersSurviveAConcurrentLanderPush is
+// TestMirrorReadersSurviveAConcurrentFetch's sibling for the OTHER mirror
+// writer: [Lander.push] collects a member's head with `git fetch <workspace>`
+// run in the mirror directory, which mutates it exactly as Fetch's `remote
+// update` does but was not taking the mirror's write lock before this
+// change. One goroutine repeatedly checks out, builds, and lands a commit —
+// exercising push's mirror-dir fetch on every iteration — while several
+// others concurrently Resolve and Checkout against the very same mirror.
+// Before push took the lock, a reader's rev-parse or clone --no-checkout
+// could land mid-fetch and error with something like "hardlink different
+// from source" — the same flake shape as issue #119, just with the landing
+// side as the writer instead of Fetch.
+func TestMirrorReadersSurviveAConcurrentLanderPush(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+	lander := NewLander(m, f.store.Log())
+	leaser := f.store.Leaser("runner-a")
+
+	const iterations = 15
+	var wg sync.WaitGroup
+	errs := make(chan error, 8)
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		base := f.base
+		for i := 0; i < iterations; i++ {
+			run := fmt.Sprintf("run-writer-%d", i)
+			lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+				Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: run, TTL: time.Hour,
+			})
+			if err != nil {
+				errs <- fmt.Errorf("acquire: %w", err)
+				return
+			}
+			ws, err := m.Checkout(ctx, lease, base)
+			if err != nil {
+				errs <- fmt.Errorf("checkout: %w", err)
+				return
+			}
+			path := filepath.Join(ws.Dir, "writer.txt")
+			if err := os.WriteFile(path, []byte(fmt.Sprintf("writer %d\n", i)), 0o644); err != nil {
+				errs <- err
+				return
+			}
+			if _, err := run2(ctx, ws.Dir, "add", "."); err != nil {
+				errs <- fmt.Errorf("add: %w", err)
+				return
+			}
+			if _, err := run2(ctx, ws.Dir, "commit", "-m", fmt.Sprintf("writer %d", i)); err != nil {
+				errs <- fmt.Errorf("commit: %w", err)
+				return
+			}
+			out, err := run2(ctx, ws.Dir, "rev-parse", "HEAD")
+			if err != nil {
+				errs <- fmt.Errorf("rev-parse: %w", err)
+				return
+			}
+			head := forge.Commit(strings.TrimSpace(out))
+			cs := forge.ChangeSet{
+				ID: "cs-" + run, Tenant: tn, Run: run, Intent: "test",
+				Members: []forge.Member{{Repo: "app", Branch: "main", Base: base, Head: head, Lease: lease}},
+			}
+			landing, err := lander.Land(ctx, cs)
+			if err != nil {
+				errs <- fmt.Errorf("land: %w", err)
+				return
+			}
+			if !landing.Complete() {
+				errs <- fmt.Errorf("landing incomplete: %+v", landing)
+				return
+			}
+			if err := leaser.Release(ctx, lease); err != nil {
+				errs <- fmt.Errorf("release: %w", err)
+				return
+			}
+			base = head
+		}
+	}()
+
+	for r := 0; r < 4; r++ {
+		wg.Add(1)
+		go func(r int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				if _, err := m.Resolve(ctx, f.repo, "refs/heads/main"); err != nil {
+					errs <- fmt.Errorf("resolve: %w", err)
+					return
+				}
+				lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+					Tenant: tn, Repo: "app",
+					Ref: fmt.Sprintf("refs/heads/reader-%d", r),
+					Run: fmt.Sprintf("run-reader-%d-%d", r, i),
+					TTL: time.Hour,
+				})
+				if err != nil {
+					errs <- fmt.Errorf("acquire: %w", err)
+					return
+				}
+				if _, err := m.Checkout(ctx, lease, f.base); err != nil {
+					errs <- fmt.Errorf("checkout: %w", err)
+					return
+				}
+				if err := leaser.Release(ctx, lease); err != nil {
+					errs <- fmt.Errorf("release: %w", err)
+					return
+				}
+			}
+		}(r)
+	}
+
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("reader raced the lander's push: %v", err)
+	}
+}
+
 // TestPushPresentsExpectedOldValue: if the branch moved underneath (a write
 // that did not come through the lease), the push's expected-old-value check
 // refuses rather than overwrites.
