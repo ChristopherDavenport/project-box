@@ -605,6 +605,14 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	for {
 		if !skipBuild {
 			attempt++
+			// A build about to run replaces head with a commit the rebase
+			// branch above never saw, so the patch-id comparison it made no
+			// longer says anything about what head will be once this
+			// returns — carrying it forward would be applying an old
+			// gate's verdict to a change nobody diffed against it (issue
+			// #95, confirmed by review: a within-claim rebuild after a
+			// carried rebase must not keep riding the stale comparison).
+			rebaseCarriesDiff, rebasePatchID = false, ""
 			if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
 				bctx, cancelBuild := l.buildDeadline(ctx)
 				defer cancelBuild()

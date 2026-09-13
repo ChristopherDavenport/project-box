@@ -1594,6 +1594,98 @@ func TestRebaseCounterResetsOnAFreshBuild(t *testing.T) {
 	}
 }
 
+// passExceptOnceGate fails on exactly its failOn'th call and passes every
+// other one — the shape needed to force a genuine rebuild inside a claim
+// that already carried a rebase's diff-judging gate, without ever failing
+// for good.
+type passExceptOnceGate struct {
+	name   string
+	n      *int
+	failOn int
+}
+
+func (g passExceptOnceGate) Name() string { return g.name }
+
+func (g passExceptOnceGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	*g.n++
+	if *g.n == g.failOn {
+		return forge.Verdict{Gate: g.name, Decision: forge.DecisionFail, Reason: "red on this call only"}, nil
+	}
+	return forge.Verdict{Gate: g.name, Decision: forge.DecisionPass, Reason: "ok"}, nil
+}
+
+// TestRebuildWithinAClaimDoesNotReuseAStaleRebaseCarry is the review refusal
+// on this issue's first attempt: rebaseCarriesDiff/rebasePatchID were
+// computed once in the adopt branch and never cleared, while the carry
+// switch in the gate stage re-evaluates every pass of Run's build-and-gate
+// loop. A gate refusal after a successful rebase carry falls through to the
+// free recheck (issue #81) and, under budget, to a genuine rebuild in the
+// SAME claim — and that rebuild's head was never compared by the patch-id
+// check the carry rests on. The flag must not survive a build that actually
+// runs, or the gate stage carries a verdict nobody gave the new commit and
+// never asks the reviewer about it at all.
+func TestRebuildWithinAClaimDoesNotReuseAStaleRebaseCarry(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	var reviewN, checkN int
+	e.loop.Builder = &revisingBuilder{}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{
+			diffJudgingGate{name: "review", n: &reviewN},
+			passExceptOnceGate{name: "check", n: &checkN, failOn: 2},
+			holdingGate{approved: &approved},
+		}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-95f"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-carry-f", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("expected waiting, got %s (%s)", item.State, item.Note)
+	}
+	if reviewN != 1 || checkN != 1 {
+		t.Fatalf("first pass should run both gates once: review=%d check=%d", reviewN, checkN)
+	}
+	firstHead := item.Built
+
+	// Far from the patch: the rebase is clean and the patch-id is unchanged,
+	// so the reviewer's verdict is eligible to carry — but the check gate
+	// (failOn: 2) refuses this pass, forcing the free recheck (issue #81)
+	// to fall through to a real build in the SAME claim.
+	interlope(t, e.remote, "elsewhere.txt", "moved, far from the patch\n")
+	approved = true
+
+	loaded, _ := q.Load(ctx, tn, "wi-carry-f")
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("state %s (%s)", item.State, item.Note)
+	}
+	if item.Head == firstHead {
+		t.Fatal("the check gate's refusal should have forced a genuine rebuild")
+	}
+	if reviewN != 2 {
+		t.Fatalf("a head the rebase never compared must be reviewed again, not carried on a stale patch-id: reviewer ran %d times", reviewN)
+	}
+	if checkN != 3 {
+		t.Fatalf("expected the check gate to run once on the original head, once on the replay, once on the rebuild: ran %d times", checkN)
+	}
+	if carries := gateCarriedBodies(t, e, "wi-carry-f"); len(carries) != 1 {
+		t.Fatalf("expected exactly one carry record, for the replayed head only, never for the rebuilt one: found %d: %+v", len(carries), carries)
+	}
+}
+
 // failNTimesGate refuses its first failFor evaluations, then passes every
 // one after — the gate itself changing its answer between retries, the way a
 // flaky check or a fix that landed on the SAME commit's next look would.
