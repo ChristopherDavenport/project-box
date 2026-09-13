@@ -63,6 +63,7 @@ export const getStatus = (signal) => fetchJSON('/v1/status', signal);
 export const getItems = (states, signal) =>
   fetchJSON('/v1/items' + (states?.length ? `?state=${encodeURIComponent(states.join(','))}` : ''), signal);
 export const getExceptions = (signal) => fetchJSON('/v1/exceptions', signal);
+export const getFlakes = (signal) => fetchJSON('/v1/flakes', signal);
 export const getItem = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}`, signal);
 export const getItemEvidence = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/evidence`, signal);
 // An origination's own facts and where its judgement stands — where a

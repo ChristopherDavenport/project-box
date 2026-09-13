@@ -6,7 +6,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { Task } from '@lit/task';
 import {
-  getStatus, getItems, getExceptions, getItem, getItemEvidence, getIngress, getProvenance, getProvenanceChain, provenanceExportURL,
+  getStatus, getItems, getExceptions, getFlakes, getItem, getItemEvidence, getIngress, getProvenance, getProvenanceChain, provenanceExportURL,
   getSessions, getSession, openIngress,getRunFrames, reload, retryItem, resolveItem,
   getPlan, getIngressPlans, getPlanDiff,
 } from './api.js';
@@ -801,6 +801,78 @@ export class BoxExceptions extends LitElement {
   }
 }
 customElements.define('box-exceptions', BoxExceptions);
+
+/**
+ * Flakes: every test the loop has proven flaky — failed once, then passed
+ * unchanged on a rebuild — newest occurrence first. One row per test, with
+ * how many times it has proven flaky and the two commits its latest proof
+ * named: the head the gate refused, and the head that later passed.
+ */
+export class BoxFlakes extends LitElement {
+  static styles = [base, css`
+    :host { display: grid; gap: var(--jh-space-400); }
+    .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; font: var(--jh-font-helper-regular);
+            color: var(--jh-color-content-secondary-enabled); }
+    .summary { display: flex; gap: var(--jh-space-400); flex-wrap: wrap; align-items: center; }
+  `];
+
+  _task = new Task(this, { task: async (_, { signal }) => getFlakes(signal), args: () => [] });
+
+  constructor() {
+    super();
+    this._activity = new ActivityController(this, {
+      limit: 1,
+      onEvent: (a) => { if (/index\/flakes/.test(a.scope)) this._refresh(); },
+    });
+  }
+
+  _refresh() {
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => this._task.run(), 400);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    clearTimeout(this._timer);
+  }
+
+  render() {
+    return this._task.render({
+      pending: () => html`<jh-card header-title="Flaky tests" padding="medium">${loading('flakes')}</jh-card>`,
+      error: (e) => html`<jh-card header-title="Flaky tests" padding="medium">${failed(e)}</jh-card>`,
+      complete: (items) => html`
+        <jh-card header-title="Flaky tests" header-subtitle="Proven flaky at least once, newest occurrence first" padding="medium">
+          ${(items?.length ?? 0) === 0
+            ? html`<p class="empty">Nothing here — no test has failed and then passed unchanged.</p>`
+            : html`<div class="summary">
+                <span><b>${items.length}</b> test${items.length === 1 ? '' : 's'}</span>
+                <span><b>${items.reduce((n, i) => n + (i.count ?? 0), 0)}</b> proofs total</span>
+              </div>`}
+        </jh-card>
+        ${(items ?? []).map((it) => this._card(it))}`,
+    });
+  }
+
+  _card(it) {
+    return html`
+      <jh-card header-title=${it.test || it.subject} header-subtitle=${[it.repo, it.package].filter(Boolean).join(' / ')} padding="medium">
+        <div class="meta">
+          <jh-tag size="small" label=${`flaky ${it.count}×`}></jh-tag>
+          <span>last proven <box-when .at=${it.last_seen}></box-when></span>
+          ${it.work_item ? html`<span>on <a href=${'/items/' + it.work_item}>${it.work_item}</a></span>` : nothing}
+        </div>
+        <div class="meta">
+          ${it.refused_head
+            ? html`<span>refused at <box-hash label="commit" .value=${it.refused_head} href=${'/provenance/' + it.refused_head}></box-hash></span>`
+            : nothing}
+          ${it.passed_head
+            ? html`<span>passed at <box-hash label="commit" .value=${it.passed_head} href=${'/provenance/' + it.passed_head}></box-hash></span>`
+            : nothing}
+        </div>
+      </jh-card>`;
+  }
+}
+customElements.define('box-flakes', BoxFlakes);
 
 /** One item: what it is, where it stands, what can be done, and its whole chain. */
 export class BoxItem extends LitElement {

@@ -41,6 +41,7 @@ const NAV = [
   { href: '/work', label: 'Work' },
   { href: '/sessions', label: 'Sessions' },
   { href: '/exceptions', label: 'Exceptions' },
+  { href: '/flakes', label: 'Flakes' },
   { href: '/submit', label: 'Submit' },
 ];
 
@@ -217,6 +218,7 @@ export class BoxApp extends LitElement {
     { path: '/work', render: () => html`<box-work></box-work>` },
     { path: '/sessions', render: () => html`<box-sessions></box-sessions>` },
     { path: '/exceptions', render: () => html`<box-exceptions></box-exceptions>` },
+    { path: '/flakes', render: () => html`<box-flakes></box-flakes>` },
     { path: '/items/:id', render: ({ id }) => html`<box-item .itemId=${id}></box-item>` },
     { path: '/ingress/:id', render: ({ id }) => html`<box-ingress .ingressId=${id}></box-ingress>` },
     { path: '/provenance/:sha', render: ({ sha }) => html`<box-provenance .sha=${sha}></box-provenance>` },
