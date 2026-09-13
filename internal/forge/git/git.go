@@ -515,6 +515,31 @@ func CommitAll(ctx context.Context, dir, message string) error {
 	return err
 }
 
+// ChangedPaths lists the repo-relative paths that base..head touches, via
+// `git diff --name-only`. An empty diff yields an empty list; an error is an
+// error — a caller must never treat a failed listing as "no paths changed",
+// per this repo's rule that unknown never reads as zero.
+func ChangedPaths(ctx context.Context, dir string, base, head forge.Commit) ([]string, error) {
+	env := append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+
+	diff := exec.CommandContext(ctx, "git", "diff", "--name-only", fmt.Sprintf("%s..%s", base, head))
+	diff.Dir = dir
+	diff.Env = env
+	var diffOut, diffErr bytes.Buffer
+	diff.Stdout, diff.Stderr = &diffOut, &diffErr
+	if err := diff.Run(); err != nil {
+		return nil, fmt.Errorf("git diff --name-only %s..%s: %w: %s", base, head, err, strings.TrimSpace(diffErr.String()))
+	}
+
+	var paths []string
+	for _, line := range strings.Split(diffOut.String(), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			paths = append(paths, line)
+		}
+	}
+	return paths, nil
+}
+
 // PatchID fingerprints the content of the diff between base and head — not
 // the commits that produced it. Replaying the identical patch onto a moved
 // base yields the same id, which is what lets a rebase stage recognize a

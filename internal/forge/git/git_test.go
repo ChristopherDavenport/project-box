@@ -531,6 +531,69 @@ func TestChangedPathsOfAnUnknownCommitErrors(t *testing.T) {
 	}
 }
 
+func TestChangedPathsListsTheFilesADiffTouches(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	base := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nchanged\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "other.txt"), []byte("new\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "touch two files")
+	head := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	got, err := ChangedPaths(ctx, dir, base, head)
+	if err != nil {
+		t.Fatalf("changed paths: %v", err)
+	}
+	want := map[string]bool{"file.txt": true, "other.txt": true}
+	if len(got) != len(want) {
+		t.Fatalf("changed paths = %v, want %v", got, want)
+	}
+	for _, p := range got {
+		if !want[p] {
+			t.Fatalf("changed paths = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestChangedPathsOfAnEmptyDiffIsEmptyNotError(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	base := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	got, err := ChangedPaths(ctx, dir, base, base)
+	if err != nil {
+		t.Fatalf("changed paths: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("changed paths of an empty diff = %v, want empty", got)
+	}
+}
+
+func TestChangedPathsOfABadCommitErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	base := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	bad := forge.Commit(strings.Repeat("a", 40))
+	if _, err := ChangedPaths(ctx, dir, base, bad); err == nil {
+		t.Fatal("changed paths against a bad commit: want error, got nil")
+	}
+}
+
 func TestPatchIDIsStableAcrossARebaseAndDiffersForADifferentPatch(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
