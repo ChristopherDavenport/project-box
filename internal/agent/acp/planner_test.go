@@ -383,6 +383,63 @@ func TestAPlanCarriesPerUnitAttempts(t *testing.T) {
 	}
 }
 
+// TestReplanParsesARevisedNodeAndRecords: issue #182 part 3 — a replan
+// judgement answering the same "sections"/"task" shape [plan.ReplanNode]
+// carries comes back parsed, and the run leaves the same agent-run,
+// agent-session and agent-result trio on the origination's chain that
+// Decompose's run does.
+func TestReplanParsesARevisedNodeAndRecords(t *testing.T) {
+	p, ing, _ := plannerRig(t, "replan")
+	ctx := context.Background()
+	pl := plan.Plan{Ingress: ing.ID, Nodes: []plan.Node{
+		{ID: "api-endpoint", Task: "Add GET /v1/widgets", Sections: []string{"api"}},
+	}}
+	unit := plan.ReplanUnit{ID: "api-endpoint", Task: "Add GET /v1/widgets", Sections: []string{"api"}}
+	esc := plan.ReplanEscalation{
+		Reason:        "the widgets view needs the web section too",
+		NeedsSections: []string{"web"}, Paths: []string{"web/src/view.go"},
+	}
+	node, err := p.Replan(ctx, ing, pl, unit, esc)
+	if err != nil {
+		t.Fatalf("replan: %v", err)
+	}
+	if !strings.Contains(strings.Join(node.Sections, ","), "api") || !strings.Contains(strings.Join(node.Sections, ","), "web") {
+		t.Fatalf("the revised node lost a section: %+v", node)
+	}
+	if node.Task != "" {
+		t.Fatalf("the revised node changed a task the answer left empty: %+v", node)
+	}
+	kinds := map[string]bool{}
+	for r, err := range p.Store.Log().Since(ctx, btn, ingress.Scope(ing.ID), 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		kinds[r.Kind] = true
+	}
+	for _, want := range []string{"agent-run", "agent-prompt", "agent-session", "agent-result", "agent-text"} {
+		if !kinds[want] {
+			t.Errorf("no %s on the origination's chain", want)
+		}
+	}
+}
+
+// TestAReplanAnsweringGarbageIsRefused: an answer with no JSON object naming
+// "sections" is refused, the same way an answer with no plan is for a fresh
+// decomposition — a replan judgement that does not hold must not be
+// mistaken for a granted one.
+func TestAReplanAnsweringGarbageIsRefused(t *testing.T) {
+	p, ing, _ := plannerRig(t, "replan-bad")
+	pl := plan.Plan{Ingress: ing.ID, Nodes: []plan.Node{
+		{ID: "api-endpoint", Task: "Add GET /v1/widgets", Sections: []string{"api"}},
+	}}
+	unit := plan.ReplanUnit{ID: "api-endpoint", Task: "Add GET /v1/widgets", Sections: []string{"api"}}
+	esc := plan.ReplanEscalation{Reason: "the widgets view needs the web section too"}
+	_, err := p.Replan(context.Background(), ing, pl, unit, esc)
+	if err == nil || !strings.Contains(err.Error(), "no revised node") {
+		t.Fatalf("a garbage replan answer was not refused: %v", err)
+	}
+}
+
 func keysOf(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

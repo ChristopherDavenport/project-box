@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -295,6 +296,77 @@ func TestAgentEscalationParksAttributed(t *testing.T) {
 	}
 	if !saw {
 		t.Fatal("escalation evidence missing")
+	}
+}
+
+// TestStructuredEscalationCarriesNeedsSectionsAndPaths: issue #182's ACP
+// half — the verb's needs_sections and paths ride the extension call and
+// come back out on the *loop.Escalation Build returns, not just the reason.
+func TestStructuredEscalationCarriesNeedsSectionsAndPaths(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "escalate-structured")
+	ctx := context.Background()
+	lp.Repo.Sections = []forge.Section{
+		{Name: "api", Paths: []string{"api", "cmd/api"}},
+		{Name: "web", Paths: []string{"extra"}},
+	}
+	lp.Builder.(*Builder).Repos = []forge.Repo{lp.Repo}
+	item := submitSectioned(t, ctx, s, router, "issue-structured", "add the widgets view", []string{"api"})
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	b := lp.Builder.(*Builder)
+	_, err := b.Build(ctx, ws, item.Task)
+	var esc *loop.Escalation
+	if !errors.As(err, &esc) {
+		t.Fatalf("no escalation: %v", err)
+	}
+	if esc.Reason != "the widgets view needs the web section too" {
+		t.Fatalf("reason lost: %+v", esc)
+	}
+	if !slices.Equal(esc.NeedsSections, []string{"web"}) {
+		t.Fatalf("needs_sections lost: %+v", esc)
+	}
+	if !slices.Equal(esc.Paths, []string{"web/src/view.go"}) {
+		t.Fatalf("paths lost: %+v", esc)
+	}
+}
+
+// TestPlainReasonEscalationHasEmptyStructuredFields: a verb call carrying
+// only a reason — the shape this call has always had — must not invent
+// structured fields nobody sent.
+func TestPlainReasonEscalationHasEmptyStructuredFields(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "escalate")
+	ctx := context.Background()
+	item := submitSectioned(t, ctx, s, router, "issue-plain", "do the impossible", nil)
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	b := lp.Builder.(*Builder)
+	_, err := b.Build(ctx, ws, item.Task)
+	var esc *loop.Escalation
+	if !errors.As(err, &esc) {
+		t.Fatalf("no escalation: %v", err)
+	}
+	if len(esc.NeedsSections) != 0 || len(esc.Paths) != 0 {
+		t.Fatalf("a plain-reason escalation invented structured fields: %+v", esc)
+	}
+}
+
+// TestTextFallbackEscalationHasEmptyStructuredFields: the ESCALATE: text line
+// stays free text — issue #182 gave the verb a structured form, not the
+// fallback a second syntax for the same thing.
+func TestTextFallbackEscalationHasEmptyStructuredFields(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "escalate-text")
+	ctx := context.Background()
+	item := submitSectioned(t, ctx, s, router, "issue-text", "do the impossible", nil)
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	b := lp.Builder.(*Builder)
+	_, err := b.Build(ctx, ws, item.Task)
+	var esc *loop.Escalation
+	if !errors.As(err, &esc) {
+		t.Fatalf("no escalation: %v", err)
+	}
+	if esc.Reason != "task needs credentials I do not hold" {
+		t.Fatalf("reason lost: %+v", esc)
+	}
+	if len(esc.NeedsSections) != 0 || len(esc.Paths) != 0 {
+		t.Fatalf("the text fallback invented structured fields: %+v", esc)
 	}
 }
 

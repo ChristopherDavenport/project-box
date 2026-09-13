@@ -287,7 +287,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 	}
 	// An agent that declines to judge has not failed the change, so this is
 	// an error like every other unreadable answer.
-	if reason := escalation(res); reason != "" {
+	if reason, _, _ := escalation(res); reason != "" {
 		return forge.Verdict{}, fmt.Errorf("acp: reviewer: %s declined to judge %s: %s", r.seatName(), run, reason)
 	}
 	v, err := parseVerdict(res.Text, prior)

@@ -337,8 +337,8 @@ func (b *Builder) runAttempt(ctx context.Context, rc attemptCtx, sent, resume, c
 	// Escalation first: it is the stronger claim of the two. An agent that
 	// both declines and asks for a fresh session is stuck, and a fresh session
 	// will be stuck in the same place.
-	if reason := escalation(res); reason != "" {
-		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason}
+	if reason, needs, paths := escalation(res); reason != "" {
+		return "", &loop.Escalation{Seat: b.seatName(), Reason: reason, NeedsSections: needs, Paths: paths}
 	}
 	if reason, notes := handoff(res); reason != "" {
 		// The session's account goes to the seat NOW rather than on the settle
@@ -659,7 +659,7 @@ func prompt(bundle agent.Bundle, task, contextDir, wsDir string) string {
 	w.WriteString(`
 ## Working contract
 - You are in a git workspace. Make the change and COMMIT it (git add, git commit) with a clear message. Do not push: landing is the factory's job, not yours.
-- If you cannot or should not proceed, escalate instead of guessing: call the _box/escalate method with {"reason": "..."} if your harness allows it; otherwise reply with a single line starting with ESCALATE: and your reason.
+- If you cannot or should not proceed, escalate instead of guessing: call the _box/escalate method with {"reason": "...", "needs_sections": [...], "paths": [...]} if your harness allows it — needs_sections names the declared sections the change needs beyond this one and paths the exact files, when you can say either; otherwise reply with a single line starting with ESCALATE: and your reason (that fallback stays free text — the structured fields are the verb's alone).
 - If you are not finished but are running out of room, hand off rather than degrading: call the _box/handoff method with {"reason": "...", "notes": "..."} if your harness allows it; otherwise reply with a single line starting with HANDOFF-NOW: and your reason. Commit what you have first — a fresh session continues in this same workspace, so what you leave committed is what it starts from.
 - End your final message with lines starting with "HANDOFF: " carrying anything your successor needs to know.
 `)
@@ -667,17 +667,20 @@ func prompt(bundle agent.Bundle, task, contextDir, wsDir string) string {
 }
 
 // escalation reads both channels: the extension verb, and the text fallback
-// for agents whose harness cannot call unknown methods.
-func escalation(res Result) string {
+// for agents whose harness cannot call unknown methods. needsSections and
+// paths are the verb's structured form — issue #182 — and are always empty
+// for the text fallback: ESCALATE: stays free text, never a second syntax
+// for the same thing the verb already carries structured.
+func escalation(res Result) (reason string, needsSections, paths []string) {
 	if res.Escalated != "" {
-		return res.Escalated
+		return res.Escalated, res.EscalatedNeedsSections, res.EscalatedPaths
 	}
 	for line := range strings.SplitSeq(res.Text, "\n") {
 		if after, ok := strings.CutPrefix(strings.TrimSpace(line), "ESCALATE:"); ok {
-			return strings.TrimSpace(after)
+			return strings.TrimSpace(after), nil, nil
 		}
 	}
-	return ""
+	return "", nil, nil
 }
 
 // handoff reads the mid-run handoff from both channels the same way, and
@@ -1003,7 +1006,7 @@ func sectionLayer(sec forge.Section) agent.Layer {
 	if sec.Purpose != "" {
 		fmt.Fprintf(&w, " — %s", sec.Purpose)
 	}
-	fmt.Fprintf(&w, "\nThis unit of work is expressed within %s. Stay within these paths: a change that must reach outside them is a change to the plan, so escalate and name the section it needs.\n",
+	fmt.Fprintf(&w, "\nThis unit of work is expressed within %s. Stay within these paths: a change that must reach outside them is a change to the plan, so escalate via _box/escalate with {\"reason\": \"...\", \"needs_sections\": [...], \"paths\": [...]}, naming the declared section and the exact files it needs, when you can.\n",
 		strings.Join(sec.Paths, ", "))
 	if sec.Check != "" {
 		fmt.Fprintf(&w, "While iterating, run the section's check: `%s`. The repository's full check runs at the gate.\n", sec.Check)

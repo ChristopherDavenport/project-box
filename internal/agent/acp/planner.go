@@ -230,8 +230,8 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 			}
 		}
 	}
-	if reason := escalation(res); reason != "" {
-		return plan.Result{}, &loop.Escalation{Seat: p.seatName(), Reason: reason}
+	if reason, needs, paths := escalation(res); reason != "" {
+		return plan.Result{}, &loop.Escalation{Seat: p.seatName(), Reason: reason, NeedsSections: needs, Paths: paths}
 	}
 	nodes, err := parsePlan(res.Text, repo)
 	if err != nil {
@@ -242,6 +242,126 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 		Facts:    []plan.Fact{{Key: "repo/" + repo.Name + "/head", Value: string(head), AsOf: started}},
 		AgentRef: bundle.Ref,
 	}, nil
+}
+
+// Replan satisfies [plan.Replanner]: a unit's builder escalated for a need
+// [loop.WidenTests] could not grant in place, and this runs one narrow
+// judgement over the section catalogue [sectionsLayer] already renders for
+// Decompose — not a fresh decomposition of the whole origination, only
+// whether this one unit's sections and task should change to grant what it
+// asked for.
+func (p *Planner) Replan(ctx context.Context, origination ingress.Ingress, pl plan.Plan, unit plan.ReplanUnit, esc plan.ReplanEscalation) (plan.ReplanNode, error) {
+	repo, err := p.repo(origination.Repo)
+	if err != nil {
+		return plan.ReplanNode{}, err
+	}
+	run := "replan-" + unit.ID
+	if err := p.Mirror.Fetch(ctx, repo); err != nil {
+		return plan.ReplanNode{}, fmt.Errorf("acp: planner: replan: fetch %s: %w", repo.Name, err)
+	}
+	head, err := p.Mirror.Resolve(ctx, repo, "refs/heads/"+repo.DefaultBranch)
+	if err != nil {
+		return plan.ReplanNode{}, fmt.Errorf("acp: planner: replan: resolve %s: %w", repo.Name, err)
+	}
+	dir, err := filepath.Abs(filepath.Join(p.Root, run))
+	if err != nil {
+		return plan.ReplanNode{}, fmt.Errorf("acp: planner: replan: %w", err)
+	}
+	if err := p.Mirror.MaterializeContext(ctx, dir, agent.ContextSet{Repos: []agent.ContextRepo{
+		{Repo: repo.Name, Commit: string(head)},
+	}}); err != nil {
+		return plan.ReplanNode{}, fmt.Errorf("acp: planner: replan: materializing %s@%s: %w", repo.Name, head, err)
+	}
+	defer gitforge.RemoveContext(dir)
+	tree := filepath.Join(dir, repo.Name)
+
+	req := agent.Request{
+		Tenant: p.Tenant, Role: agent.RolePlanner, Box: p.Box, Repo: repo.Name, Run: run,
+		Task: unit.Task, Extra: []agent.Layer{sectionsLayer(repo)},
+	}
+	bundle, err := p.Composer.Resolve(ctx, req)
+	if err != nil {
+		return plan.ReplanNode{}, err
+	}
+	rec := recorder{Store: p.Store, Tenant: p.Tenant, Scope: ingress.Scope(origination.ID), Actor: p.seatName(), OnBehalfOf: origination.Requester}
+	layers := make([]layerRecord, 0, len(bundle.Layers))
+	for _, l := range bundle.Layers {
+		layers = append(layers, layerRecord{Scope: string(l.Scope), Name: l.Name, Source: string(l.Source.Kind), Digest: l.Source.Digest})
+	}
+	envelope := "(none declared)"
+	if bundle.Envelope != nil {
+		envelope = bundle.Envelope.String()
+	}
+	rec.json(ctx, "agent-run", bundle.Ref, runRecord{
+		AgentRef: bundle.Ref, Role: string(agent.RolePlanner), Mode: bundle.Tools.PermissionMode,
+		Seat: p.seatName(), Envelope: envelope, Layers: layers,
+	})
+
+	contextDir, skillsDir := forge.ContextDir(tree), forge.SkillsDir(tree)
+	for _, d := range []string{contextDir, skillsDir} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			return plan.ReplanNode{}, err
+		}
+	}
+	loaded := ""
+	if len(bundle.Skills) > 0 {
+		wrote, err := p.Mirror.MaterializeSkills(ctx, skillsDir, bundle.Skills)
+		if err != nil {
+			return plan.ReplanNode{}, err
+		}
+		if wrote {
+			loaded = skillsDir
+		}
+	}
+	sent := replanPrompt(bundle, unit, pl, esc)
+	explained, _ := p.Composer.Explain(ctx, bundle)
+	rec.json(ctx, "agent-prompt", bundle.Ref, promptRecord{AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained)})
+
+	rt := &Runtime{Command: p.Command, Dir: tree, ContextDir: "", Env: p.Env, EnvNames: p.EnvNames,
+		MaxTokens: p.MaxTokens, Transcript: p.Transcript,
+		SkillsDir: skillsDir, LoadedSkills: loaded, InheritSettings: p.InheritSettings,
+		Progress: p.progress(ctx, run, bundle.Ref)}
+	if p.Progress != nil {
+		p.Progress(ctx, run, Update{Kind: UpdateStarted, Text: bundle.Ref, Session: bundle.Ref})
+	}
+	started := time.Now()
+	res, err := rt.Run(ctx, bundle, sent)
+	elapsed := time.Since(started)
+	if res.Session.Opened {
+		rec.json(ctx, "agent-session", bundle.Ref, sessionRecord{
+			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
+			Config: res.Session.Config, Commands: res.Session.Commands,
+			Credential: res.Usage.Credential(), Env: res.EnvNames,
+			Session: res.Session.ID, Role: "planner",
+		})
+	}
+	if p.Spend != nil && res.Prompted {
+		p.Spend(ctx, run, res.Usage)
+	}
+	if err != nil {
+		// Same seam as Decompose's own: a transport failure or a mid-response
+		// server error here means the replan never answered, not that it
+		// answered and declined.
+		werr := error(err)
+		if spent := windowSpent(res, err); spent != nil {
+			werr = spent
+		}
+		return plan.ReplanNode{}, fmt.Errorf("acp: planner: replan: %w: %w", plan.ErrNoAnswer, werr)
+	}
+	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed)))
+	rec.json(ctx, "agent-text", bundle.Ref, textRecord{AgentRef: bundle.Ref, Text: res.Text, StopReason: res.StopReason})
+	// Unwrapped, exactly as Decompose returns its own escalation (line
+	// above): [Pump.runReplan] parks on any error this returns, and a
+	// judgement that itself declines to grant the escalation must surface
+	// that decision rather than being swallowed into a parse failure.
+	if reason, needs, paths := escalation(res); reason != "" {
+		return plan.ReplanNode{}, &loop.Escalation{Seat: p.seatName(), Reason: reason, NeedsSections: needs, Paths: paths}
+	}
+	node, err := parseReplanNode(res.Text, repo)
+	if err != nil {
+		return plan.ReplanNode{}, fmt.Errorf("acp: planner: replan: %w", err)
+	}
+	return node, nil
 }
 
 func (p *Planner) seatName() string {
@@ -380,6 +500,54 @@ func plannerPrompt(bundle agent.Bundle, task string) string {
 	return w.String()
 }
 
+// replanContract is what a replan judgement is asked to answer, in the
+// judgement's own instructions — the same shape [plan.ReplanNode] carries,
+// since a replan may change only WHERE a unit works and WHAT it asks for,
+// never the graph around it.
+const replanContract = `
+## Your answer
+Decide this unit's revised shape: whether it now belongs in different sections, and whether its task must say so. Reply with ONE JSON object as the last thing in your message:
+
+{"sections":["..."],"task":"","why":"one paragraph"}
+
+- sections: the unit's COMPLETE section list from here on, not an addition to the old one. Empty means the unit now needs the whole repository.
+- task: the unit's revised task, only when it must change to reflect the new sections; empty leaves the task exactly as it already is.
+- If the escalation should not be granted as asked — it does not belong in this decomposition, or the repository has no section for what it names — do not answer with JSON: reply with a single line starting with ESCALATE: and the reason.
+`
+
+// replanPrompt is the composed instructions for a replan judgement: the same
+// task-once heading Decompose sends, the unit as it stands and the rest of
+// the plan it belongs to, why its builder escalated instead of grinding, and
+// the narrowed working contract above.
+func replanPrompt(bundle agent.Bundle, unit plan.ReplanUnit, pl plan.Plan, esc plan.ReplanEscalation) string {
+	var w strings.Builder
+	w.WriteString(taskOnce(bundle, unit.Task))
+	fmt.Fprintf(&w, "\n## The unit as planned\nid: %s\nsections: %v\n", unit.ID, unit.Sections)
+	if len(pl.Nodes) > 1 {
+		w.WriteString("\n## The rest of this plan\n")
+		for _, n := range pl.Nodes {
+			if n.ID == unit.ID {
+				continue
+			}
+			fmt.Fprintf(&w, "- %s (sections: %v): %s\n", n.ID, n.Sections, n.Summary)
+		}
+	}
+	fmt.Fprintf(&w, "\n## Why this unit is being replanned\nThe builder working this unit escalated: %s\n", esc.Reason)
+	if len(esc.NeedsSections) > 0 {
+		fmt.Fprintf(&w, "It named needing these sections: %v\n", esc.NeedsSections)
+	}
+	if len(esc.Paths) > 0 {
+		fmt.Fprintf(&w, "It named these paths: %v\n", esc.Paths)
+	}
+	w.WriteString(`
+## Working contract
+- Read only. Do not edit, create, or commit anything: a replan is not a change.
+- End your message with the JSON object described above, or with an ESCALATE: line. Nothing after it.
+`)
+	w.WriteString(replanContract)
+	return w.String()
+}
+
 // planAnswer is the shape the planner replies in. "units" rather than the
 // package's "nodes": the agent is told what it is expressing, not how the
 // graph engine spells it.
@@ -440,6 +608,39 @@ func parsePlan(text string, repo forge.Repo) ([]plan.Node, error) {
 		nodes = append(nodes, plan.Node{ID: u.ID, Task: strings.TrimSpace(u.Task), Summary: strings.TrimSpace(u.Summary), Sections: u.Sections, DependsOn: u.DependsOn, Model: strings.TrimSpace(u.Model), Attempts: u.Attempts})
 	}
 	return nodes, nil
+}
+
+// replanNodeAnswer is the shape a replan judgement replies in — the same two
+// fields [plan.ReplanNode] carries.
+type replanNodeAnswer struct {
+	Sections []string `json:"sections"`
+	Task     string   `json:"task"`
+	Why      string   `json:"why"`
+}
+
+// parseReplanNode reads a replan judgement's answer out of its message the
+// same way [parsePlan] reads a fresh decomposition's: the last balanced JSON
+// object naming "sections", checked against the repository it was judged
+// over so a section the repository does not declare is refused in the
+// planner's own terms rather than surfacing later as a graph error. Unlike a
+// freshly decomposed unit, an empty task here is not refused — see
+// [plan.ReplanNode.Task] — a replan may leave the task exactly as it already
+// stood and say so by leaving it out.
+func parseReplanNode(text string, repo forge.Repo) (plan.ReplanNode, error) {
+	obj, ok := lastObjectWith(text, `"sections"`)
+	if !ok {
+		return plan.ReplanNode{}, fmt.Errorf("the answer carries no revised node — no JSON object with \"sections\" — and no ESCALATE: line")
+	}
+	var a replanNodeAnswer
+	if err := json.Unmarshal([]byte(obj), &a); err != nil {
+		return plan.ReplanNode{}, fmt.Errorf("the revised node does not parse: %w", err)
+	}
+	for _, s := range a.Sections {
+		if _, ok := repo.Section(s); !ok {
+			return plan.ReplanNode{}, fmt.Errorf("the revised node names section %q, which repository %s does not declare (declared: %v)", s, repo.Name, repo.SectionNames())
+		}
+	}
+	return plan.ReplanNode{Sections: a.Sections, Task: strings.TrimSpace(a.Task)}, nil
 }
 
 // lastObjectWith finds the last balanced JSON object in text that contains

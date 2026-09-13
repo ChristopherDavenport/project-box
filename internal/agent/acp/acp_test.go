@@ -746,6 +746,26 @@ func fakeAgent(scenario string) {
 						"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "escalation refused?!"}}})
 				}
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "escalate-structured":
+				// Issue #182: the verb's structured form, carrying needs_sections
+				// and paths beside the reason.
+				resp := f.request("_box/escalate", map[string]any{
+					"reason":         "the widgets view needs the web section too",
+					"needs_sections": []string{"web"},
+					"paths":          []string{"web/src/view.go"},
+				})
+				if res, ok := resp["result"].(map[string]any); !ok || res["acknowledged"] != true {
+					f.notify("session/update", map[string]any{"sessionId": sessionID,
+						"update": map[string]any{"sessionUpdate": "agent_message_chunk", "content": map[string]any{"type": "text", "text": "escalation refused?!"}}})
+				}
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "escalate-text":
+				// The ESCALATE: text fallback, for a harness that cannot call an
+				// unknown method — free text only, never a structured form.
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": "ESCALATE: task needs credentials I do not hold\n"}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
 			case "handoff":
 				resp := f.request("_box/handoff", map[string]any{
 					"reason": "context is nearly full and the migration is half applied",
@@ -946,6 +966,21 @@ func fakeAgent(scenario string) {
 			case "planner-escalate":
 				f.request("_box/escalate", map[string]any{"reason": "this origination is a question, not a change"})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
+			case "replan", "replan-bad":
+				// A revised node in the replan judgement's own answer shape.
+				// "replan-bad" never gets to the JSON, the way "planner-noplan"
+				// does not for a fresh decomposition.
+				answer := "The escalation is right: the view needs the web section too.\n\n```json\n" +
+					`{"sections":["api","web"],"task":"","why":"the escalation named the web section"}` +
+					"\n```\nHANDOFF: the widgets view now spans api and web\n"
+				if scenario == "replan-bad" {
+					answer = "I looked around and it all seems fine to me."
+				}
+				f.notify("session/update", map[string]any{"sessionId": sessionID,
+					"update": map[string]any{"sessionUpdate": "agent_message_chunk",
+						"content": map[string]any{"type": "text", "text": answer}}})
+				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn",
+					"usage": map[string]any{"inputTokens": 400, "outputTokens": 80}}})
 			case "planner-noanswer":
 				// The run never answers: the transport refuses session/prompt
 				// itself, the way the incident's session-limit rejection did.

@@ -498,6 +498,14 @@ type Result struct {
 	// act, not a contrived failure: the caller parks the work with this
 	// reason attributed to the agent.
 	Escalated string
+	// EscalatedNeedsSections and EscalatedPaths are the verb's structured
+	// form — issue #182: the sections the agent says the change needs
+	// beyond what this run already holds, and the paths it would touch in
+	// them, when it can say. Both empty means the agent used the verb with
+	// reason alone, or used the ESCALATE: text fallback, which carries no
+	// structured form at all.
+	EscalatedNeedsSections []string
+	EscalatedPaths         []string
 	// HandedOff carries the agent's own reason for asking mid-run for a fresh
 	// session — the "_box/handoff" extension verb. Distinct from Escalated in
 	// the way that matters to the caller: an escalation wants a person and
@@ -731,13 +739,17 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 			// judgement. Acknowledged always — a refusal channel that could
 			// itself be refused would teach agents not to use it.
 			var p struct {
-				Reason string `json:"reason"`
+				Reason        string   `json:"reason"`
+				NeedsSections []string `json:"needs_sections"`
+				Paths         []string `json:"paths"`
 			}
 			if err := json.Unmarshal(params, &p); err != nil {
 				return nil, err
 			}
 			mu.Lock()
 			res.Escalated = p.Reason
+			res.EscalatedNeedsSections = p.NeedsSections
+			res.EscalatedPaths = p.Paths
 			emit(Update{Kind: UpdateEscalate, Reason: p.Reason})
 			mu.Unlock()
 			return map[string]any{"acknowledged": true}, nil
