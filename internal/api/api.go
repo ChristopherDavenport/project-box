@@ -120,6 +120,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/items/{id}", s.item)
 	mux.HandleFunc("GET /v1/items/{id}/evidence", s.itemEvidence)
 	mux.HandleFunc("GET /v1/items/{id}/session", s.session)
+	mux.HandleFunc("GET /v1/items/{id}/sessions", s.itemSessions)
 	mux.HandleFunc("GET /v1/sessions", s.sessions)
 	mux.HandleFunc("GET /v1/runs/{run}/frames", s.runFrames)
 	mux.HandleFunc("GET /v1/provenance/{sha}", s.provenance)
@@ -321,6 +322,23 @@ func (s *Server) session(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		httpErr(w, 404, err.Error())
 		return
+	}
+	writeJSON(w, out)
+}
+
+// itemSessions lists one unit's agent sessions from its chain — the same
+// rows Session's own AgentSessions field carries, on their own for a caller
+// that wants just the attempts. The chain outlives the claim, so a settled
+// item still answers, and matching runFrames' doctrine (runs.go), an id with
+// no agent-run records answers an empty list rather than a 404.
+func (s *Server) itemSessions(w http.ResponseWriter, r *http.Request) {
+	out, err := s.room(r).AgentSessions(r.Context(), r.PathValue("id"))
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if out == nil {
+		out = []control.AgentSession{}
 	}
 	writeJSON(w, out)
 }

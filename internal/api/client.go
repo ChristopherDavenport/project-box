@@ -130,6 +130,14 @@ func (c *Client) Session(ctx context.Context, id string) (control.Session, error
 	return out, c.do(ctx, "GET", "/v1/items/"+id+"/session", nil, &out)
 }
 
+// AgentSessions lists one unit's agent sessions from its chain, on their own
+// — see control.AgentSession. An id with no agent-run records answers an
+// empty list, whatever its queue state, because the chain outlives the claim.
+func (c *Client) AgentSessions(ctx context.Context, id string) ([]control.AgentSession, error) {
+	var out []control.AgentSession
+	return out, c.do(ctx, "GET", "/v1/items/"+id+"/sessions", nil, &out)
+}
+
 // Provenance is the audit query over the wire.
 func (c *Client) Provenance(ctx context.Context, sha string) ([]evidence.Record, error) {
 	var out []evidence.Record

@@ -32,6 +32,65 @@ func ran(t *testing.T, r *Room, id, seat, ref string, layers ...Layer) {
 	}
 }
 
+// agentRunOn writes an agent-run record on an arbitrary scope, with a role
+// and an optional continues — the fields [ran] does not need but
+// AgentSession's fold does. Used directly rather than through [ran] so
+// judgement's ingress-scope chain can be built the same way a claimed
+// item's workitem-scope chain is.
+func agentRunOn(t *testing.T, r *Room, scope, ref, role, seat, continues string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"agentref": ref, "role": role, "mode": "acceptEdits",
+		"seat": seat, "envelope": "(none declared)", "continues": continues,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Store.Log().Append(context.Background(), evidence.Record{
+		Tenant: tn, Scope: scope, Kind: "agent-run",
+		Subject: ref, Actor: seat, Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// agentSessionOn writes the agent-session record a real builder writes once
+// its session opens: what the agent said it was, and the ACP session id a
+// later attempt can continue.
+func agentSessionOn(t *testing.T, r *Room, scope, ref, model, session string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"agentref": ref, "model": model, "session": session,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Store.Log().Append(context.Background(), evidence.Record{
+		Tenant: tn, Scope: scope, Kind: "agent-session",
+		Subject: ref, Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// agentResultOn writes the agent-result record a real builder writes once an
+// attempt settles: the subset resultBody's own fields this package reads.
+func agentResultOn(t *testing.T, r *Room, scope, ref string, wallMS, tokens int64, costUSD float64) {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"stop": "end_turn", "wall_ms": wallMS, "tokens": tokens, "cost_usd": costUSD,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Store.Log().Append(context.Background(), evidence.Record{
+		Tenant: tn, Scope: scope, Kind: "agent-result",
+		Subject: ref, Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestASessionSaysWhoWhereAndWhat is the issue's three bullets on one card.
 //
 // `state=claimed head=` was the whole answer for the length of a run — minutes
@@ -320,5 +379,207 @@ func TestSessionByIdOutlivesTheRun(t *testing.T) {
 	}
 	if s.State != queue.StateDone || s.Head != "abc123" {
 		t.Errorf("settled session = %+v", s.QueueEntry)
+	}
+}
+
+// TestAgentSessionsFoldChainOrderRolesAttemptsAndCost is issue #107's core
+// claim: the chain already recorded every attempt completely, and a listing
+// over it must show that account rather than the newest agent-run alone.
+//
+// Three builder attempts interleaved with a reviewer session: chain order
+// must survive the fold, attempt ordinals must count per role (a reviewer
+// session between two builder ones must not perturb the builder count), a
+// continues reference must ride through, and a row with no agent-result yet
+// must read as unfinished rather than a free run.
+func TestAgentSessionsFoldChainOrderRolesAttemptsAndCost(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+	w := submit(t, q, "wi-attempts")
+	w, _, err := q.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := "workitem/" + w.ID
+
+	agentRunOn(t, r, scope, "ref-b1", "builder", "mason", "")
+	agentSessionOn(t, r, scope, "ref-b1", "sonnet", "sess-b1")
+	agentResultOn(t, r, scope, "ref-b1", 1000, 500, 0.5)
+
+	agentRunOn(t, r, scope, "ref-rv1", "reviewer", "reviewer-seat", "")
+	agentSessionOn(t, r, scope, "ref-rv1", "sonnet", "sess-rv1")
+	agentResultOn(t, r, scope, "ref-rv1", 2000, 800, 0.25)
+
+	// The second builder attempt continues the first's session, and has no
+	// result yet: still running, or lost mid-flight.
+	agentRunOn(t, r, scope, "ref-b2", "builder", "mason", "sess-b1")
+	agentSessionOn(t, r, scope, "ref-b2", "sonnet", "sess-b2")
+
+	s, err := r.Session(ctx, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := s.AgentSessions
+	if len(rows) != 3 {
+		t.Fatalf("agent sessions = %d, want 3: %+v", len(rows), rows)
+	}
+	if rows[0].AgentRef != "ref-b1" || rows[1].AgentRef != "ref-rv1" || rows[2].AgentRef != "ref-b2" {
+		t.Fatalf("chain order = %+v, want b1, rv1, b2", rows)
+	}
+	if rows[0].Role != "builder" || rows[0].Attempt != 1 {
+		t.Errorf("ref-b1 = role=%q attempt=%d, want builder attempt 1", rows[0].Role, rows[0].Attempt)
+	}
+	if rows[1].Role != "reviewer" || rows[1].Attempt != 1 {
+		t.Errorf("ref-rv1 = role=%q attempt=%d, want reviewer attempt 1", rows[1].Role, rows[1].Attempt)
+	}
+	if rows[2].Role != "builder" || rows[2].Attempt != 2 {
+		t.Errorf("ref-b2 = role=%q attempt=%d, want builder attempt 2 — a reviewer session must not perturb the builder count", rows[2].Role, rows[2].Attempt)
+	}
+	if rows[2].Continues != "sess-b1" {
+		t.Errorf("ref-b2 continues = %q, want sess-b1", rows[2].Continues)
+	}
+	if !rows[0].Finished || !rows[1].Finished {
+		t.Errorf("ref-b1/ref-rv1 both have results and must read finished: %+v", rows[:2])
+	}
+	if rows[2].Finished {
+		t.Error("ref-b2 has no agent-result and must not read finished")
+	}
+	if rows[2].Tokens != 0 || rows[2].CostUSD != 0 || !rows[2].Ended.IsZero() {
+		t.Errorf("ref-b2 = %+v, want zero tokens/cost/ended — unfinished is not a free run", rows[2])
+	}
+	// Totals summed from this exact slice: 500+800 tokens, 0.5+0.25 cost.
+	// ref-b2 contributes nothing because it is unfinished.
+	if s.AgentTokens != 1300 {
+		t.Errorf("agent tokens = %d, want 1300 (sum of the listed rows)", s.AgentTokens)
+	}
+	if s.AgentCostUSD != 0.75 {
+		t.Errorf("agent cost = %v, want 0.75 (sum of the listed rows)", s.AgentCostUSD)
+	}
+}
+
+// TestAgentSessionOfFollowsTheItemsStatedBudgetOrOmits: the budget a row
+// carries comes from the queue item's own Attempts field when it states one,
+// and is omitted — never defaulted to the loop's own default — when the item
+// names none, because control cannot see that default and must not guess it.
+func TestAgentSessionOfFollowsTheItemsStatedBudgetOrOmits(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	budgeted, err := q.Submit(ctx, queue.WorkItem{
+		ID: "wi-budgeted", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: "t", Attempts: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	budgeted, _, err = q.Claim(ctx, budgeted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentRunOn(t, r, "workitem/"+budgeted.ID, "ref-budgeted", "builder", "mason", "")
+
+	plain := submit(t, q, "wi-plain")
+	plain, _, err = q.Claim(ctx, plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentRunOn(t, r, "workitem/"+plain.ID, "ref-plain", "builder", "mason", "")
+
+	bs, err := r.Session(ctx, budgeted.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bs.AgentSessions) != 1 || bs.AgentSessions[0].Of != 5 {
+		t.Fatalf("budgeted row = %+v, want Of=5", bs.AgentSessions)
+	}
+
+	ps, err := r.Session(ctx, plain.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps.AgentSessions) != 1 || ps.AgentSessions[0].Of != 0 {
+		t.Fatalf("plain row = %+v, want Of omitted (0) — the item named no budget", ps.AgentSessions)
+	}
+}
+
+// TestAgentResultRecordCarriesTheSubsetControlReads pins the agent-result
+// keys this package parses to acp's resultBody (builder.go) shape: wall_ms,
+// tokens, cost_usd. A key renamed on either end must fail this test rather
+// than surface, quietly, as a finished row that stopped carrying its cost.
+func TestAgentResultRecordCarriesTheSubsetControlReads(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+	w := submit(t, q, "wi-result-shape")
+	w, _, err := q.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := "workitem/" + w.ID
+	agentRunOn(t, r, scope, "ref-1", "builder", "mason", "")
+	// The real writer's shape (acp's resultBody), including fields this
+	// package does not read — proving those are ignored rather than
+	// required.
+	body := []byte(`{"stop":"end_turn","tool_calls":3,"wall_ms":4200,"tokens":900,"cost_usd":1.25}`)
+	if _, err := r.Store.Log().Append(ctx, evidence.Record{
+		Tenant: tn, Scope: scope, Kind: "agent-result", Subject: "ref-1", Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := r.Session(ctx, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.AgentSessions) != 1 {
+		t.Fatalf("agent sessions = %+v", s.AgentSessions)
+	}
+	got := s.AgentSessions[0]
+	if !got.Finished || got.WallMS != 4200 || got.Tokens != 900 || got.CostUSD != 1.25 {
+		t.Fatalf("result row = %+v, want finished wall_ms=4200 tokens=900 cost_usd=1.25", got)
+	}
+}
+
+// TestAJudgementsPlannerSessionAppearsOnItsRow: the planner's own agent-run
+// record lives on the ingress scope, not a workitem scope, and a judgement
+// has no queue item to state an attempt budget — its rows must never guess
+// one.
+func TestAJudgementsPlannerSessionAppearsOnItsRow(t *testing.T) {
+	r, _ := setup(t)
+	ctx := context.Background()
+	r.Live = &Live{}
+
+	ing := ingress.Ingress{
+		ID: "ing-judge-sessions", Tenant: tn, Box: "shop", Repo: "app",
+		Requester: "chris", Note: "decompose this", Title: "the checkout flow is broken",
+	}
+	body, err := json.Marshal(ing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Store.Log().Append(ctx, evidence.Record{
+		Tenant: tn, Scope: ingress.Scope(ing.ID), Kind: ingress.RecordOpen,
+		Subject: "delivery/" + ing.ID, Actor: ing.Requester, Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	agentRunOn(t, r, ingress.Scope(ing.ID), "ref-plan", "planner", "planner", "")
+	agentSessionOn(t, r, ingress.Scope(ing.ID), "ref-plan", "sonnet", "sess-plan")
+	r.Live.Append("plan-"+ing.ID, Frame{Kind: "started"})
+
+	sessions, err := r.Sessions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sessions) != 1 {
+		t.Fatalf("sessions = %d, want the one judgement in flight", len(sessions))
+	}
+	s := sessions[0]
+	rows := s.AgentSessions
+	if len(rows) != 1 || rows[0].AgentRef != "ref-plan" || rows[0].Role != "planner" {
+		t.Fatalf("judgement agent sessions = %+v, want the planner's own row", rows)
+	}
+	if rows[0].Model != "sonnet" || rows[0].Session != "sess-plan" {
+		t.Errorf("planner row = %+v, want model=sonnet session=sess-plan", rows[0])
+	}
+	if rows[0].Of != 0 {
+		t.Errorf("planner row Of = %d, want 0 — a judgement has no queue item to state a budget", rows[0].Of)
 	}
 }

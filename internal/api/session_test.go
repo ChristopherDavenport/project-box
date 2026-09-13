@@ -3,6 +3,7 @@ package api
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/control"
+	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
@@ -164,5 +166,53 @@ func TestSessionsWithoutALiveBus(t *testing.T) {
 	}
 	if len(sessions) != 1 || sessions[0].Watching || len(sessions[0].Timeline) != 0 {
 		t.Fatalf("sessions = %+v", sessions)
+	}
+}
+
+// TestAgentSessionsEndpointListsOneUnitsAttempts is issue #107's api half:
+// GET /v1/items/{id}/sessions answers just the AgentSession rows for one
+// unit, the same rows Session's own AgentSessions field carries — and an id
+// with no agent-run records answers an empty list, matching runFrames'
+// doctrine, rather than a 404.
+func TestAgentSessionsEndpointListsOneUnitsAttempts(t *testing.T) {
+	w := rig(t)
+	ctx := context.Background()
+	claimed(t, w, "wi-attempts")
+
+	body, err := json.Marshal(map[string]any{
+		"agentref": "ref-1", "role": "builder", "mode": "acceptEdits",
+		"seat": "mason", "envelope": "(none declared)",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.srv.Store.Log().Append(ctx, evidence.Record{
+		Tenant: tn, Scope: "workitem/wi-attempts", Kind: "agent-run",
+		Subject: "ref-1", Actor: "mason", Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ts := httptest.NewServer(w.srv.Handler())
+	defer ts.Close()
+	c, err := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := c.AgentSessions(ctx, "wi-attempts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].AgentRef != "ref-1" || rows[0].Role != "builder" {
+		t.Fatalf("agent sessions = %+v", rows)
+	}
+
+	empty, err := c.AgentSessions(ctx, "wi-nothing-ever-ran")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(empty) != 0 {
+		t.Fatalf("agent sessions for an id with no agent-run records = %+v, want empty", empty)
 	}
 }
