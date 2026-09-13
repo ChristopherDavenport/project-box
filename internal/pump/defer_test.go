@@ -20,29 +20,18 @@ import (
 
 // noAnswer is a judgement decomposer whose failures are a planner that never
 // answered — a transport error, a mid-response server error, a limit
-// refusal — as issue #110 distinguishes from a planner that judged and
-// whose judgement does not hold. When charge is set, the failing call also
-// charges the meter with an exhausted account-window Limit, simulating the
-// acp planner's own Spend having already reported the window closed before
-// its error returns.
+// refusal — as issue #110 distinguishes from a planner that judged and whose
+// judgement does not hold.
 type noAnswer struct {
-	meter   *capacity.Meter
 	calls   int
 	failFor int
-	charge  bool
 }
 
 func (*noAnswer) Name() string     { return "judge" }
 func (*noAnswer) Replayable() bool { return false }
-func (d *noAnswer) Decompose(ctx context.Context, ing ingress.Ingress, _ kind.Declaration) (plan.Result, error) {
+func (d *noAnswer) Decompose(context.Context, ingress.Ingress, kind.Declaration) (plan.Result, error) {
 	d.calls++
 	if d.calls <= d.failFor {
-		if d.charge {
-			d.meter.Charge(ctx, ing.ID, capacity.Spend{
-				Reported: true, Total: 100,
-				Limit: &capacity.Limit{Status: "rejected", Window: "five_hour", Utilization: 1, ResetsAt: time.Now().Add(time.Hour).Unix()},
-			})
-		}
 		return plan.Result{}, fmt.Errorf("acp: planner: acp: prompt: rpc -32603: Internal error: You've hit your session limit: %w", plan.ErrNoAnswer)
 	}
 	return plan.Result{Nodes: []plan.Node{{ID: "work", Task: "do it"}}, AgentRef: "agentref-judge"}, nil
@@ -92,16 +81,18 @@ func deferWorld(t *testing.T, judge plan.Decomposer, budget capacity.Budget) (*P
 	return p, &ingress.StoreRouter{Store: s, Tenant: tn, Runner: "pump-runner"}, plans, meter
 }
 
-// TestANoAnswerRunUnderARefusingMeterDefersNotFails is issue #110's incident:
-// three originations went to the exception queue as plan-failed when the
-// account's five-hour window ran out under the planner. The run's own charge
-// reports the window exhausted, so the very next Acquire — before the retry
-// even reaches the decomposer again — refuses, and that refusal is what gets
-// recorded, not a failure.
-func TestANoAnswerRunUnderARefusingMeterDefersNotFails(t *testing.T) {
-	judge := &noAnswer{failFor: 1000, charge: true}
-	p, router, plans, _ := deferWorld(t, judge, capacity.Budget{Credential: capacity.CredentialPlan, WindowReserve: 0.5})
-	judge.meter = p.Meter
+// TestANoAnswerRunFailsOnTheFirstAttempt: issue #50 moved judgement dispatch
+// off the tick — claimed, run under the meter's concurrency, settled by a
+// later tick — and with it goes issue #110's retry-in-place scheme
+// (planJudgement, DefaultDeferRetries, plan.Store.Defer). There is no tick
+// left to retry within once a judgement is dispatched, so a run that never
+// answered ([plan.ErrNoAnswer]) fails exactly like one that did: on the very
+// first attempt, with no retry and no deferral record. A meter refusal is
+// now handled entirely before dispatch — see
+// TestAPreRunMeterRefusalNeverInvokesTheDecomposer.
+func TestANoAnswerRunFailsOnTheFirstAttempt(t *testing.T) {
+	judge := &noAnswer{failFor: 1000}
+	p, router, plans, _ := deferWorld(t, judge, capacity.Budget{})
 	ctx := context.Background()
 	ing, _, err := router.Open(ctx, ingress.Route{
 		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
@@ -111,68 +102,23 @@ func TestANoAnswerRunUnderARefusingMeterDefersNotFails(t *testing.T) {
 	}
 
 	if n, err := p.Intake(ctx); err != nil || n != 0 {
-		t.Fatalf("first intake: created=%d err=%v", n, err)
-	}
-	st, err := plans.Standing(ctx, tn, ing.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.State != "deferred" {
-		t.Fatalf("standing after a no-answer run under a refusing meter: %+v", st)
-	}
-	if st.Blocked() {
-		t.Fatal("a deferred origination must not be blocked — the meter, not the exception queue, holds it")
-	}
-	if !strings.Contains(st.Reason, "five_hour") || !strings.Contains(st.Reason, "session limit") {
-		t.Fatalf("the deferral reason does not name the meter's own refusal and the run's error: %q", st.Reason)
-	}
-	if judge.calls != 1 {
-		t.Fatalf("the planner ran %d times — the retry must stop at the meter's own refusal", judge.calls)
-	}
-
-	// The refusal holds: the next tick does not even invoke the decomposer.
-	for range 3 {
-		if _, err := p.Intake(ctx); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if judge.calls != 1 {
-		t.Fatalf("the decomposer was invoked %d times while the meter's refusal held", judge.calls)
-	}
-}
-
-// TestANoAnswerRunUnderAnAdmittingMeterRetriesThenFails: the issue's own
-// words are "retried in place under a bound before it parks." A run that
-// never answers but whose meter says nothing about the window is retried up
-// to DefaultDeferRetries more times, and only THEN does it become the
-// ordinary planning failure.
-func TestANoAnswerRunUnderAnAdmittingMeterRetriesThenFails(t *testing.T) {
-	judge := &noAnswer{failFor: 1000, charge: false}
-	p, router, plans, _ := deferWorld(t, judge, capacity.Budget{})
-	ctx := context.Background()
-	ing, _, err := router.Open(ctx, ingress.Route{
-		Name: "issues", Kind: ingress.RouteIssue, Opens: kind.SeedIssue, Box: "shop", Requester: "chris",
-	}, ingress.Delivery{Key: "issue-2", Payload: []byte("do it")})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	if n, err := p.Intake(ctx); err != nil || n != 0 {
 		t.Fatalf("intake: created=%d err=%v", n, err)
+	}
+	if !p.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the dispatched judgement")
 	}
 	st, err := plans.Standing(ctx, tn, ing.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if st.State != "failed" || !strings.Contains(st.Reason, "session limit") {
-		t.Fatalf("standing after the retry bound was spent against an admitting meter: %+v", st)
+		t.Fatalf("standing after a no-answer run: %+v", st)
 	}
 	if !st.Blocked() {
 		t.Fatal("a failed plan must be blocked — an exception, waiting on a person")
 	}
-	wantCalls := 1 + DefaultDeferRetries
-	if judge.calls != wantCalls {
-		t.Fatalf("the planner ran %d times, want %d (one try plus %d retries)", judge.calls, wantCalls, DefaultDeferRetries)
+	if judge.calls != 1 {
+		t.Fatalf("the planner ran %d times — dispatch is a single attempt", judge.calls)
 	}
 }
 
@@ -193,6 +139,9 @@ func TestAnAnsweredJudgementFailsImmediatelyWithNoRetry(t *testing.T) {
 
 	if n, err := p.Intake(ctx); err != nil || n != 0 {
 		t.Fatalf("intake: created=%d err=%v", n, err)
+	}
+	if !p.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the dispatched judgement")
 	}
 	st, err := plans.Standing(ctx, tn, ing.ID)
 	if err != nil {

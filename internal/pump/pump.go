@@ -202,33 +202,18 @@ func (p *Pump) intakeOne(ctx context.Context, ingressID string) (int, error) {
 	}
 	if !planned {
 		if p.judgement(decl) {
-			var def deferralError
-			if pl, err = p.planJudgement(ctx, ing, decl); err != nil {
-				switch {
-				case errors.Is(err, errSkipTick):
-					// The meter refused before the planner ever ran: pacing,
-					// not failure. No record — the meter's refusal already
-					// holds the origination pending, and one per tick would
-					// spam the chain.
-					return 0, nil
-				case errors.As(err, &def):
-					if derr := p.Plans.Defer(ctx, ing, def.reason); derr != nil {
-						return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, derr)
-					}
-					return 0, nil
-				default:
-					// Either the planner answered (an escalation, a malformed
-					// plan, a parse refusal) or the retry bound was spent
-					// against a meter that never said the window was the
-					// problem. Either way it is the seat whose failure parks
-					// the one origination that asked for a judgement.
-					if ferr := p.Plans.Fail(ctx, ing, err.Error()); ferr != nil {
-						return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, ferr)
-					}
-					return 0, nil
-				}
+			// Dispatched, not run here — see [Pump.dispatchJudgement] and
+			// issue #50. It settles on a later tick, either as a recorded
+			// plan or a parked origination, or nothing happened this tick
+			// because the claim lease or the meter was already spoken for.
+			// Either way there is no plan yet for this tick to submit items
+			// against.
+			if err := p.dispatchJudgement(ctx, ing, decl); err != nil {
+				return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
 			}
-		} else if pl, err = plan.Make(ctx, p.Decomposers, ing, decl); err != nil {
+			return 0, nil
+		}
+		if pl, err = plan.Make(ctx, p.Decomposers, ing, decl); err != nil {
 			// A deterministic decomposer's error stays a tick error: it
 			// costs nothing to retry and points at config.
 			return 0, fmt.Errorf("pump: intake %s: %w", ing.ID, err)
@@ -550,28 +535,11 @@ func (p *Pump) judgement(decl kind.Declaration) bool {
 	return err == nil && !d.Replayable()
 }
 
-// DefaultDeferRetries bounds how many more times a judgement run that never
-// answered — [plan.ErrNoAnswer] — is retried in place before intake gives up
-// on it as a planning failure. Mirrors [loop.DefaultGateRetries]'s "a re-ask
-// needs a small bound, not an unbounded spin" shape: the issue's own words are
-// "retried in place under a bound before it parks."
-const DefaultDeferRetries = 2
-
-// errSkipTick signals intakeOne that the meter refused before the planner
-// ever ran: the origination stays pending with no record, because the
-// meter's own refusal is already why nothing happened this tick, and a
-// record per tick would spam the chain for a fact that has not changed.
-var errSkipTick = errors.New("pump: the meter is pacing this origination")
-
-// deferralError signals intakeOne to record a [plan.Store.Defer] rather than
-// a [plan.Store.Fail]: a judgement run that never answered, retried, then
-// found the meter itself refusing on the very next acquire — the run's own
-// spend charged the report that closed the window. reason is the meter's
-// refusal, which already names the window, utilization, reserve and reset
-// time, plus the run's own error.
-type deferralError struct{ reason string }
-
-func (d deferralError) Error() string { return d.reason }
+// planClaimRepo is the pseudo-repository a judgement dispatch is leased
+// under — a namespace of its own, distinct from [queue.ClaimRepo], so a work
+// item's claim and an origination's judgement claim can never contend for
+// the same (repo, ref) pair.
+const planClaimRepo = "_plan"
 
 // meterPacing reports whether err is one of the meter's own pacing refusals
 // rather than an infrastructure failure — the same set [Pump.Drain] treats as
@@ -583,54 +551,82 @@ func meterPacing(err error) bool {
 		errors.Is(err, capacity.ErrCredential)
 }
 
-// planJudgement runs a judgement decomposer under the same pacing Drain
-// already gives every claim — see issue #110. The account's own five-hour
-// window is read nowhere but the meter, so this is the one seam that makes
-// intake subject to the same refusal a run mid-item already is.
+// dispatchJudgement moves a judgement decomposer off the intake tick — see
+// issue #50. Inline, a 4-8 minute planning session stopped every claim in the
+// box and serialized concurrent originations; dispatched, a judgement is a
+// unit of work like any other — claimed, run under the meter's concurrency,
+// settled by a later tick.
 //
-// A pre-run refusal returns [errSkipTick]: the decomposer is never invoked,
-// and nothing is recorded. A run that never answered ([plan.ErrNoAnswer]) is
-// retried in place up to [DefaultDeferRetries] more times, releasing and
-// re-acquiring the meter before each retry — the failed run's own Spend has
-// already charged its limit report, so a run that reported the window
-// exhausted makes the very next Acquire refuse, which is returned as a
-// [deferralError] naming that refusal. A run that answers — with a plan, an
-// escalation, or an error that is not [plan.ErrNoAnswer] — returns
-// immediately, retried or not; only a planner that never answered spins
-// again. If the bound is spent against a meter that still admits, the last
-// run's plain error is returned for the caller to fail as it always has.
-func (p *Pump) planJudgement(ctx context.Context, ing ingress.Ingress, decl kind.Declaration) (plan.Plan, error) {
-	release, err := p.Meter.Acquire(ctx, ing.ID)
+// Dispatch is claimed like a unit: the lease over (p.Tenant, planClaimRepo,
+// ing.ID) is the one-judgement-per-origination mutual exclusion, the same
+// shape a work item's own claim lease already gives one runner. [forge.ErrHeld]
+// means a judgement is already in flight, this runner or another, so dispatch
+// skips silently and the next tick tries again; a lease that lapsed because
+// its holder crashed mid-run is recovered the same way [queue.Queue.Recover]
+// recovers a claim — taking the lease IS the proof the previous holder is
+// gone, no separate liveness check needed.
+//
+// The meter is acquired next, exactly as [Pump.Drain] acquires it before a
+// claim runs — never [capacity.Meter.Start], which is a build-only charge;
+// billing a planner's start here would reopen issue #45's double-count. A
+// pacing refusal (busy, over budget, an unmetered or unpriced window, a
+// credential brake) releases the lease and skips silently, with no record:
+// the meter's own window is why nothing happened, and the next tick's
+// Acquire is the retry — the same posture Drain already takes at claim. This
+// supersedes the retry-in-place scheme issue #110 built for a judgement run
+// inline in the tick ([plan.Store.Defer], [plan.DeferredKind]): once
+// dispatch is off the tick there is no tick left to retry within, and a
+// meter refusal before dispatch is already the same silent, next-tick-
+// retried pacing every claim gets.
+//
+// Once both are held, [plan.Store.Claim] records the dispatch and the
+// judgement runs in a goroutine registered with p.inflight — so Quiesce
+// waits for a paid planner run exactly as it waits for a build — releasing
+// the lease and the meter slot on the way out. Any [plan.Make] error fails
+// the origination via [plan.Store.Fail]: a failed judgement parks the
+// origination, not the tick (PLAN.md §6), identical to the failure this fork
+// always gave a judgement that answered. A plan is recorded via
+// [plan.Store.Record] on success; the items it calls for are submitted by a
+// later tick's ordinary planned path.
+func (p *Pump) dispatchJudgement(ctx context.Context, ing ingress.Ingress, decl kind.Declaration) error {
+	leaser := p.Store.Leaser(p.Runner)
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{
+		Tenant: p.Tenant, Repo: planClaimRepo, Ref: ing.ID, Run: "plan-" + ing.ID, TTL: p.Queue.TTL,
+	})
+	if errors.Is(err, forge.ErrHeld) {
+		return nil // a judgement is already in flight; the next tick tries again
+	}
 	if err != nil {
+		return err
+	}
+	release, err := p.Meter.Acquire(ctx, "plan-"+ing.ID)
+	if err != nil {
+		leaser.Release(ctx, lease)
 		if meterPacing(err) {
-			return plan.Plan{}, errSkipTick
+			return nil // pacing, not failure — the same posture Drain takes at claim
 		}
-		return plan.Plan{}, err
+		return err
 	}
-	maxTries := 1 + DefaultDeferRetries
-	var runErr error
-	for try := 1; try <= maxTries; try++ {
-		var pl plan.Plan
-		pl, runErr = plan.Make(ctx, p.Decomposers, ing, decl)
+	if err := p.Plans.Claim(ctx, ing); err != nil {
 		release()
-		if runErr == nil {
-			return pl, nil
-		}
-		if !errors.Is(runErr, plan.ErrNoAnswer) {
-			// The planner answered — an escalation, a malformed plan, a
-			// parse refusal — which is a judgement, not a pacing question.
-			return plan.Plan{}, runErr
-		}
-		if try == maxTries {
-			break // the bound is spent; fall through to the caller's Fail.
-		}
-		release, err = p.Meter.Acquire(ctx, ing.ID)
-		if err != nil {
-			if meterPacing(err) {
-				return plan.Plan{}, deferralError{reason: fmt.Sprintf("%s: %s", err.Error(), runErr.Error())}
-			}
-			return plan.Plan{}, err
-		}
+		leaser.Release(ctx, lease)
+		return err
 	}
-	return plan.Plan{}, runErr
+	p.inflight.Add(1)
+	go func() {
+		defer p.inflight.Done()
+		defer release()
+		defer leaser.Release(ctx, lease)
+		// Nothing downstream of this goroutine is still waiting on this
+		// tick's return, so a write failure here has nowhere synchronous to
+		// surface — the same posture Release's own dropped error already
+		// takes throughout this package.
+		pl, err := plan.Make(ctx, p.Decomposers, ing, decl)
+		if err != nil {
+			_ = p.Plans.Fail(ctx, ing, err.Error())
+			return
+		}
+		_, _ = p.Plans.Record(ctx, ing, pl)
+	}()
+	return nil
 }

@@ -145,14 +145,21 @@ const (
 	// on the same chain as the others but carries none of the exception's
 	// consequences: see [Store.Defer].
 	DeferredKind = "plan-deferred"
+	// ClaimedKind marks that a judgement decomposer has been dispatched for
+	// this origination — not a plan yet, just proof one is running. See
+	// [Store.Claim] and issue #50: judgement decomposition moved off the
+	// intake tick, dispatched under a claim lease and settled by a later
+	// tick, so intake needs a way to tell "still deciding" from "nothing
+	// asked yet" without reading the lease itself.
+	ClaimedKind = "plan-claimed"
 )
 
 // Standing is where an origination stands with respect to planning: nothing
 // yet, planned, failed and waiting for a person, sent back for another
 // attempt, given up on, or deferred by the meter's own pacing.
 type Standing struct {
-	// State is "", planned, failed, retried, resolved, or deferred — the
-	// newest of the planning events on the chain.
+	// State is "", judging, planned, failed, retried, resolved, or
+	// deferred — the newest of the planning events on the chain.
 	State  string
 	Reason string
 	At     time.Time
@@ -162,6 +169,12 @@ type Standing struct {
 // judgement failed and nobody has retried it, or somebody resolved it. A
 // planner out of budget re-run every tick would be a spend loop wearing an
 // intake, and an origination a person gave up on is not work.
+//
+// "judging" stays unblocked on purpose: recovering a crashed judgement is the
+// claim lease's job — the same lease-lapse-then-successful-acquire doctrine
+// [queue.Queue.Recover] already uses — never this fold's. A fold that blocked
+// on "judging" would leave an origination stuck forever the moment its
+// runner died mid-decompose, with no lease left to recover it.
 func (s Standing) Blocked() bool { return s.State == "failed" || s.State == "resolved" }
 
 // Standing folds the origination's chain for its newest planning event.
@@ -172,6 +185,8 @@ func (s *Store) Standing(ctx context.Context, t tenant.ID, ingressID string) (St
 			return Standing{}, err
 		}
 		switch rec.Kind {
+		case ClaimedKind:
+			st = Standing{State: "judging", At: rec.At}
 		case RecordKind:
 			st = Standing{State: "planned", At: rec.At}
 		case FailedKind:
@@ -228,6 +243,24 @@ func (s *Store) Defer(ctx context.Context, ing ingress.Ingress, reason string) e
 		Actor: s.Actor, OnBehalfOf: ing.Requester, Body: []byte(reason),
 	}); err != nil {
 		return fmt.Errorf("%w: recording the deferral of %s: %w", ErrPlan, ing.ID, err)
+	}
+	return nil
+}
+
+// Claim records that a judgement decomposer has been dispatched for this
+// origination, before the run itself starts.
+//
+// This is proof-of-dispatch, not the mutual exclusion: the claim lease a
+// dispatcher acquires first is what makes one judgement per origination
+// hold, the same way a work item's own lease is what makes one claim hold —
+// this record is only what lets [Store.Standing] tell "still deciding" from
+// "nothing asked yet" to a reader with no reason to inspect a lease table.
+func (s *Store) Claim(ctx context.Context, ing ingress.Ingress) error {
+	if _, err := s.Log.Append(ctx, evidence.Record{
+		Tenant: ing.Tenant, Scope: ingress.Scope(ing.ID), Kind: ClaimedKind, Subject: ing.ID,
+		Actor: s.Actor, OnBehalfOf: ing.Requester, Body: []byte{},
+	}); err != nil {
+		return fmt.Errorf("%w: recording the dispatch of %s: %w", ErrPlan, ing.ID, err)
 	}
 	return nil
 }

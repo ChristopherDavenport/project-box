@@ -194,6 +194,63 @@ func TestADeferralFoldsToDeferredAndStaysUnblocked(t *testing.T) {
 	}
 }
 
+// TestAClaimFoldsToJudgingAndStaysUnblocked: issue #50 moved judgement
+// decomposition off the intake tick, dispatched under a claim lease and
+// settled by a later tick. Standing must surface "judging" so a reader can
+// tell "a decomposer is running" from "nothing asked yet", but Blocked must
+// stay false — a crashed judgement's lease lapses and a later dispatch's
+// Acquire recovers it, not this fold.
+func TestAClaimFoldsToJudgingAndStaysUnblocked(t *testing.T) {
+	s := store(t)
+	ctx := context.Background()
+	ps := &Store{Log: s.Log(), Actor: "boxd"}
+	ing := issue("ing-1")
+	openOn(t, s, ing)
+
+	if err := ps.Claim(ctx, ing); err != nil {
+		t.Fatal(err)
+	}
+	st, err := ps.Standing(ctx, tn, ing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != "judging" {
+		t.Fatalf("standing after a claim: %+v", st)
+	}
+	if st.Blocked() {
+		t.Fatal("a judgement in flight must stay unblocked — the claim lease, not this fold, recovers a crashed one")
+	}
+}
+
+// TestAPlannedAfterClaimedReadsPlanned: the claim is proof-of-dispatch, not
+// the plan itself, so once the judgement answers and the plan is recorded,
+// Standing must read the newer event.
+func TestAPlannedAfterClaimedReadsPlanned(t *testing.T) {
+	s := store(t)
+	ctx := context.Background()
+	ps := &Store{Log: s.Log(), Actor: "boxd"}
+	ing := issue("ing-1")
+	openOn(t, s, ing)
+
+	if err := ps.Claim(ctx, ing); err != nil {
+		t.Fatal(err)
+	}
+	p, err := Make(ctx, Default(), ing, seed(t, kind.SeedIssue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ps.Record(ctx, ing, p); err != nil {
+		t.Fatal(err)
+	}
+	st, err := ps.Standing(ctx, tn, ing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.State != "planned" {
+		t.Fatalf("standing after a claim followed by a recorded plan: %+v", st)
+	}
+}
+
 func openOn(t *testing.T, s *sqlite.Store, ing ingress.Ingress) {
 	t.Helper()
 	body, err := json.Marshal(ing)

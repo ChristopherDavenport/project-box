@@ -89,6 +89,9 @@ func TestAFailedJudgementIsAnExceptionNotATickLoop(t *testing.T) {
 	if n, err := p.Intake(ctx); err != nil || n != 0 {
 		t.Fatalf("first intake: created=%d err=%v", n, err)
 	}
+	if !p.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the dispatched judgement")
+	}
 	st, err := plans.Standing(ctx, tn, ing.ID)
 	if err != nil || st.State != "failed" || !strings.Contains(st.Reason, "session limit") {
 		t.Fatalf("standing after a failed judgement: %+v %v", st, err)
@@ -111,13 +114,21 @@ func TestAFailedJudgementIsAnExceptionNotATickLoop(t *testing.T) {
 		t.Fatalf("the planner was re-run %d times on a failed origination", judge.calls)
 	}
 
-	// A person sends it back; the next tick plans it, and the units carry
-	// where the judgement put them.
+	// A person sends it back; the retried judgement is dispatched off this
+	// tick exactly like the first one was, so this tick only kicks it off —
+	// the plan is recorded once it settles, and the item is submitted by the
+	// tick after that, carrying where the judgement put it.
 	if err := plans.Retry(ctx, tn, ing.ID, "chris", "budget is back"); err != nil {
 		t.Fatal(err)
 	}
+	if n, err := p.Intake(ctx); err != nil || n != 0 {
+		t.Fatalf("intake right after retry dispatches, it does not submit: created=%d err=%v", n, err)
+	}
+	if !p.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the retried judgement")
+	}
 	if n, err := p.Intake(ctx); err != nil || n != 1 {
-		t.Fatalf("intake after retry: created=%d err=%v", n, err)
+		t.Fatalf("intake after the retried judgement settled: created=%d err=%v", n, err)
 	}
 	item, err := p.Queue.Load(ctx, tn, "wi-"+ing.ID)
 	if err != nil || item.State != queue.StatePending || len(item.Sections) != 1 || item.Sections[0] != "api" {
@@ -141,6 +152,9 @@ func TestAResolvedPlanIsNeitherRetriedNorListed(t *testing.T) {
 	ing := openIssue(t, router, "issue-2")
 	if _, err := p.Intake(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !p.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the dispatched judgement")
 	}
 	if err := plans.Resolve(ctx, tn, ing.ID, "chris", "not worth a plan"); err != nil {
 		t.Fatal(err)
