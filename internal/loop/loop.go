@@ -1300,7 +1300,7 @@ func (l *Loop) recordIssueClosed(ctx context.Context, item queue.WorkItem, cs fo
 			continue
 		}
 		l.record(ctx, item, "issue-closed", string(pl.Now),
-			fmt.Sprintf(`{"issue":%q,"commit":%q,"pr_url":%q}`, cs.DrivingIssue, pl.Now, pl.PRURL))
+			fmt.Sprintf(`{"issue":%q,"commit":%q,"pr_url":%q,"closed_by":%q}`, cs.DrivingIssue, pl.Now, pl.PRURL, pl.IssueClosedBy))
 	}
 }
 

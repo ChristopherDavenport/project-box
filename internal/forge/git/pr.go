@@ -155,13 +155,13 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 			continue
 		}
 		pl.PRURL = prURL
-		body := fmt.Sprintf(`{"pr_url":%q,"issue":%q}`, prURL, cs.DrivingIssue)
+		body := fmt.Sprintf(`{"pr_url":%q,"issue":%q,"completes_plan":%t}`, prURL, cs.DrivingIssue, cs.CompletesPlan)
 		if cs.DrivingIssue == "" {
 			// An empty DrivingIssue is itself a finding, not a default: the
 			// next reader must not have to diff this record against another
 			// to notice the gap. cs.OriginKey may itself be empty — %q shows
 			// "" and that emptiness is the finding too.
-			body = fmt.Sprintf(`{"pr_url":%q,"issue":%q,"note":%q}`, prURL, cs.DrivingIssue,
+			body = fmt.Sprintf(`{"pr_url":%q,"issue":%q,"completes_plan":%t,"note":%q}`, prURL, cs.DrivingIssue, cs.CompletesPlan,
 				fmt.Sprintf("no driving issue: origin key %q", cs.OriginKey))
 		}
 		p.inner.record(ctx, cs, "pr-opened", string(pl.Now), body)
@@ -217,7 +217,10 @@ func (p *PRLander) closeDrivingIssue(ctx context.Context, cs forge.ChangeSet, la
 
 	issueEndpoint := fmt.Sprintf("%s/repos/%s/%s/issues/%s", p.apiBase, owner, name, cs.DrivingIssue)
 	var issue struct {
-		State string `json:"state"`
+		State    string `json:"state"`
+		ClosedBy struct {
+			Login string `json:"login"`
+		} `json:"closed_by"`
 	}
 	if err := p.call(ctx, http.MethodGet, issueEndpoint, tok, nil, &issue); err != nil {
 		fmt.Fprintf(os.Stderr, "git: close issue #%s: get: %v\n", cs.DrivingIssue, err)
@@ -253,6 +256,7 @@ func (p *PRLander) closeDrivingIssue(ctx context.Context, cs forge.ChangeSet, la
 		}
 	}
 
+	closedBy := issue.ClosedBy.Login
 	if issue.State == "open" {
 		in := struct {
 			State       string `json:"state"`
@@ -262,8 +266,13 @@ func (p *PRLander) closeDrivingIssue(ctx context.Context, cs forge.ChangeSet, la
 			fmt.Fprintf(os.Stderr, "git: close issue #%s: patch: %v\n", cs.DrivingIssue, err)
 			return
 		}
+		// This PATCH is the one that closed it, not GitHub having beaten us
+		// to it — the box's own actor did the closing, regardless of what
+		// the pre-PATCH GET reported.
+		closedBy = mem.Lease.Runner
 	}
 	landing.Landed[placementIdx].IssueClosed = true
+	landing.Landed[placementIdx].IssueClosedBy = closedBy
 }
 
 // prTitle computes the single title used for every per-member PR a ChangeSet
@@ -301,18 +310,27 @@ func truncateTitle(s string, max int) string {
 	return cut
 }
 
-// prBody composes the PR body: "Fixes #<n>" when the change originated from
-// a GitHub issue (unaffected by this fix — a PR title and body are labels on
-// the PR, never on the commit, and approvals bind to the commit per
-// docs/PLAN.md §6, not the pull request), followed by the task's first
-// paragraph (cs.Intent split on the first blank line), and — for a
-// ChangeSet with more than one member, which production loop.go never
-// builds today — a list of the other members' repos so the PR still says
-// what else the changeset touches.
+// prBody composes the PR body: a closing keyword — "Fixes #<n>" — only when
+// cs.CompletesPlan is true, since GitHub closes the driving issue the
+// moment a PR carrying that keyword merges, and for a multi-unit plan only
+// the last unit's landing may close it (issue #181). When cs.DrivingIssue is
+// set but CompletesPlan is false, the body carries "Part of #<n>" instead:
+// it links the PR to the issue without closing it. Either way this is
+// unaffected by that closing decision itself — a PR title and body are
+// labels on the PR, never on the commit, and approvals bind to the commit
+// per docs/PLAN.md §6, not the pull request. The keyword or link line is
+// followed by the task's first paragraph (cs.Intent split on the first
+// blank line), and — for a ChangeSet with more than one member, which
+// production loop.go never builds today — a list of the other members'
+// repos so the PR still says what else the changeset touches.
 func (p *PRLander) prBody(cs forge.ChangeSet) string {
 	var b strings.Builder
 	if cs.DrivingIssue != "" {
-		b.WriteString("Fixes #" + cs.DrivingIssue + "\n\n")
+		if cs.CompletesPlan {
+			b.WriteString("Fixes #" + cs.DrivingIssue + "\n\n")
+		} else {
+			b.WriteString("Part of #" + cs.DrivingIssue + "\n\n")
+		}
 	}
 	para := cs.Intent
 	if i := strings.Index(cs.Intent, "\n\n"); i >= 0 {

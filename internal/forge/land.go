@@ -65,4 +65,12 @@ type Placement struct {
 	// leave it false, so a caller deciding whether to record the close never
 	// reads unknown as done.
 	IssueClosed bool
+	// IssueClosedBy names who closed the issue, set only alongside
+	// IssueClosed. It is the box's own actor when this landing's PATCH
+	// performed the close, and GitHub's reported closed_by.login when the
+	// GET found the issue already closed — the case issue #181 is about,
+	// where GitHub beat this landing to the close. Unknown never reads as
+	// zero: if GitHub reports closed with no closed_by, this stays empty
+	// and the emptiness is itself the finding.
+	IssueClosedBy string
 }

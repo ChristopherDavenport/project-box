@@ -99,6 +99,10 @@ type ghIssueState struct {
 	State    string
 	Comments []string
 	Patches  int
+	// ClosedBy is the closed_by.login GitHub reports on the issue GET —
+	// set by a test to simulate the issue having already been closed by
+	// someone (or something) else before this landing's own GET ran.
+	ClosedBy string
 }
 
 // issue returns key's state, creating it open with no comments the first
@@ -275,7 +279,11 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		st := g.issue(owner + "/" + repo + "#" + parts[4])
-		json.NewEncoder(w).Encode(map[string]string{"state": st.State})
+		out := map[string]any{"state": st.State}
+		if st.ClosedBy != "" {
+			out["closed_by"] = map[string]string{"login": st.ClosedBy}
+		}
+		json.NewEncoder(w).Encode(out)
 	case len(parts) == 5 && parts[3] == "issues" && r.Method == http.MethodPatch:
 		var in struct {
 			State       string `json:"state"`
@@ -364,7 +372,7 @@ func TestPROpenedWithFixesLineAndEvidence(t *testing.T) {
 	head := buildOn(t, ws, "feature")
 
 	cs := forge.ChangeSet{
-		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr", DrivingIssue: "22",
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr", DrivingIssue: "22", CompletesPlan: true,
 		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
 	}
 	landing, err := x.pr.Land(ctx, cs)
@@ -413,6 +421,41 @@ func TestPROpenedWithFixesLineAndEvidence(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("no pr-opened evidence keyed by the landed commit")
+	}
+}
+
+// TestPRBodyPartOfWhenDrivingIssueNotCompletingPlan is issue #181: a PR body
+// carrying a closing keyword makes GitHub close the driving issue the
+// moment that PR merges, but for a multi-unit plan only the LAST unit's
+// landing may close it. Every other unit's PR must still link to the issue
+// — so a reader can find the plan from the PR — without the keyword GitHub
+// treats as a close.
+func TestPRBodyPartOfWhenDrivingIssueNotCompletingPlan(t *testing.T) {
+	x := fixPR(t)
+	cs := forge.ChangeSet{DrivingIssue: "181", CompletesPlan: false, Intent: "one unit of a plan"}
+	body := x.pr.prBody(cs)
+	for _, kw := range []string{"Fixes #", "Closes #", "Resolves #"} {
+		if strings.Contains(body, kw) {
+			t.Fatalf("pr body = %q, want no %q keyword when CompletesPlan is false", body, kw)
+		}
+	}
+	if !strings.Contains(body, "181") {
+		t.Fatalf("pr body = %q, want it to still name issue 181", body)
+	}
+	if !strings.Contains(body, "Part of #181") {
+		t.Fatalf("pr body = %q, want it to contain Part of #181", body)
+	}
+}
+
+// TestPRBodyFixesWhenCompletesPlan is issue #181's other half: once the
+// loop has asserted this landing settles the last unsettled unit of the
+// plan, the PR body may carry the closing keyword.
+func TestPRBodyFixesWhenCompletesPlan(t *testing.T) {
+	x := fixPR(t)
+	cs := forge.ChangeSet{DrivingIssue: "181", CompletesPlan: true, Intent: "the last unit of a plan"}
+	body := x.pr.prBody(cs)
+	if !strings.Contains(body, "Fixes #181") {
+		t.Fatalf("pr body = %q, want it to contain Fixes #181", body)
 	}
 }
 
@@ -1593,9 +1636,14 @@ func TestPRClosesIssueOnlyWhenCompletesPlanAndDrivingIssueSet(t *testing.T) {
 func TestPRClosesIssueIdempotentlyAlreadyClosed(t *testing.T) {
 	x := fixPR(t)
 	x.gh.issue("acme/app#9").State = "closed"
+	x.gh.issue("acme/app#9").ClosedBy = "someone-else"
 	landing, _ := landForIssueClose(t, x, true, nil)
 	if !landing.Landed[0].IssueClosed {
 		t.Fatal("Landed[0].IssueClosed = false, want true: GitHub answered and confirmed the issue is closed")
+	}
+	if landing.Landed[0].IssueClosedBy != "someone-else" {
+		t.Fatalf("Landed[0].IssueClosedBy = %q, want %q: GitHub beat this landing to the close",
+			landing.Landed[0].IssueClosedBy, "someone-else")
 	}
 	st := x.gh.issue("acme/app#9")
 	if st.Patches != 0 {
