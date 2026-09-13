@@ -116,12 +116,14 @@ func (w *world) openJudged(t *testing.T, key string) ingress.Ingress {
 	return ing
 }
 
-// TestTwoJudgementsRunConcurrentlyUnderTheSharedBudget: dispatch does not
-// wait on the run it starts, so Tick returns having only kicked two
-// judgements off — and under MaxConcurrent 2 both decomposers reach
-// Decompose at once rather than the second waiting for the first's slot.
-func TestTwoJudgementsRunConcurrentlyUnderTheSharedBudget(t *testing.T) {
-	w := setup(t, capacity.Budget{MaxConcurrent: 2})
+// TestTwoJudgementsRunConcurrentlyUnderTheirOwnPool: dispatch does not wait
+// on the run it starts, so Tick returns having only kicked two judgements
+// off — and with MaxJudgements 2 both decomposers reach Decompose at once
+// rather than the second waiting for the first's judgement seat. Issue #202
+// gave judgements their own pool, sized here independently of MaxConcurrent
+// (left at its default of one build) to prove the two ceilings are separate.
+func TestTwoJudgementsRunConcurrentlyUnderTheirOwnPool(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxJudgements: 2})
 	judge := newFakeJudge()
 	withJudge(t, w, judge)
 	ctx := context.Background()
@@ -134,8 +136,8 @@ func TestTwoJudgementsRunConcurrentlyUnderTheSharedBudget(t *testing.T) {
 	}
 	// Tick already returned above — dispatch is fire-and-forget — and both
 	// decomposers are in flight together, which only happens if the second
-	// dispatch's Meter.Acquire succeeded while the first judgement still
-	// held its slot.
+	// dispatch's Meter.AcquireJudgement succeeded while the first judgement
+	// still held its seat.
 	waitEntered(t, judge, 2)
 
 	close(judge.release)
@@ -147,10 +149,10 @@ func TestTwoJudgementsRunConcurrentlyUnderTheSharedBudget(t *testing.T) {
 	}
 }
 
-// TestAReadyUnitLandsWhileAJudgementIsInFlight: under MaxConcurrent 2, a
-// judgement occupies one slot and an ordinary claimable item still gets the
-// other — the meter it shares with Drain is the same account, not a second
-// one that happens to look similar.
+// TestAReadyUnitLandsWhileAJudgementIsInFlight: a judgement in flight draws
+// on its own seat pool (issue #202), never MaxConcurrent's build seats, so
+// an ordinary claimable item lands without ever contending with it — the two
+// share the window's account (tokens, cost, starts) but never a seat.
 func TestAReadyUnitLandsWhileAJudgementIsInFlight(t *testing.T) {
 	w := setup(t, capacity.Budget{MaxConcurrent: 2})
 	judge := newFakeJudge()
@@ -192,10 +194,44 @@ func TestAReadyUnitLandsWhileAJudgementIsInFlight(t *testing.T) {
 	}
 }
 
-// TestAJudgementCountsAgainstTheBound: under MaxConcurrent 1, a judgement in
-// flight holds the box's only slot — a tick claims nothing until it is
-// released, and the unit runs immediately after.
-func TestAJudgementCountsAgainstTheBound(t *testing.T) {
+// TestAJudgementDispatchesWhileBuildsHoldEveryConcurrentSeat: issue #202's
+// incident. Before judgements had their own pool, dispatchJudgement acquired
+// the same seats Drain claims for builds, so a build-heavy box could leave
+// every origination unplanned. With MaxConcurrent 1 and the box's one build
+// seat held directly (standing in for a real build in flight, the same
+// account [world.setup] wires the loop's own Meter against), a judgement
+// still dispatches and reaches its decomposer — it never waits on a build.
+func TestAJudgementDispatchesWhileBuildsHoldEveryConcurrentSeat(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 1})
+	judge := newFakeJudge()
+	withJudge(t, w, judge)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	releaseBuild, err := w.meter.Acquire(ctx, "held-build")
+	if err != nil {
+		t.Fatalf("holding the box's only build seat: %v", err)
+	}
+	defer releaseBuild()
+
+	w.openJudged(t, "j-1")
+	if _, err := w.pump.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitEntered(t, judge, 1)
+
+	close(judge.release)
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the dispatched judgement")
+	}
+}
+
+// TestAJudgementNeverCountsAgainstTheBuildBound: the reverse direction of
+// TestAJudgementDispatchesWhileBuildsHoldEveryConcurrentSeat. Under
+// MaxConcurrent 1, a judgement in flight — holding the box's only judgement
+// seat, never a build one after issue #202 — must not stop an ordinary unit
+// from claiming and running on the very tick that dispatched it.
+func TestAJudgementNeverCountsAgainstTheBuildBound(t *testing.T) {
 	w := setup(t, capacity.Budget{MaxConcurrent: 1})
 	judge := newFakeJudge()
 	withJudge(t, w, judge)
@@ -210,37 +246,92 @@ func TestAJudgementCountsAgainstTheBound(t *testing.T) {
 	}
 	waitEntered(t, judge, 1)
 
-	if n, err := w.pump.Drain(ctx); err != nil || n != 0 {
-		t.Fatalf("drain while the judgement holds the only slot: settled=%d err=%v", n, err)
-	}
 	got, err := w.q.Load(ctx, tn, item.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != queue.StatePending {
-		t.Fatalf("the item ran while the judgement held the box's only slot: %+v", got)
+	if got.State != queue.StateDone {
+		t.Fatalf("the unit should have claimed and run under MaxConcurrent 1 while the judgement — a separate seat pool — was still in flight: %+v", got)
 	}
 
 	close(judge.release)
 	if !w.pump.Quiesce(ctx) {
 		t.Fatal("quiesce did not settle the dispatched judgement")
 	}
+}
 
+// TestASecondJudgementIsPacedSilentlyUnderMaxJudgementsOne: the judgement
+// pool's own ceiling still paces, exactly as the shared meter always has —
+// dispatchJudgement returns nil and writes no plan-failed record, and the
+// second origination dispatches and plans on a later tick once the first
+// judgement releases its seat. MaxJudgements is left at its default (one),
+// the floor issue #202 restores. Reuses the Tick-then-Quiesce shape issue
+// #196 asked for rather than a bare Tick-then-assert, since dispatch racing
+// the fake judgement's own goroutine is exactly the kind of race #196 named.
+func TestASecondJudgementIsPacedSilentlyUnderMaxJudgementsOne(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+	judge := newFakeJudge()
+	withJudge(t, w, judge)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	w.openJudged(t, "j-1")
+	ing2 := w.openJudged(t, "j-2")
+
+	if _, err := w.pump.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	waitEntered(t, judge, 1)
+
+	// The second origination's dispatch found the one judgement seat busy
+	// and paced silently: no claim lease held, no plan-failed record, and
+	// its decomposer never invoked.
+	for range 3 {
+		if _, err := w.pump.Tick(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	select {
+	case <-judge.entered:
+		t.Fatal("a second judgement entered while MaxJudgements=1's only seat was held")
+	default:
+	}
+	st2, err := w.pump.Plans.Standing(ctx, tn, ing2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st2.State != "" {
+		t.Fatalf("a paced judgement should leave no planning record at all, got %+v", st2)
+	}
+
+	close(judge.release)
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the first judgement")
+	}
+
+	// The first judgement's seat is free; a later tick dispatches and plans
+	// the second.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		got, err := w.q.Load(ctx, tn, item.ID)
+		st2, err := w.pump.Plans.Standing(ctx, tn, ing2.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.State == queue.StateDone {
+		if st2.State == "planned" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("the unit never ran after the judgement released its slot: %+v", got)
+			t.Fatalf("the second judgement never dispatched after the first released its seat: %+v", st2)
 		}
 		if _, err := w.pump.Tick(ctx); err != nil {
 			t.Fatal(err)
 		}
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the second judgement")
+	}
+	if n := judge.callCount(); n != 2 {
+		t.Fatalf("calls = %d, want 2", n)
 	}
 }
 

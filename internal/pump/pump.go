@@ -732,18 +732,23 @@ func meterPacing(err error) bool {
 // recovers a claim — taking the lease IS the proof the previous holder is
 // gone, no separate liveness check needed.
 //
-// The meter is acquired next, exactly as [Pump.Drain] acquires it before a
-// claim runs — never [capacity.Meter.Start], which is a build-only charge;
-// billing a planner's start here would reopen issue #45's double-count. A
-// pacing refusal (busy, over budget, an unmetered or unpriced window, a
-// credential brake) releases the lease and skips silently, with no record:
-// the meter's own window is why nothing happened, and the next tick's
-// Acquire is the retry — the same posture Drain already takes at claim. This
-// leaves no PRE-dispatch use for the retry-in-place scheme issue #110 built
-// for a judgement run inline in the tick ([plan.Store.Defer],
-// [plan.DeferredKind]): once dispatch is off the tick there is no tick left
-// to retry a refused Acquire within, and a meter refusal before dispatch is
-// already the same silent, next-tick-retried pacing every claim gets.
+// The meter is acquired next, from its judgement seat pool
+// ([capacity.Meter.AcquireJudgement], issue #202) rather than the pool
+// [Pump.Drain] acquires from before a claim runs — a burst of originations
+// must not fill every build seat with planning, and a burst of builds must
+// not leave originations unplanned, so the two draw from separate ceilings
+// over the same window. Never [capacity.Meter.Start], which is a build-only
+// charge; billing a planner's start here would reopen issue #45's
+// double-count. A pacing refusal (busy, over budget, an unmetered or
+// unpriced window, a credential brake) releases the lease and skips
+// silently, with no record: the meter's own window is why nothing happened,
+// and the next tick's AcquireJudgement is the retry — the same posture Drain
+// already takes at claim. This leaves no PRE-dispatch use for the
+// retry-in-place scheme issue #110 built for a judgement run inline in the
+// tick ([plan.Store.Defer], [plan.DeferredKind]): once dispatch is off the
+// tick there is no tick left to retry a refused AcquireJudgement within, and
+// a meter refusal before dispatch is already the same silent,
+// next-tick-retried pacing every claim gets.
 //
 // Issue #112 revives Defer for the case Acquire cannot see: a dispatched run
 // that gets past Acquire and THEN has its own provider account report the
@@ -772,7 +777,7 @@ func (p *Pump) dispatchJudgement(ctx context.Context, ing ingress.Ingress, decl 
 	if err != nil {
 		return err
 	}
-	release, err := p.Meter.Acquire(ctx, "plan-"+ing.ID)
+	release, err := p.Meter.AcquireJudgement(ctx, "plan-"+ing.ID)
 	if err != nil {
 		leaser.Release(ctx, lease)
 		if meterPacing(err) {

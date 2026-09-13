@@ -203,9 +203,21 @@ func Micros(usd float64) int64 { return int64(math.Round(usd * 1e6)) }
 
 // Budget bounds a tenant's execution.
 type Budget struct {
-	// MaxConcurrent bounds simultaneous runs. Zero means one — an unset
-	// budget must never mean an unbounded one, same rule as rollouts.
+	// MaxConcurrent bounds simultaneous BUILD runs. Zero means one — an
+	// unset budget must never mean an unbounded one, same rule as rollouts.
+	// A judgement (a planner's run) never counts against this: see
+	// MaxJudgements.
 	MaxConcurrent int
+	// MaxJudgements bounds simultaneous judgement runs — a separate seat
+	// pool from MaxConcurrent's builds. Zero means one, the same "an unset
+	// budget must never mean an unbounded one" rule MaxConcurrent's doc
+	// states, and one is the floor issue #202 restores: before this field
+	// existed, a judgement spent a build seat via the same Acquire a claim
+	// used, so a burst of originations could fill every build seat with
+	// planning and a burst of builds could leave originations unplanned. One
+	// judgement can always run without touching a build seat, and vice
+	// versa.
+	MaxJudgements int
 	// MaxPerWindow bounds run STARTS per window; zero means unlimited
 	// starts (concurrency still binds).
 	MaxPerWindow int
@@ -281,17 +293,25 @@ type Meter struct {
 	// Now is injectable for tests; nil means time.Now.
 	Now func() time.Time
 
-	mu          sync.Mutex
-	running     int
-	windowStart time.Time
-	started     int
-	refused     bool  // one refusal record per window, not one per poll
-	spent       int64 // tokens charged this window
-	cost        int64 // micro-dollars charged this window
-	split       Spend // the same tokens, by kind — what makes the total priceable
-	unmetered   int   // runs this window that finished without saying what they cost
-	unpriced    int   // runs this window that reported tokens and no money
-	aborted     int   // runs this window the transport dropped after the prompt was sent
+	mu sync.Mutex
+	// running and runningJudgements are two seat pools drawn from the same
+	// window bounds below, never window-scoped themselves: in-memory
+	// concurrency counters that resetWindow must not touch, the way it
+	// already did not touch running before judgements had a pool of their
+	// own. A build's slot and a judgement's slot are never the same seat
+	// (issue #202) — running is [Meter.Acquire]'s, runningJudgements is
+	// [Meter.AcquireJudgement]'s.
+	running           int
+	runningJudgements int
+	windowStart       time.Time
+	started           int
+	refused           bool  // one refusal record per window, not one per poll
+	spent             int64 // tokens charged this window
+	cost              int64 // micro-dollars charged this window
+	split             Spend // the same tokens, by kind — what makes the total priceable
+	unmetered         int   // runs this window that finished without saying what they cost
+	unpriced          int   // runs this window that reported tokens and no money
+	aborted           int   // runs this window the transport dropped after the prompt was sent
 	// mismatch is the kind a charge reported THIS window when it was a real
 	// kind and not the one Budget.Credential names; CredentialUnknown means
 	// no mismatch yet. Window-scoped like unmetered and unpriced, so a
@@ -420,18 +440,56 @@ func (m *Meter) now() time.Time {
 	return time.Now()
 }
 
-// Acquire takes one execution slot, returning its release. The first refusal
-// of each window is evidence; a start is not, here — a claim can still be
-// sent back to Wait before it ever builds, so Acquire checks MaxPerWindow
-// against starts already on the books but leaves recording a new one, and its
-// evidence record, to [Meter.Start] once the run actually begins.
+// Acquire takes one build execution slot, returning its release. The first
+// refusal of each window is evidence; a start is not, here — a claim can
+// still be sent back to Wait before it ever builds, so Acquire checks
+// MaxPerWindow against starts already on the books but leaves recording a
+// new one, and its evidence record, to [Meter.Start] once the run actually
+// begins.
+//
+// Builds and judgements draw from two separate seat pools (issue #202) but
+// the same window bounds — MaxPerWindow, the token and cost ceilings, the
+// account's own window — because those are the account's, not the seat's:
+// a judgement's tokens spend the same window a build's do, only how many of
+// each may run AT ONCE is split. See [Meter.AcquireJudgement] for the
+// judgement pool.
 func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
+	return m.acquire(ctx, what, &m.running, func(b Budget) int { return b.MaxConcurrent })
+}
+
+// AcquireJudgement takes one judgement execution slot, returning its
+// release. Identical to [Meter.Acquire] in every window check — the two
+// differ only in which seat pool and which ceiling they count against: this
+// one is runningJudgements against MaxJudgements (defaulted to one),
+// Acquire's is running against MaxConcurrent. A build never waits because a
+// judgement is running, and a judgement never waits because builds are
+// running.
+//
+// Never followed by [Meter.Start]: Start is a build-only charge, and billing
+// a planner's start here would reopen issue #45's double-count. A judgement
+// that acquires and later charges its cost via [Meter.Charge] alone.
+func (m *Meter) AcquireJudgement(ctx context.Context, what string) (func(), error) {
+	return m.acquire(ctx, what, &m.runningJudgements, func(b Budget) int { return b.MaxJudgements })
+}
+
+// acquire is the shared ~120-line check ladder behind [Meter.Acquire] and
+// [Meter.AcquireJudgement], parameterized on which seat counter and ceiling
+// to test: everything past the concurrency check — MaxPerWindow, unmetered,
+// unpriced, credential mismatch, credential-unsaid, the account's own
+// window, MaxTokensPerWindow, MaxCostPerWindow, and the one-refusal-record-
+// per-window posture — is the account's, shared by both pools, and would
+// drift the moment two copies of it existed.
+//
+// ceiling reads m.Budget for the field this pool is bounded by; it is called
+// only after m.mu is held, because SetBudget writes m.Budget under the same
+// lock on a live box reload and reading it outside that lock races.
+func (m *Meter) acquire(ctx context.Context, what string, running *int, ceiling func(Budget) int) (func(), error) {
 	m.mu.Lock()
-	maxC := m.Budget.MaxConcurrent
-	if maxC <= 0 {
-		maxC = 1
+	maxRunning := ceiling(m.Budget)
+	if maxRunning <= 0 {
+		maxRunning = 1
 	}
-	if m.running >= maxC {
+	if *running >= maxRunning {
 		m.mu.Unlock()
 		return nil, ErrBusy
 	}
@@ -543,11 +601,11 @@ func (m *Meter) Acquire(ctx context.Context, what string) (func(), error) {
 			return nil, ErrBudget
 		}
 	}
-	m.running++
+	*running++
 	m.mu.Unlock()
 	return func() {
 		m.mu.Lock()
-		m.running--
+		*running--
 		m.mu.Unlock()
 	}, nil
 }
@@ -724,14 +782,23 @@ type Report struct {
 	// prompt was sent, reported or not — an operator's count of a distinct
 	// symptom (a flaky call, a dying child) from Unmetered's (nobody said
 	// what a finished run cost).
-	Aborted       int           `json:"aborted"`
-	MaxTokens     int64         `json:"max_tokens"`
-	Running       int           `json:"running"`
-	Started       int           `json:"started"`
-	MaxConcurrent int           `json:"max_concurrent"`
-	MaxPerWindow  int           `json:"max_per_window"`
-	Window        time.Duration `json:"-"`
-	WindowSec     int64         `json:"window_sec"`
+	Aborted   int   `json:"aborted"`
+	MaxTokens int64 `json:"max_tokens"`
+	// RunningBuilds and RunningJudgements are the two seat pools (issue
+	// #202), each moving independently: a burst of originations can fill
+	// RunningJudgements up to MaxJudgements without touching a build seat,
+	// and a burst of builds can fill RunningBuilds up to MaxConcurrent
+	// without pausing planning. Named Running*Builds* rather than the old
+	// bare Running because after the split it counts only builds, and the
+	// old name would lie about what it no longer includes.
+	RunningBuilds     int           `json:"running_builds"`
+	RunningJudgements int           `json:"running_judgements"`
+	Started           int           `json:"started"`
+	MaxConcurrent     int           `json:"max_concurrent"`
+	MaxJudgements     int           `json:"max_judgements"`
+	MaxPerWindow      int           `json:"max_per_window"`
+	Window            time.Duration `json:"-"`
+	WindowSec         int64         `json:"window_sec"`
 	// Refusing is true while the meter is turning work away, so a room can
 	// say the factory is paced rather than idle. An operator watching nothing
 	// happen needs those told apart.
@@ -816,13 +883,17 @@ func (m *Meter) Report() Report {
 	if maxC <= 0 {
 		maxC = 1
 	}
+	maxJ := m.Budget.MaxJudgements
+	if maxJ <= 0 {
+		maxJ = 1
+	}
 	return Report{
 		Tokens: m.spent, Unmetered: m.unmetered, Aborted: m.aborted, MaxTokens: m.Budget.MaxTokensPerWindow,
 		Input: m.split.Input, Output: m.split.Output,
 		CacheRead: m.split.CacheRead, CacheWrite: m.split.CacheWrite,
 		CostMicros: m.cost, MaxCostMicros: m.Budget.MaxCostPerWindow, Unpriced: m.unpriced,
-		Running: m.running, Started: m.started,
-		MaxConcurrent: maxC, MaxPerWindow: m.Budget.MaxPerWindow,
+		RunningBuilds: m.running, RunningJudgements: m.runningJudgements, Started: m.started,
+		MaxConcurrent: maxC, MaxJudgements: maxJ, MaxPerWindow: m.Budget.MaxPerWindow,
 		Window: m.Budget.Window, WindowSec: int64(m.Budget.Window.Seconds()),
 		Refusing:      m.wouldRefuse(),
 		AccountWindow: m.limit, AccountReserve: m.Budget.WindowReserve,
@@ -866,7 +937,9 @@ func (m *Meter) wouldRefuse() bool {
 }
 
 // resetWindow starts a fresh accounting window at its aligned boundary.
-// Callers hold mu.
+// Callers hold mu. It does not touch running or runningJudgements: those are
+// in-memory concurrency, not window-scoped spend, and a rollover mid-run must
+// not forget a seat is held.
 func (m *Meter) resetWindow(start time.Time) {
 	m.windowStart, m.started, m.refused = start, 0, false
 	m.spent, m.cost, m.split = 0, 0, Spend{}

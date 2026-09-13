@@ -172,8 +172,9 @@ func TestWindowRolloverForgives(t *testing.T) {
 }
 
 // TestAcquireAloneIsNotAStart: a claim is not a run. Acquire took the slot —
-// Report().Running says so — but nothing has begun building, and nothing
-// should say otherwise: not the started count, not the evidence chain.
+// Report().RunningBuilds says so — but nothing has begun building, and
+// nothing should say otherwise: not the started count, not the evidence
+// chain.
 func TestAcquireAloneIsNotAStart(t *testing.T) {
 	ctx := context.Background()
 	m, _ := meter(t, Budget{MaxConcurrent: 2})
@@ -184,7 +185,7 @@ func TestAcquireAloneIsNotAStart(t *testing.T) {
 	}
 	defer release()
 
-	if r := m.Report(); r.Running != 1 || r.Started != 0 {
+	if r := m.Report(); r.RunningBuilds != 1 || r.Started != 0 {
 		t.Fatalf("acquire alone should hold the slot without starting it: %+v", r)
 	}
 	for rec, err := range m.Store.Log().Since(ctx, tn, "control/capacity", 1) {
@@ -258,5 +259,112 @@ func TestMaxPerWindowCountsCompletedStartsNotAcquireAttempts(t *testing.T) {
 
 	if _, err := m.Acquire(ctx, "wi-2"); !errors.Is(err, ErrBudget) {
 		t.Fatalf("one completed start should close a MaxPerWindow=1 window, got %v", err)
+	}
+}
+
+// TestJudgementNeverWaitsOnBuilds: a judgement (the planner's run) draws
+// from its own seat pool, so three build seats held (issue #202's whole
+// point) must not make a judgement wait.
+func TestJudgementNeverWaitsOnBuilds(t *testing.T) {
+	ctx := context.Background()
+	m, _ := meter(t, Budget{MaxConcurrent: 3, MaxJudgements: 1})
+
+	for i := 0; i < 3; i++ {
+		if _, err := m.Acquire(ctx, "wi-build"); err != nil {
+			t.Fatalf("build acquire %d: %v", i, err)
+		}
+	}
+
+	if _, err := m.AcquireJudgement(ctx, "origination-1"); err != nil {
+		t.Fatalf("a judgement should never wait on builds, got %v", err)
+	}
+}
+
+// TestBuildNeverWaitsOnAJudgement: the reverse of
+// TestJudgementNeverWaitsOnBuilds. With the single judgement seat held, a
+// second AcquireJudgement refuses ErrBusy while a build's Acquire still
+// succeeds.
+func TestBuildNeverWaitsOnAJudgement(t *testing.T) {
+	ctx := context.Background()
+	m, _ := meter(t, Budget{MaxConcurrent: 3, MaxJudgements: 1})
+
+	if _, err := m.AcquireJudgement(ctx, "origination-1"); err != nil {
+		t.Fatalf("first judgement acquire: %v", err)
+	}
+
+	if _, err := m.AcquireJudgement(ctx, "origination-2"); !errors.Is(err, ErrBusy) {
+		t.Fatalf("a second judgement with MaxJudgements=1 held should refuse ErrBusy, got %v", err)
+	}
+
+	if _, err := m.Acquire(ctx, "wi-build"); err != nil {
+		t.Fatalf("a build should never wait because a judgement is running, got %v", err)
+	}
+}
+
+// TestAcquireJudgementRefusesOverBudget: AcquireJudgement runs the same
+// window checks Acquire does — MaxPerWindow and MaxTokensPerWindow among
+// them — because the window bounds the account, not the seat.
+func TestAcquireJudgementRefusesOverBudget(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("max per window", func(t *testing.T) {
+		m, _ := meter(t, Budget{MaxJudgements: 5, MaxPerWindow: 1, Window: time.Hour})
+		release, err := m.AcquireJudgement(ctx, "origination-1")
+		if err != nil {
+			t.Fatalf("first judgement acquire: %v", err)
+		}
+		m.Start(ctx, "origination-1")
+		release()
+
+		if _, err := m.AcquireJudgement(ctx, "origination-2"); !errors.Is(err, ErrBudget) {
+			t.Fatalf("a started run against MaxPerWindow=1 should refuse the next, got %v", err)
+		}
+	})
+
+	t.Run("max tokens per window", func(t *testing.T) {
+		m, _ := meter(t, Budget{MaxJudgements: 5, MaxTokensPerWindow: 10_000, Window: time.Hour})
+		release, err := m.AcquireJudgement(ctx, "origination-1")
+		if err != nil {
+			t.Fatalf("first judgement acquire: %v", err)
+		}
+		m.Charge(ctx, "origination-1", Spend{Total: 11_000, Reported: true})
+		release()
+
+		if _, err := m.AcquireJudgement(ctx, "origination-2"); !errors.Is(err, ErrBudget) {
+			t.Fatalf("spend over MaxTokensPerWindow should refuse the next judgement, got %v", err)
+		}
+	})
+}
+
+// TestReportSplitsRunningBySeatPool: RunningBuilds and RunningJudgements
+// move independently, and MaxJudgements defaults to one the same way
+// MaxConcurrent defaults to one.
+func TestReportSplitsRunningBySeatPool(t *testing.T) {
+	ctx := context.Background()
+	m, _ := meter(t, Budget{MaxConcurrent: 3})
+
+	buildRelease, err := m.Acquire(ctx, "wi-build")
+	if err != nil {
+		t.Fatalf("build acquire: %v", err)
+	}
+	if r := m.Report(); r.RunningBuilds != 1 || r.RunningJudgements != 0 || r.MaxJudgements != 1 {
+		t.Fatalf("build alone should move RunningBuilds only: %+v", r)
+	}
+
+	judgementRelease, err := m.AcquireJudgement(ctx, "origination-1")
+	if err != nil {
+		t.Fatalf("judgement acquire: %v", err)
+	}
+	if r := m.Report(); r.RunningBuilds != 1 || r.RunningJudgements != 1 {
+		t.Fatalf("build and judgement should both be visible and independent: %+v", r)
+	}
+
+	buildRelease()
+	if r := m.Report(); r.RunningBuilds != 0 || r.RunningJudgements != 1 {
+		t.Fatalf("releasing the build should not touch the judgement seat: %+v", r)
+	}
+	judgementRelease()
+	if r := m.Report(); r.RunningJudgements != 0 {
+		t.Fatalf("releasing the judgement should clear it: %+v", r)
 	}
 }
