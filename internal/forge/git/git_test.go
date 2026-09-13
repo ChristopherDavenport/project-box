@@ -749,6 +749,121 @@ func TestCommitMessageOfAnUnknownRevErrors(t *testing.T) {
 	}
 }
 
+func TestSquashOfStackedCommitsCollapsesToOneCarryingHeadsTreeAndSecondMessage(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	base := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nfirst\n"), 0o644)
+	mustGit(t, dir, "commit", "-am", "first attempt")
+
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nfirst\nsecond\n"), 0o644)
+	mustGit(t, dir, "commit", "-am", "second attempt\n\nfixes the first")
+	head := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+	wantTree := strings.TrimSpace(mustGit(t, dir, "rev-parse", string(head)+"^{tree}"))
+
+	mustGit(t, dir, "checkout", "--detach", string(head))
+
+	squashed, err := Squash(ctx, dir, base, head)
+	if err != nil {
+		t.Fatalf("squash: %v", err)
+	}
+	if squashed == head {
+		t.Fatal("squash of two stacked commits returned head unchanged, want a new commit")
+	}
+
+	if parent := strings.TrimSpace(mustGit(t, dir, "rev-parse", string(squashed)+"^")); parent != string(base) {
+		t.Fatalf("squashed parent = %s, want base %s", parent, base)
+	}
+	if gotTree := strings.TrimSpace(mustGit(t, dir, "rev-parse", string(squashed)+"^{tree}")); gotTree != wantTree {
+		t.Fatalf("squashed tree = %s, want head's tree %s", gotTree, wantTree)
+	}
+	gotMessage, err := CommitMessage(ctx, dir, string(squashed))
+	if err != nil {
+		t.Fatalf("commit message: %v", err)
+	}
+	if !strings.Contains(gotMessage, "second attempt") || !strings.Contains(gotMessage, "fixes the first") {
+		t.Fatalf("squashed message = %q, want the second commit's message", gotMessage)
+	}
+	if strings.Contains(gotMessage, "first attempt") {
+		t.Fatalf("squashed message = %q, want only the second commit's message, not the first's", gotMessage)
+	}
+
+	// The workspace's detached HEAD follows the squash to the returned commit.
+	if got := strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")); got != string(squashed) {
+		t.Fatalf("HEAD after squash = %s, want the squashed commit %s", got, squashed)
+	}
+}
+
+func TestSquashOfASingleCommitOverBaseReturnsHeadUnchanged(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	base := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nonly\n"), 0o644)
+	mustGit(t, dir, "commit", "-am", "only attempt")
+	head := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	mustGit(t, dir, "checkout", "--detach", string(head))
+
+	got, err := Squash(ctx, dir, base, head)
+	if err != nil {
+		t.Fatalf("squash: %v", err)
+	}
+	if got != head {
+		t.Fatalf("squash of a single commit = %s, want head unchanged %s", got, head)
+	}
+	if hp := strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")); hp != string(head) {
+		t.Fatalf("HEAD after single-commit squash = %s, want unmoved from %s", hp, head)
+	}
+}
+
+func TestSquashOfAnEmptyRangeReturnsHeadUnchanged(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	head := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	mustGit(t, dir, "checkout", "--detach", string(head))
+
+	got, err := Squash(ctx, dir, head, head)
+	if err != nil {
+		t.Fatalf("squash: %v", err)
+	}
+	if got != head {
+		t.Fatalf("squash of an empty range = %s, want head unchanged %s", got, head)
+	}
+}
+
+func TestSquashOfAnUnknownRevErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	base := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	unknown := forge.Commit(strings.Repeat("a", 40))
+	if _, err := Squash(ctx, dir, base, unknown); err == nil {
+		t.Fatal("squash against an unknown head: want error, got nil")
+	}
+	if _, err := Squash(ctx, dir, unknown, base); err == nil {
+		t.Fatal("squash against an unknown base: want error, got nil")
+	}
+}
+
 func agentContext(commit forge.Commit, path string) (set agentpkg.ContextSet) {
 	cr := agentpkg.ContextRepo{Repo: "app", Commit: string(commit)}
 	if path != "" {

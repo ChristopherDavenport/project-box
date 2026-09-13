@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -610,4 +611,69 @@ func Commits(ctx context.Context, dir string, from, to forge.Commit) ([]string, 
 		}
 	}
 	return commits, nil
+}
+
+// Squash collapses base..head to a single commit carrying head's tree and
+// message verbatim, then moves the workspace's detached HEAD to it. A unit's
+// several build attempts are one change, and the commit graph should say so
+// in one commit rather than in the shape of how many tries it took.
+//
+// base..head of one commit or fewer is returned as head, sha-identical: the
+// loop compares kept candidates and patch-ids by sha, and rewriting a commit
+// that was already singular would break resume and gate-carry for no reason.
+// An unknown base or head is an error, never head or an empty commit —
+// unknown never reads as zero.
+func Squash(ctx context.Context, dir string, base, head forge.Commit) (forge.Commit, error) {
+	out, err := run(ctx, dir, "rev-list", "--count", fmt.Sprintf("%s..%s", base, head))
+	if err != nil {
+		return "", fmt.Errorf("git: rev-list --count %s..%s: %w", base, head, err)
+	}
+	count, err := strconv.Atoi(strings.TrimSpace(out))
+	if err != nil {
+		return "", fmt.Errorf("git: parse rev-list --count output %q: %w", out, err)
+	}
+	if count <= 1 {
+		return head, nil
+	}
+
+	tree, err := run(ctx, dir, "rev-parse", fmt.Sprintf("%s^{tree}", head))
+	if err != nil {
+		return "", fmt.Errorf("git: rev-parse %s^{tree}: %w", head, err)
+	}
+	tree = strings.TrimSpace(tree)
+
+	message, err := CommitMessage(ctx, dir, string(head))
+	if err != nil {
+		return "", fmt.Errorf("git: read message to squash: %w", err)
+	}
+
+	identity, err := run(ctx, dir, "show", "-s", "--format=%an%x00%ae%x00%ad", "--date=raw", string(head))
+	if err != nil {
+		return "", fmt.Errorf("git: read author identity to squash: %w", err)
+	}
+	fields := strings.SplitN(strings.TrimRight(identity, "\n"), "\x00", 3)
+	if len(fields) != 3 {
+		return "", fmt.Errorf("git: unexpected author identity for %s: %q", head, identity)
+	}
+	name, email, date := fields[0], fields[1], fields[2]
+
+	cmd := exec.CommandContext(ctx, "git", "commit-tree", tree, "-p", string(base))
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
+		"GIT_AUTHOR_NAME="+name, "GIT_AUTHOR_EMAIL="+email, "GIT_AUTHOR_DATE="+date,
+		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=box@invalid",
+	)
+	cmd.Stdin = strings.NewReader(message)
+	var commitOut, commitErr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &commitOut, &commitErr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git commit-tree: %w: %s", err, strings.TrimSpace(commitErr.String()))
+	}
+	squashed := forge.Commit(strings.TrimSpace(commitOut.String()))
+
+	if _, err := run(ctx, dir, "reset", "--soft", string(squashed)); err != nil {
+		return "", fmt.Errorf("git: move HEAD to squashed commit: %w", err)
+	}
+	return squashed, nil
 }
