@@ -423,6 +423,94 @@ func TestPROmitsFixesLineWithoutDrivingIssue(t *testing.T) {
 	}
 }
 
+// TestPROpenedNotesOriginKeyWithoutDrivingIssue is issue #142: a landing
+// whose DrivingIssue is empty used to write its pr-opened record silently
+// (`{"pr_url":...,"issue":""}`), so the gap was only visible by comparing it
+// against a record that did carry an issue. The record must now say why.
+func TestPROpenedNotesOriginKeyWithoutDrivingIssue(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "campaign sweep", OriginKey: "campaign-7",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+
+	found := false
+	for r, err := range x.f.store.Log().Since(ctx, tn, "changeset/cs-1", 1) {
+		if err != nil {
+			t.Fatalf("since: %v", err)
+		}
+		if r.Kind == "pr-opened" && r.Subject == string(head) {
+			if !strings.Contains(string(r.Body), `"note":"no driving issue: origin key \"campaign-7\""`) {
+				t.Fatalf("pr-opened body %s does not name the origin key", r.Body)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no pr-opened evidence keyed by the landed commit")
+	}
+}
+
+// TestPROpenedCarriesNoNoteWithDrivingIssue guards the byte-compatible shape:
+// a landing with a DrivingIssue must not gain the note field — existing
+// readers unmarshal a subset of this hand-formatted body.
+func TestPROpenedCarriesNoNoteWithDrivingIssue(t *testing.T) {
+	x := fixPR(t)
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		DrivingIssue: "22", OriginKey: "issue-22",
+		Members: []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	if _, err := x.pr.Land(ctx, cs); err != nil {
+		t.Fatalf("land: %v", err)
+	}
+
+	found := false
+	for r, err := range x.f.store.Log().Since(ctx, tn, "changeset/cs-1", 1) {
+		if err != nil {
+			t.Fatalf("since: %v", err)
+		}
+		if r.Kind == "pr-opened" && r.Subject == string(head) {
+			if strings.Contains(string(r.Body), "note") {
+				t.Fatalf("pr-opened body %s carries a note despite a driving issue", r.Body)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no pr-opened evidence keyed by the landed commit")
+	}
+}
+
 // TestPRTitledFromMemberSummary is issue #59: PRLander used to title every
 // PR with the ChangeSet's whole Intent, which is the planner's unbounded
 // task paragraph and is what produced GitHub's 422 "title is too long". When

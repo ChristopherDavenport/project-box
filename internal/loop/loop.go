@@ -738,6 +738,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 		cs = forge.ChangeSet{
 			ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
 			Intent: item.Task, DrivingIssue: drivingIssue(item.OriginKey),
+			OriginKey: item.OriginKey,
 			Members: []forge.Member{{
 				Repo: l.Repo.Name, Branch: l.Branch, Base: base, Head: head,
 				Summary: item.Summary,

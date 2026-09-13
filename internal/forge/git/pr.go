@@ -155,8 +155,16 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 			continue
 		}
 		pl.PRURL = prURL
-		p.inner.record(ctx, cs, "pr-opened", string(pl.Now),
-			fmt.Sprintf(`{"pr_url":%q,"issue":%q}`, prURL, cs.DrivingIssue))
+		body := fmt.Sprintf(`{"pr_url":%q,"issue":%q}`, prURL, cs.DrivingIssue)
+		if cs.DrivingIssue == "" {
+			// An empty DrivingIssue is itself a finding, not a default: the
+			// next reader must not have to diff this record against another
+			// to notice the gap. cs.OriginKey may itself be empty — %q shows
+			// "" and that emptiness is the finding too.
+			body = fmt.Sprintf(`{"pr_url":%q,"issue":%q,"note":%q}`, prURL, cs.DrivingIssue,
+				fmt.Sprintf("no driving issue: origin key %q", cs.OriginKey))
+		}
+		p.inner.record(ctx, cs, "pr-opened", string(pl.Now), body)
 	}
 	if err == nil && cs.DrivingIssue != "" && cs.CompletesPlan {
 		p.closeDrivingIssue(ctx, cs, &landing, prURLs)

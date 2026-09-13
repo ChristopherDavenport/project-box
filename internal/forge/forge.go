@@ -137,6 +137,12 @@ type ChangeSet struct {
 	// caller wiring an issue-driven route populates it; a PR opened for the
 	// change (see git.PRLander) links it with "Fixes #<n>" in the PR body.
 	DrivingIssue string
+	// OriginKey is the origination's delivery key verbatim (e.g. "issue-42",
+	// or a repair or campaign key), copied from the work item and never
+	// derived here. DrivingIssue is what loop.drivingIssue read off it —
+	// OriginKey is carried alongside so a Lander that records the landing
+	// can name the key when DrivingIssue is empty.
+	OriginKey string
 	// CompletesPlan is an assertion the LOOP makes, never derived here: that
 	// this landing settles the last unsettled unit of DrivingIssue's plan, so
 	// a Lander that talks to a code host (git.PRLander) may close the issue

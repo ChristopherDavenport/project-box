@@ -134,7 +134,9 @@ func TestLandMovesRemoteAndLeavesEvidence(t *testing.T) {
 	if forge.Commit(got) != head {
 		t.Fatalf("remote main = %s, want %s", got, head)
 	}
-	// And the audit query works: the head sha leads to the land record.
+	// And the audit query works: the head sha leads to the land record. A
+	// plain Lander (no PRLander wrapping it) never writes a pr-opened
+	// record — that kind belongs to git.PRLander alone.
 	found := false
 	for r, err := range f.store.Log().BySubject(ctx, tn, string(head)) {
 		if err != nil {
@@ -142,6 +144,9 @@ func TestLandMovesRemoteAndLeavesEvidence(t *testing.T) {
 		}
 		if r.Kind == "land" {
 			found = true
+		}
+		if r.Kind == "pr-opened" {
+			t.Fatalf("plain Lander wrote a pr-opened record: %+v", r)
 		}
 	}
 	if !found {
