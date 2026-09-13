@@ -133,6 +133,31 @@ type Loop struct {
 	// parks inside a tick or two. Tests set it to a function returning zero
 	// so a retrying gate does not slow the suite down.
 	GateBackoff func(try int) time.Duration
+	// LandRetries bounds how many more times a landing that returned an
+	// error [git.Transient] marks as the forge's own trouble is re-asked
+	// about the SAME [forge.ChangeSet] before the item parks instead. Zero
+	// means [DefaultLandRetries]; there is no "negative means unbounded"
+	// case, for the same reason [GateRetries] has none: boxcfg will refuse a
+	// non-positive value at Load (a follow-up unit), so this field is never
+	// asked to mean anything but a real bound or the default.
+	//
+	// The landing is the step most exposed to another service's bad
+	// minute — a push that reaches GitHub over the network, same as a gate
+	// that shells out to one — and until now it was the one step in this
+	// pipeline that errored without being re-asked (issue #161). A retry
+	// answers a flaky miss, not a wrong change: [git.Transient] answers true
+	// only for the forge's own trouble (a 5xx, a dropped transport), so
+	// anything the fence itself refused, or any other 4xx, still parks on
+	// the first try exactly as before.
+	LandRetries int
+	// LandBackoff returns how long to wait before re-landing after a try
+	// that just failed, given the try number that just failed (1 for the
+	// first). Nil means a default that grows by a decade each try — seconds,
+	// then tens of seconds — steeper than [GateBackoff]'s default doubling
+	// because a forge outage worth landing into clears on its own schedule,
+	// not a gate's. Tests set it to a function returning zero so a retrying
+	// land does not slow the suite down.
+	LandBackoff func(try int) time.Duration
 	// BuildTimeout bounds one build. Zero means [DefaultBuildTimeout]; a
 	// negative value means no bound, which an operator may choose.
 	//
@@ -184,6 +209,14 @@ const DefaultAttempts = 2
 // gate into a long wait before the park a person will see anyway.
 const DefaultGateRetries = 2
 
+// DefaultLandRetries bounds how many more times a landing that errored
+// transiently is re-asked when nothing configures a bound. Two more tries —
+// three asks in all — is the same count [DefaultGateRetries] uses, for the
+// same reason: enough to clear another service's bad minute without turning
+// a genuinely broken remote into a long wait before the park a person will
+// see anyway.
+const DefaultLandRetries = 2
+
 // MaxAbortedRetries bounds how many more times a build that aborted — the
 // transport dropped the call after session/prompt was sent, never a choice
 // the agent or the box made — is retried before the item parks. Two more
@@ -207,6 +240,13 @@ const MaxWindowDefers = 3
 // error is infrastructure trouble worth a short pause, not a rate limit
 // worth minutes.
 const defaultGateBackoffUnit = 2 * time.Second
+
+// defaultLandBackoffUnit is the base of [Loop.landBackoff]'s default growth:
+// try 1 waits one unit, try 2 waits ten units, and so on — seconds then tens
+// of seconds, a decade steeper per try than [defaultGateBackoffUnit]'s
+// doubling because the landing's own trouble is another service's remote
+// outage, not a local gate's flake, and is worth waiting further out for.
+const defaultLandBackoffUnit = 3 * time.Second
 
 // OpenRepair wires Red to an ingress route: the red commit's sha is the
 // delivery key, so however many post-land checks report the same red, one
@@ -1092,7 +1132,7 @@ func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem
 	var landing forge.Landing
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
 		var err error
-		landing, err = l.lander(git.NewLander(l.Mirror, l.Store.Log())).Land(ctx, cs)
+		landing, err = l.landWithRetries(ctx, item, l.lander(git.NewLander(l.Mirror, l.Store.Log())), cs)
 		if err == nil {
 			telemetry.Outcome(ctx, queue.StateDone, string(head))
 		}
@@ -1326,7 +1366,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 	var landing forge.Landing
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
 		var err error
-		landing, err = l.lander(git.NewLander(l.Mirror, l.Store.Log())).Land(ctx, cs)
+		landing, err = l.landWithRetries(ctx, item, l.lander(git.NewLander(l.Mirror, l.Store.Log())), cs)
 		return err
 	}); lerr != nil {
 		// The landing itself was refused — a superseded token or a moved
@@ -1685,6 +1725,30 @@ func (l *Loop) gateBackoff(try int) time.Duration {
 	return time.Duration(try) * defaultGateBackoffUnit
 }
 
+// landRetries bounds how many more times a landing that errored transiently
+// is re-asked before the item parks. Mirrors [Loop.gateRetries]'s "zero
+// means default" rule with no item-level override: a landing's own
+// infrastructure trouble is the loop's concern, not a per-item budget.
+func (l *Loop) landRetries() int {
+	if l.LandRetries > 0 {
+		return l.LandRetries
+	}
+	return DefaultLandRetries
+}
+
+// landBackoff returns how long to wait before re-landing after a try that
+// just failed, honoring [Loop.LandBackoff] when set.
+func (l *Loop) landBackoff(try int) time.Duration {
+	if l.LandBackoff != nil {
+		return l.LandBackoff(try)
+	}
+	d := defaultLandBackoffUnit
+	for i := 1; i < try; i++ {
+		d *= 10
+	}
+	return d
+}
+
 // gateVerdictRecord is the loop-local envelope for a concluded gate's
 // verdict on the chain: [forge.Verdict] embedded so existing readers see
 // exactly the keys they always have, plus which try concluded when a retry
@@ -1929,6 +1993,70 @@ func (l *Loop) evaluateGate(ctx context.Context, item queue.WorkItem, g forge.Ga
 		}
 	}
 	return forge.Verdict{}, maxTries, lastErr
+}
+
+// landWithRetries lands cs through lander, re-trying an error [git.Transient]
+// marks as the forge's own trouble up to [Loop.landRetries] more times,
+// waiting [Loop.landBackoff] between tries — [Loop.evaluateGate]'s mirror for
+// the landing, because the fenced push it makes is exposed to exactly the
+// same bad-minute-from-another-service trouble a gate's own call out is, and
+// until now was the one step in this pipeline that was not re-asked for it
+// (issue #161).
+//
+// An error [git.Transient] does not positively place as the forge's own —
+// every 4xx, a fence refusal (an expected-old-value mismatch is never
+// transient, so a landing that already reached the remote is never repeated
+// by a retry), or anything this repository cannot classify — returns
+// immediately, un-retried: parking on the first try is exactly today's
+// behavior for anything not positively known safe to re-ask.
+//
+// Every erroring try — including the first, before it is a "retry" at all —
+// is recorded on the chain, keyed to cs's head, in its own nested telemetry
+// stage: kind "land-try", mirroring [Loop.evaluateGate]'s "gate-try". The
+// landing itself, when it concludes, is recorded once by lander exactly as
+// today; this helper adds no success record of its own, and no verdict is
+// re-minted by any of this — cs.Verdicts travels unchanged across every try.
+//
+// Over the bound, the last error comes back annotated with the try count so
+// the caller's ParkKeeping note can name both, the same shape a gate's own
+// exhaustion already leaves for a person to read.
+func (l *Loop) landWithRetries(ctx context.Context, item queue.WorkItem, lander forge.Lander, cs forge.ChangeSet) (forge.Landing, error) {
+	head := cs.Members[0].Head
+	maxTries := 1 + l.landRetries()
+	var lastErr error
+	for try := 1; try <= maxTries; try++ {
+		landing, err := lander.Land(ctx, cs)
+		if err == nil {
+			return landing, nil
+		}
+		lastErr = err
+		_ = telemetry.Stage(ctx, "land-retry", item, func(ctx context.Context) error {
+			l.record(ctx, item, "land-try", string(head),
+				fmt.Sprintf(`{"try":%d,"error":%q}`, try, err.Error()))
+			return err
+		})
+		if !git.Transient(err) {
+			return forge.Landing{}, err
+		}
+		if try == maxTries {
+			break
+		}
+		if wait := l.landBackoff(try); wait > 0 {
+			timer := time.NewTimer(wait)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return forge.Landing{}, ctx.Err()
+			case <-timer.C:
+			}
+		} else if ctx.Err() != nil {
+			// A canceled ctx is not retried even when the backoff itself is
+			// zero (tests): propagate it rather than spending one more try
+			// on a context nobody is waiting for the result of.
+			return forge.Landing{}, ctx.Err()
+		}
+	}
+	return forge.Landing{}, fmt.Errorf("%w (after %d tries)", lastErr, maxTries)
 }
 
 // settle runs the handoff hook after any settle; closure over termination.
