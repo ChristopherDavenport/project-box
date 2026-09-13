@@ -572,20 +572,46 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			grant.Release()
 			return settled, err
 		}
+
+		// Claimed here, synchronously, before the goroutine below is even
+		// started — not inside it. The first attempt at this issue claimed
+		// only once the goroutine reached RunHolding, so a second candidate
+		// contending for the very section just granted above, later in this
+		// same loop, could still find this item unclaimed and have
+		// [loop.Loop.reapGhost] mistake its live grant for an abandoned one
+		// and reap it out from under it. Claiming before moving on to the
+		// next candidate closes that window: whatever this loop looks at
+		// next sees this item genuinely StateClaimed.
+		claim := forge.Lease{}
+		if grant != nil {
+			var claimed queue.WorkItem
+			var cerr error
+			claimed, claim, cerr = lp.Claim(ctx, item)
+			if cerr != nil {
+				grant.Release()
+				release()
+				mu.Lock()
+				recordErr(item, cerr)
+				mu.Unlock()
+				continue
+			}
+			item = claimed
+		}
+
 		wg.Add(1)
 		p.inflight.Add(1)
-		go func(item queue.WorkItem, grant *loop.SectionGrant) {
+		go func(item queue.WorkItem, claim forge.Lease, grant *loop.SectionGrant) {
 			defer wg.Done()
 			defer p.inflight.Done()
 			defer release()
-			out, err := lp.RunHolding(ctx, item, grant)
+			out, err := lp.RunHolding(ctx, item, claim, grant)
 			mu.Lock()
 			defer mu.Unlock()
 			if err == nil && !queue.Claimable(out.State) {
 				settled++
 			}
 			recordErr(item, err)
-		}(item, grant)
+		}(item, claim, grant)
 	}
 	wg.Wait()
 	return settled, errors.Join(unreadable, firstErr)

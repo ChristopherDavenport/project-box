@@ -489,24 +489,38 @@ func (l *Loop) WaitOnSection(ctx context.Context, item queue.WorkItem, busy stri
 // where it ended: done, parked, waiting, or failed — an error return means
 // the loop itself broke, not that the change was judged and refused.
 func (l *Loop) Run(ctx context.Context, item queue.WorkItem) (out queue.WorkItem, rerr error) {
-	return l.RunHolding(ctx, item, nil)
+	return l.RunHolding(ctx, item, forge.Lease{}, nil)
 }
 
-// RunHolding is Run for a unit whose section grant the pump already took via
-// [Loop.TakeSections] (issue #120): the section lease and the meter seat must
-// be acquired together or not at all, because a unit that cannot take its
-// section yet still spent a seat to learn that, stranding every runnable
-// candidate dispatched after it in Drain's break.
+// RunHolding is Run for a unit whose section grant — and claim — the pump
+// already took in Drain via [Loop.TakeSections] and [Loop.Claim] (issue
+// #120): the section lease and the meter seat must be acquired together or
+// not at all, because a unit that cannot take its section yet still spent a
+// seat to learn that, stranding every runnable candidate dispatched after it
+// in Drain's break.
 //
-// A nil grant is today's Run, byte for byte: leaseSections still runs here,
+// The claim travels with the grant rather than being retaken here. The
+// first attempt at this issue reused this same RunHolding shape but still
+// claimed inside it, deep in the dispatched goroutine — so a second
+// candidate contending for the very section this one had just been granted,
+// later in the same synchronous dispatch loop, could still find it
+// unclaimed and have [Loop.reapGhost] mistake the live grant for an
+// abandoned one and reap it out from under the first candidate. Claiming in
+// Drain, synchronously, the moment the meter accepts the candidate and
+// before its goroutine is even started, closes that window: by the time any
+// later candidate's own section-take asks, this item is already, genuinely,
+// StateClaimed in the store.
+//
+// A nil grant is today's Run, byte for byte: RunHolding claims the item
+// itself (the claim argument is ignored) and leaseSections still runs here,
 // in the seat, exactly as it always has, so ladder, deployloop, api and
 // every existing caller are untouched. A non-nil grant means the pump
-// already holds the sections this item needs; RunHolding skips its own
-// acquisition, treats the grant as free (a unit only ever reaches here
-// because Drain found it so), and releases it — exactly once, the grant's
-// Release is idempotent — on every exit this function has, including one
-// that fails before a build ever starts.
-func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, grant *SectionGrant) (out queue.WorkItem, rerr error) {
+// already holds the sections this item needs and has already claimed it;
+// RunHolding skips its own acquisition, treats the grant as free (a unit
+// only ever reaches here because Drain found it so), and releases it —
+// exactly once, the grant's Release is idempotent — on every exit this
+// function has, including one that fails before a build ever starts.
+func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.Lease, grant *SectionGrant) (out queue.WorkItem, rerr error) {
 	if grant != nil {
 		defer grant.Release()
 	}
@@ -531,9 +545,12 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, grant *Secti
 		l.Mirror.Discard(item.ID, l.Repo.Name)
 	}()
 	q := &queue.Queue{Store: l.Store, Runner: l.Runner, TTL: l.TTL}
-	item, claim, err := q.Claim(ctx, item)
-	if err != nil {
-		return item, fmt.Errorf("loop: claim: %w", err)
+	if grant == nil {
+		var err error
+		item, claim, err = q.Claim(ctx, item)
+		if err != nil {
+			return item, fmt.Errorf("loop: claim: %w", err)
+		}
 	}
 
 	if deny, err := l.authorize(ctx, item, authz.ActionPropose); err != nil {
@@ -2394,6 +2411,24 @@ func (g *SectionGrant) Release() {
 		return
 	}
 	g.once.Do(g.release)
+}
+
+// Claim takes item's claim lease exactly as Run does, exposed so Drain can
+// claim a candidate itself — synchronously, in its own dispatch loop, the
+// moment the meter accepts it and before the goroutine that runs it is even
+// started (issue #120). Until that claim lands in the store, a section this
+// candidate was just granted via [Loop.TakeSections] is indistinguishable,
+// to any later candidate's [Loop.reapGhost] check, from one abandoned by a
+// run that died — claiming here, before moving on to the next candidate,
+// closes that window instead of racing the goroutine that would otherwise
+// claim it later.
+func (l *Loop) Claim(ctx context.Context, item queue.WorkItem) (queue.WorkItem, forge.Lease, error) {
+	q := &queue.Queue{Store: l.Store, Runner: l.Runner, TTL: l.TTL}
+	item, claim, err := q.Claim(ctx, item)
+	if err != nil {
+		return item, claim, fmt.Errorf("loop: claim: %w", err)
+	}
+	return item, claim, nil
 }
 
 // TakeSections is leaseSections' pump-facing half: it lets Drain take the

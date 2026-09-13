@@ -64,6 +64,14 @@ func TestASectionBusyCandidateNeverSpendsASeat(t *testing.T) {
 // two units contending for the same one — exactly one runs this tick, the
 // other ends up waiting, and the seatless path this issue adds never lets
 // both through.
+//
+// A count of end states alone is not enough to name this: the first attempt
+// at this issue passed this same shape (done=1, waiting=1) while B, the
+// loser of the section race, had already built a commit concurrently with
+// A — reapGhost mistook A's live-but-not-yet-claimed grant for an abandoned
+// one and let B take the same section too, and only the branch lease at the
+// land window kept B from finishing outright. So the assertion that matters
+// is on the loser directly: it never built anything at all.
 func TestTwoCandidatesInTheSameFreeSectionSerialize(t *testing.T) {
 	w := setup(t, capacity.Budget{MaxConcurrent: 4})
 	ctx := context.Background()
@@ -98,6 +106,13 @@ func TestTwoCandidatesInTheSameFreeSectionSerialize(t *testing.T) {
 	}
 	if done != 1 || waiting != 1 {
 		t.Fatalf("sections should serialize exactly one runner, got a=%s b=%s", a.State, b.State)
+	}
+	loser := a
+	if loser.State != queue.StateWaiting {
+		loser = b
+	}
+	if loser.Built != "" {
+		t.Fatalf("the loser of the section race must never have built anything, got Built=%q", loser.Built)
 	}
 }
 

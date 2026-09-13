@@ -665,8 +665,16 @@ func TestAHolderIsNeverYieldedToItsOwnWaiter(t *testing.T) {
 	if holder.State != queue.StateDone {
 		t.Fatalf("the holder should claim the one seat and finish, got %s: %s", holder.State, holder.Note)
 	}
-	if head.State != queue.StatePending {
-		t.Fatalf("the head should not even have been tried this tick (one-seat budget went to the holder), got %s: %s", head.State, head.Note)
+	// Not left untried: TakeSections runs for every candidate regardless of
+	// remaining seats (issue #120), so the head learns its section is busy
+	// seatlessly, via [loop.Loop.WaitOnSection] — never a false ghost-reap of
+	// the holder's own lease, because Drain claims the holder synchronously,
+	// before this candidate is ever considered.
+	if head.State != queue.StateWaiting {
+		t.Fatalf("the head should learn its section is busy and wait, got %s: %s", head.State, head.Note)
+	}
+	if !strings.Contains(head.Note, "held by "+holder.ID) {
+		t.Fatalf("the head's wait note should name the holder: %s", head.Note)
 	}
 
 	if _, err := w.pump.Drain(ctx); err != nil {
@@ -778,8 +786,14 @@ func TestAHolderIsNeverYieldedToTheLandHead(t *testing.T) {
 	if holder.State != queue.StateDone {
 		t.Fatalf("the holder should claim the one seat and finish, got %s: %s", holder.State, holder.Note)
 	}
-	if head.State != queue.StatePending {
-		t.Fatalf("the land head should not even have been tried this tick (one-seat budget went to the holder), got %s: %s", head.State, head.Note)
+	// As above: the land head learns its section is busy seatlessly rather
+	// than sitting untried, and its note still prices the wait as a rebase
+	// owed, not a build not yet started (issue #143's point).
+	if head.State != queue.StateWaiting {
+		t.Fatalf("the land head should learn its section is busy and wait, got %s: %s", head.State, head.Note)
+	}
+	if !strings.Contains(head.Note, "rebase and push of kept commit") || !strings.Contains(head.Note, "held by "+holder.ID) {
+		t.Fatalf("the land head's wait note should price the rebase owed and name the holder: %s", head.Note)
 	}
 
 	if _, err := w.pump.Drain(ctx); err != nil {
@@ -832,8 +846,15 @@ func TestALandReadyCandidateGoesBeforeAFreshBuild(t *testing.T) {
 	if ready.State != queue.StateDone {
 		t.Fatalf("the land-ready candidate should claim the one seat and land, got %s: %s", ready.State, ready.Note)
 	}
-	if unbuilt.State != queue.StatePending {
-		t.Fatalf("the unbuilt sibling should not even have been tried this tick (the seat went to the land-ready candidate), got %s: %s", unbuilt.State, unbuilt.Note)
+	// Learned seatlessly rather than left untried (issue #120): the unbuilt
+	// sibling's own TakeSections runs regardless of the meter, finds the
+	// section the land-ready candidate holds, and waits without ever
+	// spending the seat that already went to that candidate.
+	if unbuilt.State != queue.StateWaiting {
+		t.Fatalf("the unbuilt sibling should learn its section is busy and wait, got %s: %s", unbuilt.State, unbuilt.Note)
+	}
+	if !strings.Contains(unbuilt.Note, "held by "+ready.ID) {
+		t.Fatalf("the unbuilt sibling's wait note should name the land-ready holder: %s", unbuilt.Note)
 	}
 
 	if _, err := w.pump.Drain(ctx); err != nil {
@@ -938,7 +959,12 @@ func TestAHolderIsNeverOutrankedByALandReadyNonHolder(t *testing.T) {
 	if holder.State != queue.StateDone {
 		t.Fatalf("the holder should claim the one seat ahead of a land-ready non-holder, got %s: %s", holder.State, holder.Note)
 	}
-	if ready.State != queue.StatePending {
-		t.Fatalf("the land-ready non-holder should not even have been tried this tick (the seat went to the holder), got %s: %s", ready.State, ready.Note)
+	// Learned seatlessly rather than left untried (issue #120), and its note
+	// still prices the wait as the rebase it owes, not a fresh build.
+	if ready.State != queue.StateWaiting {
+		t.Fatalf("the land-ready non-holder should learn its section is busy and wait, got %s: %s", ready.State, ready.Note)
+	}
+	if !strings.Contains(ready.Note, "rebase and push of kept commit") || !strings.Contains(ready.Note, "held by "+holder.ID) {
+		t.Fatalf("the land-ready non-holder's wait note should price the rebase owed and name the holder: %s", ready.Note)
 	}
 }
