@@ -404,14 +404,19 @@ type gateVerdict struct {
 	Reason   string
 }
 
-// priorVerdicts reads item id's gate records back off its chain and returns
+// PriorVerdicts reads item id's gate records back off its chain and returns
 // one [agent.PriorVerdict] per refused attempt, oldest first. Attempts are
 // numbered by first appearance of the record's Subject — the head sha each
 // verdict judged — and a sha that later carries a non-fail verdict (a free
 // recheck that passed) is dropped: it stopped being a refusal. A sha that
 // fails more than once keeps only its latest refusal, since a recheck on an
 // unchanged commit is one attempt, not two.
-func priorVerdicts(ctx context.Context, log evidence.Log, t tenant.ID, id string) ([]agent.PriorVerdict, error) {
+//
+// Exported so a gate can read a unit's own earlier refusals the same way a
+// rebuild's Prior does (internal/agent/acp/reviewer.go) — this is the FULL
+// account, unlike item.Prior, which the loop's in-claim Retain sets from a
+// first-line summary meant for a builder, not a gate's own reason text.
+func PriorVerdicts(ctx context.Context, log evidence.Log, t tenant.ID, id string) ([]agent.PriorVerdict, error) {
 	attemptOf := map[string]int{}
 	latest := map[string]struct {
 		attempt int
@@ -838,7 +843,7 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id, actor string, to St
 		// the account a rebuild must not be handed. Unknown never reads as
 		// zero, so a chain that cannot be read fails the retry rather than
 		// persisting a verdict-less Prior.
-		verdicts, verr := priorVerdicts(ctx, q.Store.Log(), w.Tenant, w.ID)
+		verdicts, verr := PriorVerdicts(ctx, q.Store.Log(), w.Tenant, w.ID)
 		if verr != nil {
 			return WorkItem{}, fmt.Errorf("queue: reopen: reading %s's prior verdicts: %w", id, verr)
 		}

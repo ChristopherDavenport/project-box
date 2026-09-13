@@ -869,7 +869,8 @@ func fakeAgent(scenario string) {
 			case "planner-escalate":
 				f.request("_box/escalate", map[string]any{"reason": "this origination is a question, not a change"})
 				f.write(map[string]any{"id": id, "result": map[string]any{"stopReason": "end_turn"}})
-			case "review-pass", "review-fail", "review-silent", "review-neither":
+			case "review-pass", "review-fail", "review-silent", "review-neither",
+				"review-resolved", "review-resolutions-missing", "review-unresolved-pass":
 				// The gate role's occupant. Every scenario first reports what
 				// it was actually handed — where it is standing, whether that
 				// place will take a write, and the patch it was given — so a
@@ -893,6 +894,21 @@ func fakeAgent(scenario string) {
 					answer += "\nLooks fine to me, I suppose.\n"
 				case "review-neither":
 					answer += "\n```json\n" + `{"verdict":"maybe","reason":"I could not make up my mind"}` + "\n```\n"
+				case "review-resolved":
+					// Attempt 1's finding is fixed; the diff still has a new
+					// problem of its own, so the change fails on that even
+					// though nothing earlier survived.
+					answer += "\n```json\n" + `{"verdict":"fail","reason":"schema.sql is no longer touched, but api/widget.go now reaches outside its declared section",` +
+						`"resolved":[{"attempt":1,"gate":"review","resolved":true,"note":"db/schema.sql is untouched now"}]}` + "\n```\n"
+				case "review-resolutions-missing":
+					// A prior-carrying answer that never says whether the
+					// named finding was fixed — trouble, not a verdict.
+					answer += "\n```json\n" + `{"verdict":"fail","reason":"still looks wrong to me"}` + "\n```\n"
+				case "review-unresolved-pass":
+					// Self-contradictory: marks the earlier finding
+					// unresolved and passes the change anyway.
+					answer += "\n```json\n" + `{"verdict":"pass","reason":"good enough",` +
+						`"resolved":[{"attempt":1,"gate":"review","resolved":false,"note":"db/schema.sql is still touched"}]}` + "\n```\n"
 				}
 				f.notify("session/update", map[string]any{"sessionId": sessionID,
 					"update": map[string]any{"sessionUpdate": "agent_message_chunk",

@@ -136,6 +136,19 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 	if err != nil {
 		return forge.Verdict{}, fmt.Errorf("acp: reviewer: reading work item %s: %w", run, err)
 	}
+	// The unit's own earlier refusals, read off its chain rather than off
+	// item.Prior: that field is the loop's in-claim Retain summary for a
+	// builder resuming a change (first line of the latest reason only), and
+	// this gate needs its OWN full account of what it found, per attempt, so
+	// it can be asked whether this diff fixes it. Gate order runs every
+	// check before the review and records its own verdict first, so by the
+	// time this runs on attempt n, head_n's own latest verdict — if any —
+	// is still pending or not yet written; only attempts 1..n-1's refusals
+	// come back.
+	prior, err := queue.PriorVerdicts(ctx, r.Store.Log(), r.Tenant, run)
+	if err != nil {
+		return forge.Verdict{}, fmt.Errorf("acp: reviewer: reading %s's prior verdicts: %w", run, err)
+	}
 
 	// Absolute, whatever the config's root was: the adapter refuses a
 	// relative cwd, and the first live planning run found that out.
@@ -153,6 +166,9 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 		Tenant: r.Tenant, Role: agent.RoleGate, Box: r.Box, Repo: r.Repo.Name, Run: run,
 		Task:  cs.Intent,
 		Extra: []agent.Layer{reviewerLayer()},
+	}
+	if len(prior) > 0 {
+		req.Extra = append(req.Extra, reviewerPriorLayer(prior))
 	}
 	if r.Seat != nil {
 		wake, ok, err := r.Seat.WakeLayer(ctx, r.WakeNotes)
@@ -217,7 +233,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 		}
 	}
 
-	sent := reviewerPrompt(bundle, cs.Intent, mat)
+	sent := reviewerPrompt(bundle, cs.Intent, mat, prior)
 	explained, _ := r.Composer.Explain(ctx, bundle)
 	rec.json(ctx, "agent-prompt", bundle.Ref, promptRecord{AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained)})
 
@@ -268,7 +284,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 	if reason := escalation(res); reason != "" {
 		return forge.Verdict{}, fmt.Errorf("acp: reviewer: %s declined to judge %s: %s", r.seatName(), run, reason)
 	}
-	v, err := parseVerdict(res.Text)
+	v, err := parseVerdict(res.Text, prior)
 	if err != nil {
 		return forge.Verdict{}, fmt.Errorf("acp: reviewer: %w", err)
 	}
@@ -588,10 +604,41 @@ func reviewerLayer() agent.Layer {
 	}
 }
 
+// reviewerPriorLayer renders this unit's earlier refused attempts as an
+// inline, task-scoped layer — the reviewer's own account of what it (or
+// another gate) found, in the reviewer's voice: a gate asking whether its
+// own earlier findings were fixed, not a builder resuming a change. Same
+// data ([agent.PriorVerdict], read off the chain by [queue.PriorVerdicts]),
+// same scope, and the same digest discipline as [agent.Prior.Layer] — the
+// bundle digest moves when the carried findings do, so the agentref records
+// that this run was told. [agent.Prior.Layer]'s own text is builder-voiced
+// ("carry it forward rather than make it again"), which is the wrong voice
+// for a gate telling itself what it already said.
+func reviewerPriorLayer(vs []agent.PriorVerdict) agent.Layer {
+	var b strings.Builder
+	b.WriteString("## Earlier attempts at this unit\n\nThis unit has been reviewed before and refused. Below is every attempt's finding, oldest first. You will be asked, for each one by name, whether the diff in front of you resolves it.\n\n")
+	for _, v := range vs {
+		reason, cut := agent.BoundReason(v.Reason, agent.MaxVerdictReasonBytes)
+		fmt.Fprintf(&b, "### attempt %d, %s\n\n%s\n", v.Attempt, v.Gate, reason)
+		if cut {
+			fmt.Fprintf(&b, "\n(cut at %d bytes — the gate's reason ran longer than that)\n", agent.MaxVerdictReasonBytes)
+		}
+		b.WriteString("\n")
+	}
+	text := b.String()
+	sum := sha256.Sum256([]byte(text))
+	return agent.Layer{
+		Name: "prior-refusals", Scope: agent.ScopeTask,
+		Source:       agent.Source{Kind: agent.SourceInline, Digest: hex.EncodeToString(sum[:])},
+		Instructions: text,
+	}
+}
+
 // reviewerPrompt is the composed instructions, the task once, and what this
 // particular run was actually laid out — including, when the change was too
-// large to send whole, that it was not sent whole.
-func reviewerPrompt(bundle agent.Bundle, task string, mat material) string {
+// large to send whole, that it was not sent whole, and, when the unit has
+// been refused before, what it must say about each earlier finding.
+func reviewerPrompt(bundle agent.Bundle, task string, mat material, prior []agent.PriorVerdict) string {
 	var w strings.Builder
 	w.WriteString(taskOnce(bundle, task))
 	fmt.Fprintf(&w, "\n%s\n", mat.Origination)
@@ -603,6 +650,18 @@ func reviewerPrompt(bundle agent.Bundle, task string, mat material) string {
 	if !mat.Decisions {
 		w.WriteString("This repository states no settled decisions at this commit; decisions.md says so. Judge against the origination alone and say so in your reason.\n")
 	}
+	if len(prior) > 0 {
+		w.WriteString("\n## What you were told before\n\n")
+		w.WriteString("This unit has been refused before; the earlier findings are laid out above under \"Earlier attempts at this unit\". Answer in this order:\n\n")
+		w.WriteString("1. For EACH earlier finding named below, one line saying whether THIS diff resolves it:\n")
+		for _, v := range prior {
+			fmt.Fprintf(&w, "   - attempt %d, %s\n", v.Attempt, v.Gate)
+		}
+		w.WriteString("2. Then judge the WHOLE diff fresh for any new findings, exactly as you would with no prior attempt.\n\n")
+		w.WriteString("Your JSON object gains a \"resolved\" array, one entry per earlier finding named above, e.g.:\n\n")
+		w.WriteString("{\"verdict\":\"fail\",\"reason\":\"...\",\"resolved\":[{\"attempt\":1,\"gate\":\"review\",\"resolved\":true,\"note\":\"one line\"}]}\n\n")
+		w.WriteString("Every earlier finding named above must appear in \"resolved\" — naming none of them, or skipping one, is not an answer and will be recorded as trouble rather than as a judgement. Marking a finding unresolved while passing the change is self-contradictory and is also not an answer. verdict and reason still govern pass or fail on their own: an earlier refusal is information you were given, never a verdict carried forward — a fail whose every earlier finding is marked resolved still fails on what is new.\n")
+	}
 	w.WriteString(`
 ## Working contract
 - Read only. Do not edit, create, or commit anything: judging a change is not making one.
@@ -612,20 +671,43 @@ func reviewerPrompt(bundle agent.Bundle, task string, mat material) string {
 	return w.String()
 }
 
-// reviewAnswer is the shape the reviewer replies in.
-type reviewAnswer struct {
-	Verdict string `json:"verdict"`
-	Reason  string `json:"reason"`
+// resolutionAnswer is one earlier finding's fate, as the reviewer answers it.
+type resolutionAnswer struct {
+	Attempt  int    `json:"attempt"`
+	Gate     string `json:"gate"`
+	Resolved bool   `json:"resolved"`
+	Note     string `json:"note"`
 }
 
-// parseVerdict reads the judgement out of the agent's message.
+// reviewAnswer is the shape the reviewer replies in. Resolved is present
+// only when the unit has a prior refusal — an answer with no such field is
+// exactly the old, unqualified shape, and parses unchanged.
+type reviewAnswer struct {
+	Verdict  string             `json:"verdict"`
+	Reason   string             `json:"reason"`
+	Resolved []resolutionAnswer `json:"resolved,omitempty"`
+}
+
+// parseVerdict reads the judgement out of the agent's message. expected is
+// this unit's earlier refusals, oldest first, in the same order the prompt
+// named them — empty on a unit with no prior, in which case Resolved is
+// never consulted and the answer parses exactly as it always has.
 //
 // Everything that is not one of the two words is an error, never a fail. A
 // [forge.Gate] must not record infrastructure trouble as a rejected change,
 // and an answer that did not parse said nothing whatsoever about the change:
 // reading it as a rejection would blame a builder for a reviewer's silence,
 // and reading it as a pass would land unreviewed work.
-func parseVerdict(text string) (forge.Verdict, error) {
+//
+// On a unit WITH a prior, three more shapes are trouble rather than either
+// verdict: an answer naming none, or fewer than all, of the earlier findings
+// it was told about (the reviewer was asked and did not answer); and an
+// answer that marks a finding unresolved while passing the change (the
+// answer contradicts itself, and a silent pass is exactly the failure this
+// gate exists to prevent). Decision alone governs pass or fail even when
+// every check passes: a fail whose Resolutions mark every earlier finding
+// resolved still fails on what is new.
+func parseVerdict(text string, expected []agent.PriorVerdict) (forge.Verdict, error) {
 	obj, ok := lastObjectWith(text, `"verdict"`)
 	if !ok {
 		return forge.Verdict{}, fmt.Errorf("the answer carries no judgement — no JSON object with \"verdict\" — and no ESCALATE: line; an absent judgement is not a pass")
@@ -635,15 +717,46 @@ func parseVerdict(text string) (forge.Verdict, error) {
 		return forge.Verdict{}, fmt.Errorf("the judgement does not parse: %w", err)
 	}
 	reason := strings.TrimSpace(a.Reason)
-	switch strings.TrimSpace(a.Verdict) {
-	case "pass":
-		return forge.Verdict{Gate: ReviewerName, Decision: forge.DecisionPass, Reason: reason}, nil
-	case "fail":
-		if reason == "" {
-			return forge.Verdict{}, fmt.Errorf("the judgement fails the change and gives no reason; a rejection the builder cannot act on is not a rejection")
-		}
-		return forge.Verdict{Gate: ReviewerName, Decision: forge.DecisionFail, Reason: reason}, nil
-	default:
+	verdict := strings.TrimSpace(a.Verdict)
+	if verdict != "pass" && verdict != "fail" {
 		return forge.Verdict{}, fmt.Errorf("the judgement says %q, which is neither \"pass\" nor \"fail\"", a.Verdict)
 	}
+	if verdict == "fail" && reason == "" {
+		return forge.Verdict{}, fmt.Errorf("the judgement fails the change and gives no reason; a rejection the builder cannot act on is not a rejection")
+	}
+
+	var resolutions []forge.Resolution
+	if len(expected) > 0 {
+		answered := make(map[string]resolutionAnswer, len(a.Resolved))
+		for _, r := range a.Resolved {
+			answered[fmt.Sprintf("%d\x00%s", r.Attempt, r.Gate)] = r
+		}
+		var missing []string
+		unresolved := false
+		for _, e := range expected {
+			r, ok := answered[fmt.Sprintf("%d\x00%s", e.Attempt, e.Gate)]
+			if !ok {
+				missing = append(missing, fmt.Sprintf("attempt %d, %s", e.Attempt, e.Gate))
+				continue
+			}
+			if !r.Resolved {
+				unresolved = true
+			}
+			resolutions = append(resolutions, forge.Resolution{
+				Attempt: e.Attempt, Gate: e.Gate, Resolved: r.Resolved, Note: strings.TrimSpace(r.Note),
+			})
+		}
+		if len(missing) > 0 {
+			return forge.Verdict{}, fmt.Errorf("the judgement was told %d earlier finding(s) and did not answer for: %s — an answer that skips a named finding is trouble, not a verdict", len(expected), strings.Join(missing, "; "))
+		}
+		if unresolved && verdict == "pass" {
+			return forge.Verdict{}, fmt.Errorf("the judgement marks an earlier finding unresolved while passing the change — self-contradictory, and never a silent pass")
+		}
+	}
+
+	decision := forge.DecisionPass
+	if verdict == "fail" {
+		decision = forge.DecisionFail
+	}
+	return forge.Verdict{Gate: ReviewerName, Decision: decision, Reason: reason, Resolutions: resolutions}, nil
 }

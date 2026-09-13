@@ -61,8 +61,22 @@ type Verdict struct {
 	Decision Decision
 	// Reason is the human-readable justification, shown to the agent or
 	// operator who has to act on a rejection.
-	Reason   string
-	Evidence []EvidenceRef
+	Reason      string
+	Evidence    []EvidenceRef
+	Resolutions []Resolution
+}
+
+// Resolution is one earlier finding's fate under the diff this Verdict
+// judges, named by which attempt and which gate found it. Data beside the
+// reason, never a second verdict: Decision alone still governs pass or
+// fail, so a fail whose Resolutions mark every earlier finding resolved
+// still fails, and an earlier refusal is information a gate was told, never
+// a verdict carried forward.
+type Resolution struct {
+	Attempt  int
+	Gate     string
+	Resolved bool
+	Note     string
 }
 
 // EvidenceKindRecord marks an [EvidenceRef] whose URI is an [evidence.Record]

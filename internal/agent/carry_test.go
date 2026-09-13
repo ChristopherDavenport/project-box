@@ -141,7 +141,7 @@ func TestVerdictsRenderOldestFirstWithReasonsWhole(t *testing.T) {
 // builder that thinks it read the whole reason when it did not is worse off
 // than one that knows it was shown only part.
 func TestVerdictReasonOverBoundIsCutAndSaidSo(t *testing.T) {
-	long := strings.Repeat("line of gate output\n", maxVerdictReasonBytes/len("line of gate output\n")+10)
+	long := strings.Repeat("line of gate output\n", MaxVerdictReasonBytes/len("line of gate output\n")+10)
 	p := Prior{
 		Run:      "wi-1",
 		Verdicts: []PriorVerdict{{Gate: "build-and-test", Decision: "fail", Reason: long, Attempt: 1}},
@@ -153,7 +153,7 @@ func TestVerdictReasonOverBoundIsCutAndSaidSo(t *testing.T) {
 	if strings.Contains(l.Instructions, long) {
 		t.Fatal("an over-bound reason was handed over whole instead of cut")
 	}
-	if !strings.Contains(l.Instructions, fmt.Sprintf("%d bytes", maxVerdictReasonBytes)) {
+	if !strings.Contains(l.Instructions, fmt.Sprintf("%d bytes", MaxVerdictReasonBytes)) {
 		t.Fatalf("the layer must state the bound it cut at:\n%s", l.Instructions)
 	}
 	if !strings.Contains(l.Instructions, "cut") {

@@ -20,13 +20,17 @@ type PriorVerdict struct {
 	Attempt int `json:"attempt,omitempty"`
 }
 
-// maxVerdictReasonBytes bounds a carried verdict's reason. Unlike Reason
+// MaxVerdictReasonBytes bounds a carried verdict's reason. Unlike Reason
 // below — already trimmed by whoever set it — a PriorVerdict's Reason is a
 // gate's own text verbatim, and a reviewer's can run to pages. Mirrors the
 // reviewer's own diff bound (acp/reviewer.go's maxDiffBytes): cut at a line
 // boundary, and the layer says so rather than silently handing over less
 // than it claims to.
-const maxVerdictReasonBytes = 8 << 10
+//
+// Exported, with [BoundReason], so the reviewer's own prior-refusals layer
+// (acp/reviewer.go) applies the identical bound and honesty line rather than
+// growing a second one.
+const MaxVerdictReasonBytes = 8 << 10
 
 // Prior is the attempt that came before this run.
 //
@@ -137,10 +141,10 @@ func (p Prior) Layer() (Layer, bool) {
 				if v.Gate != gate {
 					continue
 				}
-				reason, cut := boundReason(v.Reason, maxVerdictReasonBytes)
+				reason, cut := BoundReason(v.Reason, MaxVerdictReasonBytes)
 				fmt.Fprintf(&b, "  - attempt %d said:\n\n%s\n", v.Attempt, reason)
 				if cut {
-					fmt.Fprintf(&b, "\n  (cut at %d bytes — the gate's reason ran longer than that)\n", maxVerdictReasonBytes)
+					fmt.Fprintf(&b, "\n  (cut at %d bytes — the gate's reason ran longer than that)\n", MaxVerdictReasonBytes)
 				}
 			}
 		}
@@ -190,10 +194,10 @@ func verdictGates(vs []PriorVerdict) []string {
 	return out
 }
 
-// boundReason caps s at max bytes on a line boundary, exactly as the
+// BoundReason caps s at max bytes on a line boundary, exactly as the
 // reviewer's own capPatch does for a diff — the last line shown is whole
 // rather than half of one — and reports whether it cut anything.
-func boundReason(s string, max int) (string, bool) {
+func BoundReason(s string, max int) (string, bool) {
 	if len(s) <= max {
 		return s, false
 	}

@@ -2118,6 +2118,76 @@ func TestFailingGateShortCircuitsLaterGates(t *testing.T) {
 	}
 }
 
+// resolvingGate fails with a fixed reason and carries Resolutions — the
+// shape a reviewer answers in once it has been told its own earlier
+// refusals (issue #105). The loop's only channel for it is [forge.Verdict]
+// itself: gateVerdictRecord embeds it, so nothing in internal/loop has to
+// know Resolutions exists for it to reach the chain.
+type resolvingGate struct {
+	name        string
+	reason      string
+	resolutions []forge.Resolution
+}
+
+func (g resolvingGate) Name() string { return g.name }
+
+func (g resolvingGate) Evaluate(context.Context, forge.ChangeSet) (forge.Verdict, error) {
+	return forge.Verdict{Gate: g.name, Decision: forge.DecisionFail, Reason: g.reason, Resolutions: g.resolutions}, nil
+}
+
+// TestAGatesResolutionsReachTheChainRecord: a gate's Resolutions ride
+// [forge.Verdict] onto the loop's own gate record beside the reason, so a
+// reader off the chain sees not just "still fails" but which earlier
+// finding this attempt fixed and which is new.
+func TestAGatesResolutionsReachTheChainRecord(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	resolutions := []forge.Resolution{
+		{Attempt: 1, Gate: "review", Resolved: true, Note: "db/schema.sql is untouched now"},
+	}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{resolvingGate{name: "review", reason: "a new finding", resolutions: resolutions}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-resolutions"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-resolutions", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateParked {
+		t.Fatalf("a failing gate should park, got %s (%s)", item.State, item.Note)
+	}
+
+	var found bool
+	for r, err := range e.store.Log().BySubject(ctx, tn, item.Built) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind != "gate" {
+			continue
+		}
+		var vr struct {
+			forge.Verdict
+		}
+		if err := json.Unmarshal(r.Body, &vr); err != nil {
+			t.Fatalf("gate record did not parse: %v", err)
+		}
+		if len(vr.Resolutions) != 1 || vr.Resolutions[0] != resolutions[0] {
+			t.Fatalf("the gate record did not carry the resolutions: %+v", vr.Resolutions)
+		}
+		found = true
+	}
+	if !found {
+		t.Fatal("no gate record was written for the refused head")
+	}
+}
+
 // erroringGate never concludes — the shape of infrastructure trouble a real
 // reviewer can hit (an answer that did not parse, a workspace that would not
 // produce a diff): [forge.Gate]'s hardest rule is that this is never recorded

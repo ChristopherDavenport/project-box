@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/agent"
+	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	gitforge "github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
@@ -124,6 +125,23 @@ func agentText(t *testing.T, s *sqlite.Store, run string) string {
 		t.Fatalf("agent-text: %v", err)
 	}
 	return tr.Text
+}
+
+// gateRecord appends a "gate" record to run's chain the way the loop does: a
+// [forge.Verdict], marshalled with its own default field names, subject to
+// the head sha it judged — the shape [queue.PriorVerdicts] reads back.
+func gateRecord(t *testing.T, s *sqlite.Store, run, sha string, v forge.Verdict) {
+	t.Helper()
+	body, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Log().Append(context.Background(), evidence.Record{
+		Tenant: btn, Scope: "workitem/" + run, Kind: "gate", Subject: sha,
+		Actor: "runner-1", Body: body,
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // chain folds a work item's evidence by kind.
@@ -302,11 +320,11 @@ func TestAnAnswerWithNoJudgementIsTrouble(t *testing.T) {
 // rejection, and an empty reason is more likely a truncated answer than a
 // considered one.
 func TestAFailWithNoReasonIsTrouble(t *testing.T) {
-	if _, err := parseVerdict("```json\n" + `{"verdict":"fail","reason":"  "}` + "\n```"); err == nil || !strings.Contains(err.Error(), "no reason") {
+	if _, err := parseVerdict("```json\n"+`{"verdict":"fail","reason":"  "}`+"\n```", nil); err == nil || !strings.Contains(err.Error(), "no reason") {
 		t.Fatalf("a reasonless rejection was accepted: %v", err)
 	}
 	// And a pass with no reason is a pass: there is nobody to act on it.
-	v, err := parseVerdict(`{"verdict":"pass","reason":""}`)
+	v, err := parseVerdict(`{"verdict":"pass","reason":""}`, nil)
 	if err != nil || v.Decision != forge.DecisionPass {
 		t.Fatalf("a terse pass was refused: %+v %v", v, err)
 	}
@@ -564,5 +582,91 @@ func TestTheGateWithNoMirrorRefusesGrantedSkills(t *testing.T) {
 	}
 	if got := chain(t, s, cs.Run)["agent-result"]; got != "" {
 		t.Fatalf("an agent ran without the skills it was granted:\n%s", got)
+	}
+}
+
+// TestTheGateIsToldItsOwnEarlierRefusal: issue #105. A unit refused once
+// before gets an inline layer carrying that refusal and a prompt that names
+// it, and an answer that resolves it while finding something new is a fail
+// carrying both facts — the earlier finding fixed, the new one why.
+func TestTheGateIsToldItsOwnEarlierRefusal(t *testing.T) {
+	rv, cs, s, _ := reviewerRig(t, "review-resolved")
+	gateRecord(t, s, cs.Run, "sha-attempt-1", forge.Verdict{
+		Gate: ReviewerName, Decision: forge.DecisionFail,
+		Reason: "the change edits db/schema.sql, which the unit never declared",
+	})
+	ctx := context.Background()
+	v, err := rv.Evaluate(ctx, cs)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if v.Gate != ReviewerName || v.Decision != forge.DecisionFail {
+		t.Fatalf("verdict: %+v", v)
+	}
+	if len(v.Resolutions) != 1 || v.Resolutions[0].Attempt != 1 || v.Resolutions[0].Gate != ReviewerName || !v.Resolutions[0].Resolved {
+		t.Fatalf("the resolution did not reach the verdict: %+v", v.Resolutions)
+	}
+	kinds := chain(t, s, cs.Run)
+	if !strings.Contains(kinds["agent-run"], "prior-refusals") {
+		t.Fatalf("the bundle's layers did not carry the prior refusal:\n%s", kinds["agent-run"])
+	}
+	if !strings.Contains(kinds["agent-prompt"], "attempt 1, "+ReviewerName) {
+		t.Fatalf("the prompt did not name the earlier finding:\n%s", kinds["agent-prompt"])
+	}
+}
+
+// TestAnAnswerThatSkipsAnEarlierFindingIsTrouble: a unit with a prior whose
+// answer never says whether the named finding was fixed has not answered —
+// the reviewer was told and stayed silent on it, which is trouble, not a
+// verdict either way.
+func TestAnAnswerThatSkipsAnEarlierFindingIsTrouble(t *testing.T) {
+	rv, cs, s, _ := reviewerRig(t, "review-resolutions-missing")
+	gateRecord(t, s, cs.Run, "sha-attempt-1", forge.Verdict{
+		Gate: ReviewerName, Decision: forge.DecisionFail,
+		Reason: "the change edits db/schema.sql, which the unit never declared",
+	})
+	v, err := rv.Evaluate(context.Background(), cs)
+	if err == nil || !strings.Contains(err.Error(), "attempt 1, "+ReviewerName) {
+		t.Fatalf("want an error naming the skipped finding, got %v", err)
+	}
+	if v.Gate != "" || v.Decision != "" || v.Reason != "" {
+		t.Fatalf("a skipped finding was recorded as a verdict: %+v", v)
+	}
+}
+
+// TestAnUnresolvedFindingCannotPass: marking an earlier finding unresolved
+// while passing the change is self-contradictory, and is trouble rather than
+// a silent pass.
+func TestAnUnresolvedFindingCannotPass(t *testing.T) {
+	rv, cs, s, _ := reviewerRig(t, "review-unresolved-pass")
+	gateRecord(t, s, cs.Run, "sha-attempt-1", forge.Verdict{
+		Gate: ReviewerName, Decision: forge.DecisionFail,
+		Reason: "the change edits db/schema.sql, which the unit never declared",
+	})
+	v, err := rv.Evaluate(context.Background(), cs)
+	if err == nil || !strings.Contains(err.Error(), "self-contradictory") {
+		t.Fatalf("want a self-contradiction error, got %v", err)
+	}
+	if v.Gate != "" || v.Decision != "" || v.Reason != "" {
+		t.Fatalf("a self-contradictory answer was recorded as a verdict: %+v", v)
+	}
+}
+
+// TestAUnitWithNoPriorGetsTheOldShape: no refusal on the chain means nothing
+// changes — no prior layer, no resolutions demanded, the plain {"verdict",
+// "reason"} answer parses exactly as it always has. TestTheGateReadsAChange-
+// AndPasses already exercises the pass path on a fresh item; this asserts
+// the absence directly.
+func TestAUnitWithNoPriorGetsTheOldShape(t *testing.T) {
+	rv, cs, s, _ := reviewerRig(t, "review-pass")
+	v, err := rv.Evaluate(context.Background(), cs)
+	if err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	if v.Decision != forge.DecisionPass || len(v.Resolutions) != 0 {
+		t.Fatalf("verdict: %+v", v)
+	}
+	if strings.Contains(chain(t, s, cs.Run)["agent-run"], "prior-refusals") {
+		t.Fatal("a unit with no prior refusal was handed a prior-refusals layer")
 	}
 }
