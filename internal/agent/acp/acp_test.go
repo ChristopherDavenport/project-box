@@ -301,6 +301,29 @@ func TestProtocolDialectIsAsserted(t *testing.T) {
 	}
 }
 
+// TestSetModeTimeoutIsNotARefusal: issue #102. An agent that never answers
+// session/set_mode is a clock running out, not the agent refusing the mode —
+// the two used to read identically as "agent refused permission mode". The
+// fake never replies, so a few hundred milliseconds is safe: there is no
+// legitimate answer this could race against.
+func TestSetModeTimeoutIsNotARefusal(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := runtimeFor(t, "mode-timeout").Run(ctx, bundle(), "do the work")
+	if err == nil {
+		t.Fatal("want an error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want context.DeadlineExceeded, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "context deadline exceeded waiting for session/set_mode") {
+		t.Fatalf("error does not name the request in flight: %v", err)
+	}
+	if strings.Contains(err.Error(), "refused") {
+		t.Fatalf("a timeout must not read as a refusal: %v", err)
+	}
+}
+
 // TestUnnamedEnvDoesNotReachTheAgent: the daemon's whole environment used to
 // reach every agent by nothing more than starting a subprocess in it (issue
 // #67). A canary the box never named must not survive that anymore. Not
@@ -560,6 +583,11 @@ func fakeAgent(scenario string) {
 		case "session/set_mode":
 			if scenario == "resume-mode-refused" {
 				f.write(map[string]any{"id": id, "error": map[string]any{"code": -32001, "message": "mode refused on the resumed session"}})
+				break
+			}
+			if scenario == "mode-timeout" {
+				// Never answers: the runtime's context expires waiting for
+				// this call, which must read as a timeout, not a refusal.
 				break
 			}
 			if p, ok := m["params"].(map[string]any); ok {

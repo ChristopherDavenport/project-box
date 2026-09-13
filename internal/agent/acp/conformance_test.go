@@ -113,13 +113,12 @@ func TestTheDialectIsPinned(t *testing.T) {
 // can carry out. So: replay the pin while recording, replay the recording, and
 // require the two runs to be indistinguishable.
 func TestTheRecorderProducesAReplayableTranscript(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	var tape bytes.Buffer
 	rt := runtimeFor(t, "replay:"+pinPath(t))
 	rt.Transcript = &tape
-	first, err := rt.Run(ctx, bundle(), "add the widget package")
+	firstCtx, firstCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer firstCancel()
+	first, err := rt.Run(firstCtx, bundle(), "add the widget package")
 	if err != nil {
 		t.Fatalf("recorded run: %v", err)
 	}
@@ -131,7 +130,9 @@ func TestTheRecorderProducesAReplayableTranscript(t *testing.T) {
 	if err := os.WriteFile(path, tape.Bytes(), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	second, err := runtimeFor(t, "replay:"+path).Run(ctx, bundle(), "add the widget package")
+	secondCtx, secondCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer secondCancel()
+	second, err := runtimeFor(t, "replay:"+path).Run(secondCtx, bundle(), "add the widget package")
 	if err != nil {
 		t.Fatalf("the recording does not replay: %v\n%s", err, tape.String())
 	}

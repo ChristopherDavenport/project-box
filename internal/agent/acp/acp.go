@@ -945,6 +945,14 @@ func (rt *Runtime) Run(ctx context.Context, b agent.Bundle, prompt string) (Resu
 		if err := conn.call(ctx, "session/set_mode", map[string]any{
 			"sessionId": newRes.SessionID, "modeId": mode,
 		}, nil); err != nil {
+			// The clock running out is not the agent refusing anything —
+			// only a genuine JSON-RPC error from the agent is a refusal.
+			// Wrapping ErrResume here would trigger a cold-session fallback
+			// against a context that is already spent, so a context error on
+			// the resume path propagates as-is instead.
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				return Result{}, fmt.Errorf("acp: session/set_mode %q: %w", mode, err)
+			}
 			// Fail closed: running under the wrong permission mode is the
 			// harness-default trap this whole layer exists to prevent. On a
 			// resume this wraps ErrResume rather than failing the build
@@ -1671,7 +1679,7 @@ func (c *conn) call(ctx context.Context, method string, params any, out any) err
 	}
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("%w waiting for %s", ctx.Err(), method)
 	case r := <-ch:
 		if r.err != nil {
 			return r.err

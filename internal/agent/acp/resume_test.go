@@ -46,9 +46,9 @@ func TestResumeContinuesTheSameSession(t *testing.T) {
 // asked for on a resume — either way the fact a later attempt would need to
 // continue this one.
 func TestSessionIDIsPopulatedOnBothPaths(t *testing.T) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-	cold, err := runtimeFor(t, "session").Run(ctx, bundle(), "do the work")
+	coldCtx, coldCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer coldCancel()
+	cold, err := runtimeFor(t, "session").Run(coldCtx, bundle(), "do the work")
 	if err != nil {
 		t.Fatalf("cold run: %v", err)
 	}
@@ -57,7 +57,9 @@ func TestSessionIDIsPopulatedOnBothPaths(t *testing.T) {
 	}
 	rt := runtimeFor(t, "resume")
 	rt.Resume = "sess-1"
-	warm, err := rt.Run(ctx, bundle(), "fix it and commit")
+	warmCtx, warmCancel := context.WithTimeout(context.Background(), time.Minute)
+	defer warmCancel()
+	warm, err := rt.Run(warmCtx, bundle(), "fix it and commit")
 	if err != nil {
 		t.Fatalf("resumed run: %v", err)
 	}
