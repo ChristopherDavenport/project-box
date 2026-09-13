@@ -707,6 +707,17 @@ customElements.define('box-sessions', BoxSessions);
  * verbs were on the API from the day the queue existed and on no page; the
  * room could show a person their work and not let them do it.
  */
+// exceptionCounts words the summary honestly: parked and failed are different
+// debts (one is still running, one stopped), so a queue that is all of one
+// kind should not imply the other is present at zero.
+const exceptionCounts = (items) => {
+  const parked = items.filter((i) => i.state !== 'failed').length;
+  const failed = items.length - parked;
+  if (parked && failed) return html`<span><b>${parked}</b> parked · <b>${failed}</b> failed</span>`;
+  if (failed) return html`<span><b>${failed}</b> failed</span>`;
+  return html`<span><b>${parked}</b> parked</span>`;
+};
+
 export class BoxExceptions extends LitElement {
   static styles = [base, css`
     :host { display: grid; gap: var(--jh-space-400); }
@@ -748,11 +759,11 @@ export class BoxExceptions extends LitElement {
       pending: () => html`<jh-card header-title="Exception queue" padding="medium">${loading('exceptions')}</jh-card>`,
       error: (e) => html`<jh-card header-title="Exception queue" padding="medium">${failed(e)}</jh-card>`,
       complete: (items) => html`
-        <jh-card header-title="Exception queue" header-subtitle="Parked work waiting on a person, loudest and oldest first" padding="medium">
+        <jh-card header-title="Exception queue" header-subtitle="Parked and failed work waiting on a person, loudest and oldest first" padding="medium">
           ${(items?.length ?? 0) === 0
             ? html`<p class="empty">Nothing here — the factory has nothing waiting on a person.</p>`
             : html`<div class="summary">
-                <span><b>${items.length}</b> parked</span>
+                ${exceptionCounts(items)}
                 <span class=${items.some((i) => i.overdue) ? 'overdue' : ''}><b>${items.filter((i) => i.overdue).length}</b> past the response-time objective</span>
                 <span class="helper">Retry hands the unit back to the factory. Resolve closes it with your reason on the record.</span>
               </div>`}
@@ -765,9 +776,10 @@ export class BoxExceptions extends LitElement {
     return html`
       <jh-card header-title=${title(it) || it.id} header-subtitle=${origin(it) || place(it)} padding="medium">
         <div class="meta">
+          ${stateTag(it.state ?? 'parked')}
           <jh-tag size="small" class=${SEVERITY_APPEARANCE[it.severity ?? 'medium'] ?? 'neutral'} label=${`severity ${it.severity ?? 'medium'}`}></jh-tag>
           ${it.stage ? html`<jh-tag size="small" label=${`at ${it.stage}`}></jh-tag>` : nothing}
-          <span>parked <box-when .at=${it.parked}></box-when></span>
+          <span>${it.state === 'failed' ? 'failed' : 'parked'} <box-when .at=${it.parked}></box-when></span>
           ${it.overdue ? html`<span class="overdue">past the response-time objective</span>` : nothing}
           ${it.escalations ? html`<span>escalated out of band ${it.escalations}×</span>` : nothing}
           <span>item <box-hash label="item id" .value=${it.id} href=${'/items/' + it.id} chars="18"></box-hash></span>
