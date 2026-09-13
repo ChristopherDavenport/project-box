@@ -588,3 +588,26 @@ func PatchID(ctx context.Context, dir string, base, head forge.Commit) (string, 
 	}
 	return fields[0], nil
 }
+
+// Commits lists the commits reachable from to and not from — from..to, in
+// git log's newest-first order — each line a short sha and the commit
+// subject. This is what a park note owes when a rebase-bound retry keeps a
+// commit: the landings that moved the branch, between the kept commit's old
+// base and the head it would have rebased onto, are exactly this range.
+//
+// An empty range (from == to, or a to already contained in from) yields an
+// empty slice and no error. A sha the repository does not have is an error,
+// never a silently empty list: unknown never reads as zero.
+func Commits(ctx context.Context, dir string, from, to forge.Commit) ([]string, error) {
+	out, err := run(ctx, dir, "log", "--format=%h %s", fmt.Sprintf("%s..%s", from, to))
+	if err != nil {
+		return nil, err
+	}
+	var commits []string
+	for _, line := range strings.Split(out, "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			commits = append(commits, line)
+		}
+	}
+	return commits, nil
+}

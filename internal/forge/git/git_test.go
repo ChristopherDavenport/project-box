@@ -654,6 +654,69 @@ func TestPatchIDIsStableAcrossARebaseAndDiffersForADifferentPatch(t *testing.T) 
 	}
 }
 
+func TestCommitsListsTheRangeNewestFirstWithSubjects(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	from := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nfirst\n"), 0o644)
+	mustGit(t, dir, "commit", "-am", "first landing")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\nfirst\nsecond\n"), 0o644)
+	mustGit(t, dir, "commit", "-am", "second landing")
+	to := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	got, err := Commits(ctx, dir, from, to)
+	if err != nil {
+		t.Fatalf("commits: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("commits = %v, want 2 entries", got)
+	}
+	if !strings.Contains(got[0], "second landing") {
+		t.Fatalf("commits[0] = %q, want the newest commit first", got[0])
+	}
+	if !strings.Contains(got[1], "first landing") {
+		t.Fatalf("commits[1] = %q, want the oldest commit last", got[1])
+	}
+}
+
+func TestCommitsOfAnEmptyRangeIsEmptyNotError(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	head := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	got, err := Commits(ctx, dir, head, head)
+	if err != nil {
+		t.Fatalf("commits: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("commits of an empty range = %v, want empty", got)
+	}
+}
+
+func TestCommitsOfAnUnknownShaErrors(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "commit", "-m", "base")
+	head := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	unknown := forge.Commit(strings.Repeat("a", 40))
+	if _, err := Commits(ctx, dir, unknown, head); err == nil {
+		t.Fatal("commits against an unknown sha: want error, got nil")
+	}
+}
+
 func TestCommitMessageReturnsTheFullMessage(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
