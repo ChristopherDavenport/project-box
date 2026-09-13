@@ -70,7 +70,11 @@ budget:
   # `window_reserve` below — the account's own window, the brake that has
   # ever actually bound — so the brakes above it are set to let a round
   # run, and only the runaway ceiling stays near its old size.
-  max_concurrent: 4
+  # Three since round 12 (#120): a wait holds no seat now — the pump takes
+  # the section lease and the seat together or not at all, so the spare
+  # seat round 9 added for a waiter is returned; the account window below
+  # stays the brake.
+  max_concurrent: 3
   # Five, not four, since round 6: the meter counts a start when the pump
   # acquires it, before the loop tries the section leases, so a unit that
   # only WAITED for a section kept its start and was charged a second one
@@ -81,6 +85,9 @@ budget:
   # wait on a section each a start under the double count above. Starts are
   # the brake on a runaway, and four deliberate submissions are not one.
   # Forty since round 11: see max_concurrent.
+  # Since round 12 (#120): the meter counts a start only when the builder
+  # actually starts now, not when the pump acquires it — the round 6 double
+  # count is closed, so a section wait costs neither a seat nor a start.
   max_per_window: 40
   # Twenty-five million since round 9: round 7 and round 8's three planners fell
   # in one clock hour and put it at 19.6M against fifteen, with every unit
