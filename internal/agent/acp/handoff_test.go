@@ -44,13 +44,18 @@ func prompts(t *testing.T, s *sqlite.Store, id string) []promptRecord {
 // ITEM — so what must hold is that the successor picks up where the
 // predecessor stopped, in the tree it stopped in, knowing what it knew.
 //
-// The two commits on the branch are the strongest form of that: had the
-// successor started from base, "half the widget" could not be in the history
-// of what landed.
+// The checkpoint surviving inside the one commit that lands is the strongest
+// form of that: had the successor started from base, part.txt — "half the
+// widget" — would not be in the tree of what landed at all. It does not land
+// as a commit of its own, though (issue #155): a unit lands as one commit,
+// so the tree the finishing session left is squashed onto base before the
+// gates run, and what reaches the branch is the finishing session's single
+// commit, carrying the checkpoint's content in its tree.
 func TestHandoffResumesInsteadOfRestarting(t *testing.T) {
 	s, lp, router, st, remote := rig(t, "halfway")
 	ctx := context.Background()
 	b := lp.Builder.(*Builder)
+	base := strings.TrimSpace(mustSh(t, remote, "git", "rev-parse", "refs/heads/main"))
 
 	item := runItem(t, s, lp, router, "issue-hop", "write the widget")
 	if item.State != queue.StateHandedOff {
@@ -113,13 +118,23 @@ func TestHandoffResumesInsteadOfRestarting(t *testing.T) {
 		t.Fatal("a landed item still reads as unfinished work")
 	}
 
-	// It did not redo the work: what landed carries both sessions' commits.
-	log := mustSh(t, remote, "git", "log", "--format=%s", "refs/heads/main")
-	for _, want := range []string{"half the widget", "finish the widget"} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("the landed history lost %q — the successor started over:\n%s", want, log)
-		}
+	// It did not redo the work — but it also did not land as two commits
+	// stacked on top of each other (issue #155). One commit reaches the
+	// branch, parented directly on base, carrying the finishing session's
+	// own message; the checkpoint's content survives inside its tree rather
+	// than as a commit of its own.
+	if got := strings.TrimSpace(mustSh(t, remote, "git", "rev-list", "--count", base+"..refs/heads/main")); got != "1" {
+		t.Fatalf("expected exactly one landed commit, got count=%s", got)
 	}
+	landed := strings.TrimSpace(mustSh(t, remote, "git", "rev-parse", "refs/heads/main"))
+	if msg := strings.TrimSpace(mustSh(t, remote, "git", "log", "-1", "--format=%s", landed)); msg != "finish the widget" {
+		t.Fatalf("landed message = %q, want the finishing session's own message %q", msg, "finish the widget")
+	}
+	log := mustSh(t, remote, "git", "log", "--format=%s", "refs/heads/main")
+	if strings.Contains(log, "half the widget") {
+		t.Fatalf("the checkpoint must not land as its own commit — the successor started over, or the rebuild is no longer a no-op:\n%s", log)
+	}
+	mustSh(t, remote, "git", "cat-file", "-e", landed+":part.txt")
 
 	// And it woke knowing what its predecessor knew. The notes were written at
 	// the hop rather than at settle, because this item never settled between

@@ -458,6 +458,7 @@ func (h *halfThenWhole) Build(_ context.Context, ws forge.Workspace, task string
 func TestAHandedOffItemIsRedispatched(t *testing.T) {
 	w := setup(t, capacity.Budget{MaxConcurrent: 1})
 	ctx := context.Background()
+	base := strings.TrimSpace(mustSh(t, w.remote, "git", "rev-parse", "refs/heads/main"))
 	for _, lp := range w.pump.Loops {
 		lp.Builder = &halfThenWhole{seen: map[string]bool{}}
 	}
@@ -491,11 +492,24 @@ func TestAHandedOffItemIsRedispatched(t *testing.T) {
 	if item.State != queue.StateDone {
 		t.Fatalf("a handed-off item was never picked up again: %+v", item)
 	}
+	// A unit lands as one commit (issue #155): the checkpoint the first
+	// session left and the finishing session that redispatched onto it are
+	// one attempt's tree, squashed onto base before the gates ever ran —
+	// not two commits stacked because a resumed session happened to build
+	// on top of the first one's.
+	if got := strings.TrimSpace(mustSh(t, w.remote, "git", "rev-list", "--count", base+"..refs/heads/main")); got != "1" {
+		t.Fatalf("expected exactly one landed commit, got count=%s", got)
+	}
+	landed := strings.TrimSpace(mustSh(t, w.remote, "git", "rev-parse", "refs/heads/main"))
+	if msg := strings.TrimSpace(mustSh(t, w.remote, "git", "log", "-1", "--format=%s", landed)); msg != "fix module alpha" {
+		t.Fatalf("landed message = %q, want the finishing session's own message %q", msg, "fix module alpha")
+	}
 	log := mustSh(t, w.remote, "git", "log", "--format=%s", "refs/heads/main")
-	for _, want := range []string{"half of fix module alpha", "fix module alpha"} {
-		if !strings.Contains(log, want) {
-			t.Fatalf("the landed history lost %q:\n%s", want, log)
-		}
+	if strings.Contains(log, "half of fix module alpha") {
+		t.Fatalf("the checkpoint must not land as its own commit:\n%s", log)
+	}
+	if _, err := sh(w.remote, "git", "cat-file", "-e", landed+":half.txt"); err != nil {
+		t.Fatalf("the checkpoint's content should survive inside the landed commit's tree: %v", err)
 	}
 }
 

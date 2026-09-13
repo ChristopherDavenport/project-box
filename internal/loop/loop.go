@@ -773,6 +773,21 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 				var berr error
 				head, berr = l.Builder.Build(bctx, ws, item.Task)
 				if berr == nil {
+					// A unit lands as one commit, so the attempt's tree is
+					// squashed onto base before anything downstream — the
+					// placeholder check, the gates, the record below — sees
+					// it (issue #155). base..head of one commit or fewer
+					// returns head verbatim, so a single-commit build's sha
+					// never moves.
+					squashed, sqerr := git.Squash(ctx, ws.Dir, base, head)
+					if sqerr != nil {
+						return &squashFailure{err: fmt.Errorf("squash build attempt onto %s: %w", base, sqerr)}
+					}
+					var body string
+					if squashed != head {
+						body = fmt.Sprintf(`{"squashed_from":%q}`, head)
+					}
+					head = squashed
 					// A build that got all the way to a commit did not abort,
 					// whatever an earlier attempt on this same claim said — an
 					// old abort must not go on counting against a claim that
@@ -780,7 +795,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 					// way: a run that answers is proof the window admitted it.
 					item.AbortedTries = 0
 					item.DeferredTries = 0
-					l.record(ctx, item, "built", string(head), "")
+					l.record(ctx, item, "built", string(head), body)
 				} else if bctx.Err() != nil && ctx.Err() == nil {
 					// The clock ran out, not the caller. Say so plainly: "context
 					// deadline exceeded" on a parked item tells nobody which
@@ -789,6 +804,15 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 				}
 				return berr
 			}); serr != nil {
+				var sq *squashFailure
+				if errors.As(serr, &sq) {
+					// Infrastructure, not a refusal: no built record was
+					// minted, and this fails the item outright rather than
+					// spending the attempt the way a build refusal would —
+					// the same treatment git.CommitMessage's read gets a few
+					// lines below this stage.
+					return q.Fail(ctx, item, claim, "squash: "+sq.Error())
+				}
 				var ho *Handoff
 				if errors.As(serr, &ho) {
 					return l.handOff(ctx, q, item, claim, base, ho)
@@ -1706,6 +1730,19 @@ type WindowSpent struct {
 func (w *WindowSpent) Error() string {
 	return fmt.Sprintf("account window %s spent: %s", w.Window, w.Reason)
 }
+
+// squashFailure marks a [git.Squash] error as infrastructure rather than a
+// build refusal (issue #155): git.CommitMessage's read of the same head a
+// few lines below this stage fails the item outright for the identical
+// reason, and Squash asking the same tree the same question deserves the
+// same answer, not the budget-spending park path a refusal would take.
+type squashFailure struct{ err error }
+
+// Error satisfies error.
+func (s *squashFailure) Error() string { return s.err.Error() }
+
+// Unwrap lets errors.As reach the underlying git error.
+func (s *squashFailure) Unwrap() error { return s.err }
 
 // ResolveReset resolves the reset this refusal names, falling back to the
 // meter's own held account window when the run's own report named none.

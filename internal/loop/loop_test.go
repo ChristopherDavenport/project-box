@@ -3071,3 +3071,225 @@ func TestSecondFlakeOpensAnException(t *testing.T) {
 		t.Fatalf("the second flake should open an exception naming the flake subject: %v", subs)
 	}
 }
+
+// TestARefusedAttemptAndItsFixLandAsOneCommit is issue #155's own incident,
+// reproduced: attempt 1 is refused by the gate, and attempt 2 — built on the
+// SAME workspace, on top of attempt 1's tree, the way revisingBuilder always
+// has — passes. Before git.Squash was wired in here, both attempts' commits
+// reached the remote stacked as two; the fix squashes the attempt's tree
+// onto base before the gates see it, so the commit a gate judges is byte for
+// byte the commit that lands.
+func TestARefusedAttemptAndItsFixLandAsOneCommit(t *testing.T) {
+	e := setup(t, []string{"true"})
+	e.loop.Attempts = 2
+	ctx := context.Background()
+	base := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main"))
+	var calls int
+	e.loop.Builder = &revisingBuilder{}
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{failNTimesGate{name: "build-and-test", n: &calls, failFor: 1}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-155a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-155a", "fix the thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("expected the second attempt to pass and land, got %s (%s)", item.State, item.Note)
+	}
+	if calls != 2 {
+		t.Fatalf("gate should have been asked twice, fail then pass: %d", calls)
+	}
+
+	if got := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-list", "--count", base+"..refs/heads/main")); got != "1" {
+		t.Fatalf("expected exactly one landed commit, got count=%s", got)
+	}
+	landed := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main"))
+	if parent := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", landed+"^")); parent != base {
+		t.Fatalf("landed commit's parent = %s, want the unit's base %s", parent, base)
+	}
+	wantMsg := "fix the thing (attempt 2)"
+	if msg := strings.TrimSpace(mustSh(t, e.remote, "git", "log", "-1", "--format=%s", landed)); msg != wantMsg {
+		t.Fatalf("landed message = %q, want %q", msg, wantMsg)
+	}
+
+	// A built record per attempt, each naming its own sha.
+	var builtSubjects, builtBodies []string
+	for r, err := range e.store.Log().Since(ctx, tn, "workitem/wi-155a", 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "built" {
+			builtSubjects = append(builtSubjects, r.Subject)
+			builtBodies = append(builtBodies, string(r.Body))
+		}
+	}
+	if len(builtSubjects) != 2 {
+		t.Fatalf("expected 2 built records, got %d: %v", len(builtSubjects), builtSubjects)
+	}
+	if builtSubjects[0] == builtSubjects[1] {
+		t.Fatalf("both attempts recorded the same sha: %v", builtSubjects)
+	}
+	if strings.Contains(builtBodies[0], "squashed_from") {
+		t.Fatalf("attempt 1 was a single commit, a no-op squash, so its body must carry no squashed_from, got %q", builtBodies[0])
+	}
+	if builtSubjects[1] != landed {
+		t.Fatalf("attempt 2's built record should name the squashed commit the gates judged: got %s, want %s", builtSubjects[1], landed)
+	}
+	var body struct {
+		SquashedFrom string `json:"squashed_from"`
+	}
+	if err := json.Unmarshal([]byte(builtBodies[1]), &body); err != nil {
+		t.Fatalf("attempt 2's built record body did not parse: %v", err)
+	}
+	if body.SquashedFrom == "" || body.SquashedFrom == landed {
+		t.Fatalf("attempt 2's built record body should carry the pre-squash sha, got %+v", body)
+	}
+
+	// The pass verdict's subject is the landed sha.
+	vr := gateRecordBody(t, e, "wi-155a", landed)
+	if vr.Decision != forge.DecisionPass {
+		t.Fatalf("expected the landed commit's verdict to be a pass: %+v", vr)
+	}
+}
+
+// twiceCommittingBuilder commits twice inside ONE Build call — a builder
+// that, like a real agent mid-session, checkpoints its own progress rather
+// than one attempt buying one commit. issue #155's invariant holds either
+// way: whatever a single build attempt leaves in the tree lands as one
+// commit, not as the shape of how many times it happened to run `git
+// commit`.
+type twiceCommittingBuilder struct{}
+
+func (twiceCommittingBuilder) Build(_ context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	if err := os.WriteFile(filepath.Join(ws.Dir, "first.txt"), []byte(task+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "commit", "-m", "first half of "+task); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(filepath.Join(ws.Dir, "second.txt"), []byte(task+"\n"), 0o644); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "add", "."); err != nil {
+		return "", err
+	}
+	if _, err := sh(ws.Dir, "git", "commit", "-m", scriptedCommitSubject(task)); err != nil {
+		return "", err
+	}
+	out, err := sh(ws.Dir, "git", "rev-parse", "HEAD")
+	return forge.Commit(strings.TrimSpace(out)), err
+}
+
+// TestASingleBuildThatCommitsTwiceLandsAsOneCommit is issue #155's second
+// case: nothing about a refused-then-retried CLAIM is required for the
+// squash to matter — a single attempt that checkpoints itself mid-build
+// must land as one commit too.
+func TestASingleBuildThatCommitsTwiceLandsAsOneCommit(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	base := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main"))
+	e.loop.Builder = twiceCommittingBuilder{}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-155b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-155b", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("expected the build to land, got %s (%s)", item.State, item.Note)
+	}
+
+	if got := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-list", "--count", base+"..refs/heads/main")); got != "1" {
+		t.Fatalf("a build that committed twice should still land as one commit, got count=%s", got)
+	}
+	landed := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main"))
+	if parent := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", landed+"^")); parent != base {
+		t.Fatalf("landed commit's parent = %s, want base %s", parent, base)
+	}
+	wantMsg := scriptedCommitSubject("add a thing")
+	if msg := strings.TrimSpace(mustSh(t, e.remote, "git", "log", "-1", "--format=%s", landed)); msg != wantMsg {
+		t.Fatalf("landed message = %q, want %q", msg, wantMsg)
+	}
+}
+
+// shaCapturingBuilder is scriptedBuilder that keeps the sha it returned, so
+// a test can compare it against what actually landed without reaching back
+// into a workspace the loop has already released.
+type shaCapturingBuilder struct {
+	scriptedBuilder
+	built forge.Commit
+}
+
+func (b *shaCapturingBuilder) Build(ctx context.Context, ws forge.Workspace, task string) (forge.Commit, error) {
+	sha, err := b.scriptedBuilder.Build(ctx, ws, task)
+	b.built = sha
+	return sha, err
+}
+
+// TestASingleCommitBuildIsUnchangedBySquash is issue #155's no-op guarantee:
+// base..head of one commit or fewer must return head verbatim, because the
+// loop compares kept candidates and patch-ids by sha (the Adopt/rebase carry
+// at loop.go's resume path relies on exactly this). A single-commit build's
+// sha must survive squash unmoved, and its built record's body must carry no
+// squashed_from — that field is added only when a squash actually happened.
+func TestASingleCommitBuildIsUnchangedBySquash(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	builder := &shaCapturingBuilder{}
+	e.loop.Builder = builder
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-155c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-155c", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("expected the build to land, got %s (%s)", item.State, item.Note)
+	}
+	if builder.built == "" {
+		t.Fatal("the builder never returned a commit")
+	}
+
+	var builtSubject, builtBody string
+	for r, err := range e.store.Log().Since(ctx, tn, "workitem/wi-155c", 0) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "built" {
+			builtSubject, builtBody = r.Subject, string(r.Body)
+		}
+	}
+	if builtSubject != string(builder.built) {
+		t.Fatalf("a single-commit build's sha moved: builder returned %s, built record names %s", builder.built, builtSubject)
+	}
+	if strings.Contains(builtBody, "squashed_from") {
+		t.Fatalf("a single-commit build's squash is a no-op, so its body must carry no squashed_from, got %q", builtBody)
+	}
+	landed := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main"))
+	if landed != string(builder.built) {
+		t.Fatalf("landed sha = %s, want the builder's own unmoved sha %s", landed, builder.built)
+	}
+}
