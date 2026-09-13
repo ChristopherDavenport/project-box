@@ -109,11 +109,14 @@ type Exception struct {
 // drop out — the index remembers every parking, the fold shows only what
 // still needs eyes.
 //
-// A failed item has no index/exceptions record at all: [queue.Queue.Fail]
-// settles an item straight from claimed, never through Park, so the only
-// index that ever heard of it is index/pending. This walks that listing too,
-// deduped against the same seen set, so a failed item lists exactly once and
-// a retried-then-reopened one is not double-counted between the two walks.
+// A failed item that once parked still has its index/exceptions record, so
+// the first walk finds it there and lists it under its failed timestamp. A
+// failed item that never parked — [queue.Queue.Fail] settles straight from
+// claimed — has no index/exceptions record at all, so the only index that
+// ever heard of it is index/pending; a second walk over that listing, deduped
+// against the same seen set, is its only way in. Either way a failed item
+// lists exactly once, and a retried-then-reopened one is not double-counted
+// between the two walks.
 //
 // Loudest first, then oldest. Arrival order is the order the factory would
 // take work in and exactly the wrong order for a person clearing a queue,
@@ -154,7 +157,16 @@ func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
 		if err != nil {
 			return nil, err
 		}
-		if item.State != queue.StateParked {
+		// A subject that ever parked is marked seen above whether or not it
+		// is still parked. If it later failed — parked, retried, claimed,
+		// failed — that failure has no index/exceptions record of its own,
+		// so this is the only walk that will ever see this subject: the
+		// pending walk below skips it as already seen. Accepting
+		// StateFailed here, not just StateParked, is what keeps that item
+		// from being dropped by both walks. r.parked already returns the
+		// failed timestamp when the state is failed, so Parked comes out
+		// right either way.
+		if item.State != queue.StateParked && item.State != queue.StateFailed {
 			continue
 		}
 		age := now.Sub(parked)
@@ -164,6 +176,9 @@ func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
 			Overdue:     age >= objective,
 		})
 	}
+	// A failed item that never parked — [queue.Queue.Fail] settles straight
+	// from claimed — has no index/exceptions record at all, so the walk
+	// above never encounters it. This is that item's only path in.
 	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/pending", 1) {
 		if err != nil {
 			return nil, err

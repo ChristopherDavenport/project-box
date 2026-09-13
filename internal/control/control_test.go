@@ -167,6 +167,70 @@ func TestFailedItemsListBesideParkedOnes(t *testing.T) {
 	}
 }
 
+// TestFailedItemThatOnceParkedStillLists guards the exact shape review
+// caught before this landed: a park writes an index/exceptions record, so an
+// item that later fails after being retried is already "seen" by the walk
+// over that index by the time it reaches the item's current state — and if
+// that walk requires StateParked, the item is skipped there and then skipped
+// again in the index/pending walk because it is already seen. Accepting
+// StateFailed in the first walk, not just the second, is what keeps a
+// parked-then-retried-then-failed item from vanishing off both pages.
+func TestFailedItemThatOnceParkedStillLists(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	w := submit(t, q, "wi-park-retry-fail")
+	w, lease, err := q.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Park(ctx, w, lease, queue.SeverityHigh, "gate flaked"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Retry(ctx, tn, "wi-park-retry-fail", "chris", "try again"); err != nil {
+		t.Fatal(err)
+	}
+	w, err = q.Load(ctx, tn, "wi-park-retry-fail")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, lease2, err := q.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.Fail(ctx, w, lease2, "build panicked again"); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.Exceptions(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *Exception
+	for i := range got {
+		if got[i].ID == "wi-park-retry-fail" {
+			found = &got[i]
+		}
+	}
+	if found == nil {
+		t.Fatalf("park->retry->fail item missing from Exceptions entirely: %+v", got)
+	}
+	if found.State != queue.StateFailed {
+		t.Fatalf("want StateFailed, got %v", found.State)
+	}
+	if found.Parked.IsZero() {
+		t.Fatal("clock is zero — should be when it entered failed, not the earlier park")
+	}
+
+	backlog, err := r.Backlog(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if backlog.ByState[queue.StateFailed] != 1 {
+		t.Fatalf("want 1 failed in backlog, got %d", backlog.ByState[queue.StateFailed])
+	}
+}
+
 // TestFailedCountAgreesWithBacklog: the status line's failed= count and the
 // exception queue's page must fold the same rows — a count that is a second
 // reading of the queue is a count that can disagree with it.
