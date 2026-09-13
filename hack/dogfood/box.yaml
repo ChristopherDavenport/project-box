@@ -74,7 +74,7 @@ budget:
   # the section lease and the seat together or not at all, so the spare
   # seat round 9 added for a waiter is returned; the account window below
   # stays the brake.
-  max_concurrent: 3
+  max_concurrent: 10
   # Five, not four, since round 6: the meter counts a start when the pump
   # acquires it, before the loop tries the section leases, so a unit that
   # only WAITED for a section kept its start and was charged a second one
@@ -88,7 +88,7 @@ budget:
   # Since round 12 (#120): the meter counts a start only when the builder
   # actually starts now, not when the pump acquires it — the round 6 double
   # count is closed, so a section wait costs neither a seat nor a start.
-  max_per_window: 40
+  max_per_window: 60
   # Twenty-five million since round 9: round 7 and round 8's three planners fell
   # in one clock hour and put it at 19.6M against fifteen, with every unit
   # refused until the hour turned. Volume is still the brake; a round is
@@ -96,7 +96,7 @@ budget:
   # A hundred million since round 11: round 10 read 129M across a round,
   # most of it cache reads, and paused for 84 minutes of hourly cap at 25M.
   # The window reserve below is the spend brake; this one is volume.
-  max_tokens_per_window: 100000000
+  max_tokens_per_window: 150000000
   window: 1h
   # The brake in the currency that actually bound. The account's five-hour
   # window is shared with the human on this machine and invisible to the
