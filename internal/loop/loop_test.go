@@ -2651,19 +2651,22 @@ func TestOutsideDiffRefusalIsAnnotatedWithTheFailingTest(t *testing.T) {
 }
 
 // TestRefusalInsideTheDiffNeverFlakes is issue #131's negative case: a
-// refusal naming a test in a package the diff itself touched is never a
-// flake candidate, however the gate later answers — annotating it, or
-// recording a flake from it, would blame a test for a change that touched
-// its own package.
+// refusal naming a test in a package the diff itself touched is never
+// annotated as a flake candidate, however many times it flips — annotating
+// it, or recording a flake from it, would blame a test for a change that
+// touched its own package. The gate is parked failing (failFor: 99, as in
+// TestOutsideDiffRefusalIsAnnotatedWithTheFailingTest) so the assertion is
+// on the gate record's annotation itself, not on the absence of a flake
+// record that a revising builder's ever-changing patch-id could never
+// produce regardless of whether the annotation logic is correct.
 func TestRefusalInsideTheDiffNeverFlakes(t *testing.T) {
 	e := setup(t, []string{"true"})
-	e.loop.Attempts = 2
 	ctx := context.Background()
 	var calls int
 	e.loop.Builder = &revisingSubdirBuilder{dir: "widget"}
 	e.loop.Gates = func(forge.Workspace) []forge.Gate {
 		return []forge.Gate{shapedFailGate{
-			name: "build-and-test", n: &calls, failFor: 1,
+			name: "build-and-test", n: &calls, failFor: 99,
 			test: "TestFoo", pkg: "widget",
 		}}
 	}
@@ -2679,8 +2682,16 @@ func TestRefusalInsideTheDiffNeverFlakes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loop: %v", err)
 	}
-	if item.State != queue.StateDone {
-		t.Fatalf("the second attempt should pass and land, got %s (%s)", item.State, item.Note)
+	if item.State != queue.StateParked {
+		t.Fatalf("expected parked, got %s (%s)", item.State, item.Note)
+	}
+
+	vr := gateRecordBody(t, e, "wi-flake-b", item.Built)
+	if vr.OutsideDiff {
+		t.Fatalf("a refusal naming a test inside the diff must never be annotated: %+v", vr)
+	}
+	if len(vr.FailedTests) != 0 {
+		t.Fatalf("expected no FailedTests recorded, got %v", vr.FailedTests)
 	}
 
 	if records := flakeRecords(t, e, e.repo.Name+"/widget/TestFoo"); len(records) != 0 {
