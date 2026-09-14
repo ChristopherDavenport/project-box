@@ -745,6 +745,122 @@ func TestSelfDeploySkipsWhenDiffIsEntirelyOutsideNamedSections(t *testing.T) {
 	}
 }
 
+// selfDeployedRecords decodes every self-deployed record's body on the
+// chain, in order.
+func selfDeployedRecords(t *testing.T, d *Daemon, ctx context.Context) []selfDeployedBody {
+	t.Helper()
+	var out []selfDeployedBody
+	for r, err := range d.store.Log().Since(ctx, tenant.ID("acme"), selfDeployScope, 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind != kindSelfDeployed {
+			continue
+		}
+		var body selfDeployedBody
+		if err := json.Unmarshal(r.Body, &body); err != nil {
+			t.Fatalf("decoding self-deployed record body: %v", err)
+		}
+		out = append(out, body)
+	}
+	return out
+}
+
+// TestSelfDeployRecordsLandingsFoldedIntoTheDeploy: issue #216's headline
+// case. Three commits, each touching the named deploy section, land on the
+// followed branch since the running build; one housekeeping pass folds all
+// three into a single deploy, and the self-deployed record's body names all
+// three — not just the endpoints.
+func TestSelfDeployRecordsLandingsFoldedIntoTheDeploy(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, base := deployRepo(t, "app", validBoxdMain)
+	addRepoCommit(t, appRem, "cmd/boxd/one.go", "package main\n\n// one\n")
+	addRepoCommit(t, appRem, "cmd/boxd/two.go", "package main\n\n// two\n")
+	addRepoCommit(t, appRem, "cmd/boxd/three.go", "package main\n\n// three\n")
+
+	writeSelfDeploySectionedCfg(t, cfgPath, db, root, workRem, appRem, "true", []string{"code"})
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.build = func() version.Build { return version.Build{Commit: string(base), Known: true} }
+	exe := filepath.Join(dir, "boxd-exe")
+	if err := os.WriteFile(exe, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d.exePath = func() (string, error) { return exe, nil }
+
+	err = d.selfDeployChore(ctx)
+	if !errors.Is(err, ErrSelfDeployed) {
+		t.Fatalf("selfDeployChore = %v, want ErrSelfDeployed", err)
+	}
+	deployed := selfDeployedRecords(t, d, ctx)
+	if len(deployed) != 1 {
+		t.Fatalf("self-deployed records = %+v, want exactly one", deployed)
+	}
+	if deployed[0].Why == "" {
+		t.Fatalf("self-deployed body Why is empty, want the deploy summary")
+	}
+	if len(deployed[0].Landings) != 3 {
+		t.Fatalf("self-deployed body Landings = %v, want 3 — one per folded commit", deployed[0].Landings)
+	}
+	wantSubjects := []string{"add cmd/boxd/three.go", "add cmd/boxd/two.go", "add cmd/boxd/one.go"}
+	for i, want := range wantSubjects {
+		if !strings.Contains(deployed[0].Landings[i], want) {
+			t.Fatalf("landing[%d] = %q, want it to name %q (newest first)", i, deployed[0].Landings[i], want)
+		}
+	}
+}
+
+// TestSelfDeployOmitsLandingsWhenCommitsCannotAnswer: a Commits failure —
+// here, a running build stamped with a sha the repo never produced — must
+// not block the deploy itself, and the record's landings key must be
+// ABSENT, never an empty list: unknown must not read as "nothing was
+// folded".
+func TestSelfDeployOmitsLandingsWhenCommitsCannotAnswer(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, _ := deployRepo(t, "app", validBoxdMain)
+
+	writeSelfDeployCfg(t, cfgPath, db, root, workRem, buildCmd, appRem, "true")
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	// A well-formed sha the target repo never produced: build.Commit->head
+	// is an unanswerable range, exactly the shape [git.Commits] rejects.
+	d.build = func() version.Build { return version.Build{Commit: fakeBuildCommit, Known: true} }
+	exe := filepath.Join(dir, "boxd-exe")
+	if err := os.WriteFile(exe, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d.exePath = func() (string, error) { return exe, nil }
+
+	err = d.selfDeployChore(ctx)
+	if !errors.Is(err, ErrSelfDeployed) {
+		t.Fatalf("selfDeployChore = %v, want ErrSelfDeployed — an unanswerable landings range must not block the deploy", err)
+	}
+	deployed := selfDeployedRecords(t, d, ctx)
+	if len(deployed) != 1 {
+		t.Fatalf("self-deployed records = %+v, want exactly one", deployed)
+	}
+	if deployed[0].Landings != nil {
+		t.Fatalf("self-deployed body Landings = %v, want absent (nil), not an empty list", deployed[0].Landings)
+	}
+	if deployed[0].Why == "" {
+		t.Fatalf("self-deployed body Why is empty, want the deploy summary")
+	}
+}
+
 // TestSelfDeployDeploysWhenDiffTouchesANamedSection: a diff that touches a
 // section named in self_deploy.sections deploys, same as an unsectioned
 // landing always has.

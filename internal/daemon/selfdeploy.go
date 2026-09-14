@@ -84,6 +84,19 @@ type selfDeployPassBody struct {
 	Reason      string   `json:"reason,omitempty"`
 }
 
+// selfDeployedBody is the JSON body of a self-deployed record. Why carries
+// the same endpoint summary the record's Body used to be entirely; Landings
+// is the range this pass actually folded, newest first, omitted rather than
+// empty when [Mirror.Commits] could not answer — unknown must not read as
+// "nothing was folded". No reader parses this body today (checked across
+// internal/ and web/src), so widening it here is safe: selfDeployRefused and
+// internal/control's selfDeployException fold both key on Kind/Subject, not
+// Body.
+type selfDeployedBody struct {
+	Why      string   `json:"why"`
+	Landings []string `json:"landings,omitempty"`
+}
+
 // recordSelfDeployPass appends one self-deploy-pass record for box and
 // updates the daemon's in-memory last-pass fact that /v1/status projects.
 // The Subject is "pass/<box>", NOT head: [Daemon.selfDeployRefused] and
@@ -369,9 +382,19 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 		return nil
 	}
 
-	if _, err := d.store.Log().Append(ctx, evidence.Record{
+	landings, err := d.mirror.Commits(ctx, repo, forge.Commit(build.Commit), head)
+	if err != nil {
+		// Same posture as the ChangedPaths error path above: an unanswerable
+		// range must not block the deploy itself, and Landings stays absent
+		// rather than an empty list, since it was never computed.
+		slog.Warn("self-deploy: listing landings — deploying without them", "box", t.box, "err", err)
+		landings = nil
+	}
+	if deployedBody, err := json.Marshal(selfDeployedBody{Why: why, Landings: landings}); err != nil {
+		slog.Error("self-deploy: encoding success body", "box", t.box, "err", err)
+	} else if _, err := d.store.Log().Append(ctx, evidence.Record{
 		Tenant: d.tenant, Scope: selfDeployScope, Kind: kindSelfDeployed,
-		Subject: string(head), Actor: d.cfgRunner(), Body: []byte(why),
+		Subject: string(head), Actor: d.cfgRunner(), Body: deployedBody,
 	}); err != nil {
 		slog.Error("self-deploy: recording success", "box", t.box, "err", err)
 	}
