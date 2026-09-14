@@ -112,14 +112,14 @@ func TestReloadAddsARepoWithoutRestart(t *testing.T) {
 	c := dialSocket(t, d)
 
 	// The original config works.
-	if _, err := c.OpenIngress(ctx, "shop-api", "api-1", "first change", ""); err != nil {
+	if _, err := c.OpenIngress(ctx, "shop-api", "api-1", "first change", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
 	// The not-yet-configured route is refused.
-	if _, err := c.OpenIngress(ctx, "shop-web", "web-1", "too early", ""); err == nil {
+	if _, err := c.OpenIngress(ctx, "shop-web", "web-1", "too early", "", ""); err == nil {
 		t.Fatal("unconfigured route accepted before reload")
 	}
 
@@ -133,7 +133,7 @@ func TestReloadAddsARepoWithoutRestart(t *testing.T) {
 	}
 
 	// The new route exists NOW, on the same process.
-	res, err := c.OpenIngress(ctx, "shop-web", "web-1", "change the web", "")
+	res, err := c.OpenIngress(ctx, "shop-web", "web-1", "change the web", "", "")
 	if err != nil {
 		t.Fatalf("new route after reload: %v", err)
 	}
@@ -203,7 +203,7 @@ func TestReloadRefusesIdentityChangesAndBadConfigs(t *testing.T) {
 	ts := httptest.NewServer(d.API.Handler())
 	t.Cleanup(ts.Close)
 	c, _ := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
-	if _, err := c.OpenIngress(ctx, "shop-api", "still-alive", "prove it", ""); err != nil {
+	if _, err := c.OpenIngress(ctx, "shop-api", "still-alive", "prove it", "", ""); err != nil {
 		t.Fatalf("old config not running after refused reloads: %v", err)
 	}
 	if _, err := d.Tick(ctx); err != nil {

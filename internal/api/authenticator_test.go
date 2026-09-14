@@ -73,7 +73,7 @@ func TestOpenIngressOverAPeerConnectionRecordsThePeerAsSource(t *testing.T) {
 	w := rig(t)
 	c := dialUnix(t, w, "")
 
-	res, err := c.OpenIngress(context.Background(), "issues", "peer-key", "task text", "")
+	res, err := c.OpenIngress(context.Background(), "issues", "peer-key", "task text", "", "")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -96,7 +96,7 @@ func TestOpenIngressOverATokenRecordsTheTokensNameAsSource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	res, err := c.OpenIngress(context.Background(), "issues", "token-key", "task text", "")
+	res, err := c.OpenIngress(context.Background(), "issues", "token-key", "task text", "", "")
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -143,7 +143,7 @@ func TestARouteRequiringTokenRefusesAPeerDelivery(t *testing.T) {
 	}})
 	c := dialUnix(t, w, "")
 
-	_, err := c.OpenIngress(context.Background(), "issues", "gated-key", "task text", "")
+	_, err := c.OpenIngress(context.Background(), "issues", "gated-key", "task text", "", "")
 	if err == nil {
 		t.Fatal("a peer delivery was accepted by a route requiring token")
 	}

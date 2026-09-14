@@ -215,10 +215,12 @@ func (c *Client) OriginsByPR(ctx context.Context, n string) ([]control.OriginSto
 	return out, c.do(ctx, "GET", "/v1/prs/"+n, nil, &out)
 }
 
-// OpenIngress is the delegation verb.
-func (c *Client) OpenIngress(ctx context.Context, route, key, payload, summary string) (OpenIngressResponse, error) {
+// OpenIngress is the delegation verb. priority is empty or one of the four
+// [queue.Priority] levels; an unrecognised value comes back as the server's
+// 400, said plainly rather than guessed at here.
+func (c *Client) OpenIngress(ctx context.Context, route, key, payload, summary, priority string) (OpenIngressResponse, error) {
 	var out OpenIngressResponse
-	return out, c.do(ctx, "POST", "/v1/ingress", OpenIngressRequest{Route: route, Key: key, Payload: payload, Summary: summary}, &out)
+	return out, c.do(ctx, "POST", "/v1/ingress", OpenIngressRequest{Route: route, Key: key, Payload: payload, Summary: summary, Priority: priority}, &out)
 }
 
 // Stop presses the stop button; Resume lifts it.

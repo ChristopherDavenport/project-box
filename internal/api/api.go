@@ -613,6 +613,11 @@ type OpenIngressRequest struct {
 	// absent stays absent, never defaulted to "hand", because a channel
 	// nobody declared is not known to be a hand-run one.
 	Channel string `json:"channel,omitempty"`
+	// Priority optionally claims this delivery's ordering — see
+	// [queue.Priority]. Empty inherits the box's default (normal); an
+	// unrecognised value is the caller's own error, refused before
+	// [ingress.Router.Open] ever sees it.
+	Priority string `json:"priority,omitempty"`
 }
 
 // OpenIngressResponse reports what the delivery named.
@@ -639,6 +644,12 @@ func (s *Server) openIngress(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, fmt.Sprintf("channel %q — only \"hand\" or \"script\" may be declared", req.Channel))
 		return
 	}
+	switch queue.Priority(req.Priority) {
+	case "", queue.PriorityLow, queue.PriorityNormal, queue.PriorityHigh, queue.PriorityUrgent:
+	default:
+		httpErr(w, 400, fmt.Sprintf("priority %q — the levels are low, normal, high, urgent", req.Priority))
+		return
+	}
 	route, ok := s.route(req.Route)
 	if !ok {
 		httpErrCode(w, 404, "route_not_found", fmt.Sprintf("no route %q — routes are operator configuration, not caller request", req.Route))
@@ -652,7 +663,8 @@ func (s *Server) openIngress(w http.ResponseWriter, r *http.Request) {
 	}
 	ing, opened, err := s.Router.Open(r.Context(), route, ingress.Delivery{
 		Key: req.Key, Payload: []byte(req.Payload), Title: req.Summary, Received: time.Now().UTC(),
-		Source: ingress.Source{Subject: subj.Name, Method: subj.Method, Channel: req.Channel},
+		Source:   ingress.Source{Subject: subj.Name, Method: subj.Method, Channel: req.Channel},
+		Priority: queue.Priority(req.Priority),
 	})
 	if err != nil {
 		httpErr(w, 500, err.Error())

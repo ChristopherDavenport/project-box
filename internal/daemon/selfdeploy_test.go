@@ -499,7 +499,7 @@ func TestSelfDeploySettlesBeforeCheckingAndSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.OpenIngress(ctx, "shop-work", "work-1", "slow change", ""); err != nil {
+	if _, err := c.OpenIngress(ctx, "shop-work", "work-1", "slow change", "", ""); err != nil {
 		t.Fatal(err)
 	}
 
@@ -624,7 +624,7 @@ boxes:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.OpenIngress(ctx, "shop-work", "work-1", "slow change", ""); err != nil {
+	if _, err := c.OpenIngress(ctx, "shop-work", "work-1", "slow change", "", ""); err != nil {
 		t.Fatal(err)
 	}
 

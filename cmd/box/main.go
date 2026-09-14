@@ -593,13 +593,19 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 		key := sub.String("key", "", "idempotency key for the occurrence")
 		task := sub.String("task", "", "what to do")
 		summary := sub.String("summary", "", "one-line name for the room; falls back to the task if omitted")
+		priority := sub.String("priority", "", "claim ordering: low, normal, high, urgent; empty is the box's default (normal)")
 		if err := sub.Parse(rest); err != nil {
 			return err
 		}
 		if *key == "" || *task == "" {
 			return fmt.Errorf("submit needs -key and -task")
 		}
-		res, err := c.OpenIngress(ctx, *route, *key, *task, *summary)
+		switch queue.Priority(*priority) {
+		case "", queue.PriorityLow, queue.PriorityNormal, queue.PriorityHigh, queue.PriorityUrgent:
+		default:
+			return fmt.Errorf("priority %q — the levels are low, normal, high, urgent", *priority)
+		}
+		res, err := c.OpenIngress(ctx, *route, *key, *task, *summary, *priority)
 		if err != nil {
 			return err
 		}

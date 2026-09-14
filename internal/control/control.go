@@ -394,6 +394,10 @@ type QueueEntry struct {
 	// gate's reasons, a park cause. The queue has always written it and
 	// nothing has ever shown it.
 	Note string `json:"note,omitempty"`
+	// Priority is the item's claim ordering — see [queue.Priority]. Empty on
+	// items queued before the field existed, which reads as normal via
+	// [queue.Priority.OrDefault], the same fallback [Room.Queue]'s sort uses.
+	Priority queue.Priority `json:"priority,omitempty"`
 	// Severity is how loudly a parked row is asking; empty on everything
 	// else, because only a parking has one.
 	Severity queue.Severity `json:"severity,omitempty"`
@@ -455,9 +459,11 @@ type QueueEntry struct {
 	InStateSec int64     `json:"in_state_sec"`
 }
 
-// Queue lists the work items in any of the given states, oldest first — the
-// order the factory would take them. No states means every item the tenant
-// has ever submitted.
+// Queue lists the work items in any of the given states, highest priority
+// first and oldest first within a priority — the order the factory would
+// take them, matching the pump's own claim order (see
+// [queue.Priority.Rank]). No states means every item the tenant has ever
+// submitted.
 //
 // A count is not a queue. `pending=14` was the entire visibility into a
 // morning's work: no way to see what the factory was sitting on, and no way
@@ -544,6 +550,13 @@ func (r *Room) fold(ctx context.Context, states ...queue.State) ([]QueueEntry, *
 		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Opened.Before(out[j].Opened) })
+	// Priority reorders the listing only — higher first, ties broken by the
+	// age order already in out — the same "priority, then age" key the pump
+	// claims by (internal/pump/pump.go's dispatch sort), so the queue never
+	// shows an order the factory would not actually take.
+	sort.SliceStable(out, func(i, j int) bool {
+		return out[i].Priority.OrDefault().Rank() > out[j].Priority.OrDefault().Rank()
+	})
 	return out, f, nil
 }
 
@@ -681,7 +694,7 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 	e := QueueEntry{
 		ID: w.ID, State: w.State, Box: w.Box, Repo: w.Repo, Ingress: w.Ingress,
 		Kind: w.Kind, Plan: w.Plan, Node: w.Node, Summary: w.Summary,
-		Task: clip(firstLine(w.Task), 200), Note: w.Note, Severity: w.Severity,
+		Task: clip(firstLine(w.Task), 200), Note: w.Note, Severity: w.Severity, Priority: w.Priority,
 		Head: w.Head, Built: w.Built, Seat: ran.Seat, AgentRef: ran.AgentRef,
 		Stage: stage, DependsOn: w.DependsOn,
 		Opened: opened, Changed: changed,

@@ -32,7 +32,7 @@ func TestOriginsOverTheWire(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := c.OpenIngress(ctx, "issues", "issue-187", "wire the origins door", "")
+	res, err := c.OpenIngress(ctx, "issues", "issue-187", "wire the origins door", "", "")
 	if err != nil || !res.Opened {
 		t.Fatalf("open: %+v %v", res, err)
 	}
@@ -92,7 +92,7 @@ func TestOriginsExportIsDownloadable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.OpenIngress(ctx, "issues", "issue-188", "export the story", ""); err != nil {
+	if _, err := c.OpenIngress(ctx, "issues", "issue-188", "export the story", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := w.pump.Tick(ctx); err != nil {

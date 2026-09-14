@@ -430,6 +430,47 @@ func TestQueueListsWhatACountCannot(t *testing.T) {
 	}
 }
 
+// TestQueueEntryCarriesPriorityAndOrdersByIt is issue #115 part 4: the row
+// must show the plan's claim ordering, and the listing's own doc — "the
+// order the factory would take them" — must stay true once priority exists,
+// so a younger urgent item lists ahead of an older normal one, and age still
+// breaks ties within a level, matching the pump's own claim order
+// ([queue.Priority.Rank], internal/pump/pump.go).
+func TestQueueEntryCarriesPriorityAndOrdersByIt(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	mustSubmit(t, q, queue.WorkItem{ID: "wi-older-normal", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: "t"})
+	mustSubmit(t, q, queue.WorkItem{ID: "wi-younger-urgent", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: "t", Priority: queue.PriorityUrgent})
+	mustSubmit(t, q, queue.WorkItem{ID: "wi-youngest-normal", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: "t"})
+
+	all, err := r.Queue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("want 3 items, got %d: %+v", len(all), all)
+	}
+	if all[0].ID != "wi-younger-urgent" || all[1].ID != "wi-older-normal" || all[2].ID != "wi-youngest-normal" {
+		t.Fatalf("not in priority-then-age order: %s, %s, %s", all[0].ID, all[1].ID, all[2].ID)
+	}
+	if all[0].Priority != queue.PriorityUrgent {
+		t.Fatalf("priority not carried on the row: %q", all[0].Priority)
+	}
+	if all[1].Priority != "" {
+		t.Fatalf("an item that never set priority should read empty on the row, not defaulted: %q", all[1].Priority)
+	}
+}
+
+func mustSubmit(t *testing.T, q *queue.Queue, w queue.WorkItem) queue.WorkItem {
+	t.Helper()
+	got, err := q.Submit(context.Background(), w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
 // TestQueueShowsStageAndWhatBlocks: the room could show what was stuck and
 // what had landed, and nothing in between. A claimed item read "state=claimed"
 // and nothing else, and a blocked one never named what it was blocked on —

@@ -32,7 +32,7 @@ func TestProvenanceChainAndExport(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := c.OpenIngress(ctx, "issues", "issue-16", "ship the chain view", "")
+	res, err := c.OpenIngress(ctx, "issues", "issue-16", "ship the chain view", "", "")
 	if err != nil || !res.Opened {
 		t.Fatalf("open: %+v %v", res, err)
 	}
