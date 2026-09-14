@@ -85,9 +85,10 @@ func Claimable(s State) bool {
 // parked it — the only place that knows whether a failing unit test and a
 // revoked credential are the same emergency.
 //
-// It is not a priority: nothing claims work in severity order. It exists so
-// the control room can decide who has to be told and how soon, which is the
-// difference between an exception queue and a list nobody opens.
+// It is not a priority: nothing claims work in severity order — see
+// [Priority] for the type that does. Severity exists so the control room can
+// decide who has to be told and how soon, which is the difference between an
+// exception queue and a list nobody opens.
 type Severity string
 
 const (
@@ -132,6 +133,55 @@ func (s Severity) OrDefault() Severity {
 
 // AtLeast reports whether s is at least as loud as other.
 func (s Severity) AtLeast(other Severity) bool { return s.Rank() >= other.Rank() }
+
+// Priority is what the pump claims work in order of, set by whatever plans
+// the unit — the only place that knows whether this change can wait behind
+// the rest of the backlog or not.
+//
+// It is not a severity: nothing here decides who gets told about a parking;
+// see [Severity] for that.
+type Priority string
+
+const (
+	// PriorityLow is work with no claim on going first: it runs when
+	// nothing more pressing is waiting.
+	PriorityLow Priority = "low"
+	// PriorityNormal is the default. Four levels split evenly in half, so
+	// there is no exact middle; normal is the lower of the two middle
+	// levels, the same choice Beads makes for its P2 — a plan that says
+	// nothing has said "ordinary", not "first" or "last".
+	PriorityNormal Priority = "normal"
+	// PriorityHigh is work that should go ahead of the ordinary backlog,
+	// short of displacing what is already flagged urgent.
+	PriorityHigh Priority = "high"
+	// PriorityUrgent is work that goes first, short of the fairness bound
+	// #109 already gives an oldest starved waiter — urgent reorders
+	// dispatch, it does not suspend that bound.
+	PriorityUrgent Priority = "urgent"
+)
+
+// Rank orders priorities. Anything unrecognised ranks with [PriorityNormal];
+// see that constant for why an unknown value is not the lowest one.
+func (p Priority) Rank() int {
+	switch p {
+	case PriorityLow:
+		return 1
+	case PriorityHigh:
+		return 3
+	case PriorityUrgent:
+		return 4
+	}
+	return 2
+}
+
+// OrDefault resolves an unset or unrecognised priority to [PriorityNormal].
+func (p Priority) OrDefault() Priority {
+	switch p {
+	case PriorityLow, PriorityNormal, PriorityHigh, PriorityUrgent:
+		return p
+	}
+	return PriorityNormal
+}
 
 // WorkItem is one claimable unit of work.
 type WorkItem struct {
@@ -212,8 +262,13 @@ type WorkItem struct {
 	// many builds this item's claim may spend on a gate or review refusal
 	// before it parks — see [loop.Loop.Attempts]. Zero inherits the repo's
 	// or box's default.
-	Attempts int    `json:"attempts,omitempty"`
-	Task     string `json:"task"`
+	Attempts int `json:"attempts,omitempty"`
+	// Priority is the plan's claim ordering for this unit — see [Priority].
+	// Unset resolves to [PriorityNormal] at read time via OrDefault, the
+	// same way an unset [Severity] resolves: an item queued before this
+	// field existed reads as normal, not as the lowest priority there is.
+	Priority Priority `json:"priority,omitempty"`
+	Task     string   `json:"task"`
 	// Summary is the one line the room shows for this item, distinct from
 	// Task: the task is the full paragraph an agent needs, and showing that
 	// paragraph as the item's name was the gap this field closes. Empty on

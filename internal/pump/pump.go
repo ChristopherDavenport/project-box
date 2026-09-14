@@ -425,7 +425,7 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 
 	heads := map[int]bool{}
 	for _, k := range groupOrder {
-		idxs := groups[k] // submission order — oldest first, which is the tiebreak
+		idxs := groups[k] // priority-then-age — the sort Drain applies before calling this
 
 		landHead := -1
 		for _, i := range idxs {
@@ -594,6 +594,14 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		dcs[i].polled = lp.Poll(ctx, item)
 		dcs[i].holder = lp.HoldsSection(ctx, item)
 	}
+	// Priority reorders dispatch only — higher first, ties broken by the
+	// existing oldest-first record order (SortStableFunc), so this is
+	// "priority, then age", never a second seat or a change to leasing.
+	// fairSectionOrder's classes still outrank it: a starved head goes
+	// ahead of a newer urgent candidate exactly as #109 requires.
+	slices.SortStableFunc(dcs, func(a, b drainCandidate) int {
+		return b.item.Priority.OrDefault().Rank() - a.item.Priority.OrDefault().Rank()
+	})
 	dcs = p.fairSectionOrder(dcs)
 
 	// firstErr accumulates only this pass's own dispatch-time errors — the

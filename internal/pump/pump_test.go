@@ -1040,3 +1040,129 @@ func TestAHolderIsNeverOutrankedByALandReadyNonHolder(t *testing.T) {
 		t.Fatalf("the land-ready non-holder's wait note should price the rebase owed and name the holder: %s", ready.Note)
 	}
 }
+
+// TestAYoungerUrgentCandidateDispatchesBeforeAnOlderDefaultOne is issue
+// #115's core: priority reorders dispatch. The older item is submitted
+// first and never sets Priority — it reads as [queue.PriorityNormal] — and
+// the younger, urgent one still claims the one seat this tick, leaving the
+// older for the next.
+func TestAYoungerUrgentCandidateDispatchesBeforeAnOlderDefaultOne(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 1})
+	ctx := context.Background()
+	w.sectionedRepo()
+
+	older := w.submitItem(t, "older-1", "fix module older", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+	})
+	younger := w.submitItem(t, "younger-1", "fix module younger", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"web"}
+		wi.Priority = queue.PriorityUrgent
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
+	older, err := w.q.Load(ctx, tn, older.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	younger, err = w.q.Load(ctx, tn, younger.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if younger.State != queue.StateDone {
+		t.Fatalf("the urgent candidate should claim the one seat ahead of the older default one, got %s: %s", younger.State, younger.Note)
+	}
+	if older.State != queue.StatePending {
+		t.Fatalf("the older default-priority candidate should be left for the next tick, got %s: %s", older.State, older.Note)
+	}
+}
+
+// TestEqualPrioritiesKeepSubmissionOrder: the priority sort is stable, so
+// with nothing to break the tie the older candidate still goes first,
+// exactly as it did before priority existed.
+func TestEqualPrioritiesKeepSubmissionOrder(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 1})
+	ctx := context.Background()
+	w.sectionedRepo()
+
+	older := w.submitItem(t, "older-1", "fix module older", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.Priority = queue.PriorityHigh
+	})
+	younger := w.submitItem(t, "younger-1", "fix module younger", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"web"}
+		wi.Priority = queue.PriorityHigh
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
+	older, err := w.q.Load(ctx, tn, older.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	younger, err = w.q.Load(ctx, tn, younger.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if older.State != queue.StateDone {
+		t.Fatalf("equal priority should keep the older candidate first, got %s: %s", older.State, older.Note)
+	}
+	if younger.State != queue.StatePending {
+		t.Fatalf("the younger equal-priority candidate should be left for the next tick, got %s: %s", younger.State, younger.Note)
+	}
+}
+
+// TestAStarvedHeadStillGoesAheadOfANewerUrgentCandidate is issue #115's
+// #109 guard: fairSectionOrder's classes still outrank the priority sort.
+// A section head chosen for having reached the starve bound goes first
+// regardless of a newer urgent contender for the same section — priority
+// reorders dispatch, it does not suspend the starvation bound.
+func TestAStarvedHeadStillGoesAheadOfANewerUrgentCandidate(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	starved := w.submitItem(t, "starved-1", "fix module starved", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.SectionWaits = 3
+	})
+	urgent := w.submitItem(t, "urgent-1", "fix module urgent", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.Priority = queue.PriorityUrgent
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
+	starved, err := w.q.Load(ctx, tn, starved.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	urgent, err = w.q.Load(ctx, tn, urgent.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if starved.State != queue.StateDone {
+		t.Fatalf("the starved head should dispatch despite the newer urgent candidate, got %s: %s", starved.State, starved.Note)
+	}
+	if urgent.State != queue.StateWaiting {
+		t.Fatalf("the urgent candidate should still yield to the starved head, got %s: %s", urgent.State, urgent.Note)
+	}
+	for _, want := range []string{"reserved for " + starved.ID, "next in line"} {
+		if !strings.Contains(urgent.Note, want) {
+			t.Errorf("the urgent candidate's wait does not say %q: %s", want, urgent.Note)
+		}
+	}
+}
