@@ -199,6 +199,14 @@ boxes:
       - name: issue
         decompose: {decomposer: planner}
         completion: {graph: true}
+      # flake, issue #275: deliberately NOT the planner-decomposed issue
+      # kind above. A flake remediation is one deterministic unit — decompose
+      # defaults to identity (one node) and completion is the graph settling
+      # that one node done — and must not ride a judgement that could route
+      # it out of the flaky section the planner never consulted.
+      - name: flake
+        decompose: {decomposer: identity}
+        completion: {graph: true}
     # What the builders load. Before this block existed the answer was
     # "whatever ~/.claude has enabled", decided by nobody and recorded
     # nowhere: a probe of this very box found 44 plugins, 79 skills, three
@@ -245,6 +253,15 @@ boxes:
         role: service
         lane: gated
         route: issues
+        # flake_route, issue #275: where the loop opens work through when a
+        # commit's in-loop check went green and its independent CI came back
+        # red then green for that same commit — a proven flake, not a
+        # correctness regression the gate caught. The route's key folds the
+        # package, the test, and the commit sha (loop.OpenFlake), so every
+        # later observation of the same flake at the same commit hashes to
+        # the same work item instead of opening a new one each time CI
+        # reruns it.
+        flake_route: {opens: flake, sections: [flaky]}
         check: ./hack/check.sh
         # Issue #22's lander, turned on for the box that builds this
         # repository: the factory opens a real GitHub pull request against
@@ -317,6 +334,39 @@ boxes:
             purpose: the design record and the briefs
             paths: [docs, README.md, CLAUDE.md]
             check: "true"
+          # flaky, issue #275's final piece: remediation of a test this box
+          # has PROVEN flaky (loop.proveFlake — an in-loop check green, an
+          # independent CI run red then green, on the same commit), summoned
+          # through flake_route below. A fix runs as its own class of work
+          # under its own lease, so it never contends with a feature section
+          # for a builder's turn — and a flaky test is fixed, never skipped,
+          # tagged, or quarantined without an operator saying so (see
+          # loop.OpenFlake's task text).
+          #
+          # Declared LAST, deliberately: sectionOfPath
+          # (internal/loop/loop.go, internal/daemon/selfdeploy.go) answers
+          # the FIRST declared section whose paths cover a changed path, so
+          # every section above keeps classifying its own paths exactly as
+          # it did before this one existed — flaky only ever catches what
+          # nothing earlier claimed.
+          #
+          # paths: internal (a prefix, not one package) is what actually
+          # moves: eight internal/ trees have no earlier section and were
+          # falling through to whole-repository scope — admission, approval,
+          # authz, gate, provision, runlog, telemetry, tenant — and flaky now
+          # claims all eight for path classification, not only approval and
+          # runlog. web/src documents where this repo's JS/TS tests live,
+          # but the room section above (paths: [web]) already claims
+          # everything under web/ first, so web/src changes no
+          # classification; it is here because a section's paths must be
+          # non-empty and honest about what it covers.
+          - name: flaky
+            purpose: remediation of tests this box has proven flaky, under their own lease
+            paths: [internal, web/src]
+            # The full suite, not one package's: a flake fix proves against
+            # everything the same way the gate that will judge its landing
+            # does.
+            check: ./hack/check.sh
     # Self-deploy, turned on since round 12: it waited "until one landing has
     # been watched" (#64, round 10), and twenty-five have been watched since
     # the 2026-09-12 16:41 restart while the box ran none of them — the wait
@@ -332,6 +382,14 @@ boxes:
     # per housekeeping pass, since #216 folds any number of watched landings
     # into a single cumulative build.Commit->head comparison rather than
     # firing once per landing.
+    # flaky since #275: it now claims eight internal/ trees (admission,
+    # approval, authz, gate, provision, runlog, telemetry, tenant — see the
+    # flaky section's own comment above) that no earlier section covered, so
+    # a landing touching them keeps warranting a deploy exactly as it did
+    # when they were unsectioned and selfDeploySkippable refused to skip
+    # anything it couldn't classify. TestSelfDeployWarrantsEverySectionButDocs
+    # (#210) still holds: every declared section but docs must appear here,
+    # and it does.
     self_deploy:
       from: main
-      sections: [daemon, loop, agent, forge, evidence, intake, capacity, room, deploy]
+      sections: [daemon, loop, agent, forge, evidence, intake, capacity, room, deploy, flaky]
