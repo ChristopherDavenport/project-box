@@ -190,6 +190,13 @@ type Daemon struct {
 	// assemble reads it off d rather than constructing a fresh one — so a
 	// reload never resets the wall/mono baseline mid-suspend-detection.
 	suspend *loop.SuspendWatch
+	// pulse is the one [loop.Heartbeat] this daemon owns, threaded into
+	// every [loop.Loop] assemble builds so d.progress's per-frame call
+	// renews every in-flight run's leases the same way, regardless of which
+	// box or repo it belongs to. Survives Reload — assemble reads it off d
+	// rather than constructing a fresh one — so a reload never resets a
+	// run's renewal state mid-run (issue #211).
+	pulse *loop.Heartbeat
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -199,8 +206,10 @@ type Daemon struct {
 // unboundedClaimTTL is the claim lease TTL when build_timeout declares no
 // bound. A lease has to be finite even when a build does not — Claim and
 // Retain (internal/queue) have no way to express "forever" — so this is a
-// generous static margin standing in until #211's renew-on-progress lets a
-// lease extend itself with the run instead of being sized up front.
+// generous static margin. Issue #211's renew-on-progress (d.pulse, driven
+// from d.progress) now extends a run's claim on every frame it streams, but
+// a gate.Command check gate streams no frames while its subprocess runs, so
+// a run's silent stretches still lean on this margin rather than on Pulse.
 const unboundedClaimTTL = 24 * time.Hour
 
 // claimTTL derives the claim lease TTL from the same build_timeout the loop
@@ -258,6 +267,7 @@ func New(path string) (*Daemon, error) {
 		build:      version.ThisBuild,
 		bootIDPath: defaultBootIDPath,
 		suspend:    &loop.SuspendWatch{},
+		pulse:      &loop.Heartbeat{},
 		router:     router,
 		poller: &ingress.Poller{
 			Lister: newGHIssueLister(ghAuthToken), Router: router, Log: s.Log(),
@@ -495,7 +505,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			reviews := r.Review == boxcfg.ReviewJudgement
 			lp := &loop.Loop{
 				Store: d.store, Runner: d.cfgRunner(), Mirror: d.mirror, Repo: repo, Branch: r.Branch,
-				Lane: forge.Lane(r.Lane), Meter: d.meter, Widen: bx.Widen, Suspend: d.suspend,
+				Lane: forge.Lane(r.Lane), Meter: d.meter, Widen: bx.Widen, Suspend: d.suspend, Pulse: d.pulse,
 				Gates: func(ws forge.Workspace) []forge.Gate {
 					gates := []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
 						Commands: [][]string{{"sh", "-c", check}}}}
@@ -912,6 +922,10 @@ func (d *Daemon) progress(ctx context.Context, run string, u acp.Update) {
 	}); err != nil {
 		slog.Warn("run log", "run", run, "err", err)
 	}
+	// A pulse never fails or delays the frame: progress is telemetry, and
+	// d.pulse's own logging covers renewal trouble (issue #211). A planner
+	// run's id was never Tracked, so this is a no-op for it by construction.
+	d.pulse.Pulse(ctx, run)
 }
 
 // runsKeepFor is the run log's age bound under the config in force; zero
