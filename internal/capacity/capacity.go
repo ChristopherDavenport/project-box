@@ -290,6 +290,18 @@ type Meter struct {
 	Tenant tenant.ID
 	Actor  string
 	Budget Budget
+	// Account names the credential this meter accounts — the runner's
+	// declared identity in the box configuration's runners list, not
+	// Budget.Credential (which stays the KIND, plan or key, of whichever
+	// account this is). Empty means the unnamed default account: today's
+	// single meter, and the one every pre-#217 record already belongs to.
+	//
+	// Issue #217 is runners with a credential each: one store now holds
+	// several accounts' worth of charges, starts and refusals on the same
+	// control/capacity scope, and a Meter must charge and [Meter.Restore]
+	// only its own — see the account key [Meter.record] adds to every
+	// record and the filter [Meter.Restore] applies when reading them back.
+	Account string
 	// Now is injectable for tests; nil means time.Now.
 	Now func() time.Time
 
@@ -376,6 +388,14 @@ func (m *Meter) Restore(ctx context.Context) error {
 	for rec, err := range m.Store.Log().Since(ctx, m.Tenant, "control/capacity", 1) {
 		if err != nil {
 			return err
+		}
+		// A record with no account key belongs to the unnamed default
+		// account ONLY, never to a named one — and a named account's
+		// records never fold into the default. Unknown never reads as
+		// belonging to everyone; that is how two Meters over one store
+		// would fold each other's facts.
+		if recordAccount(rec.Body) != m.Account {
+			continue
 		}
 		if rec.At.Before(start) {
 			// Outside the meter's window, but the account's window is its
@@ -761,7 +781,11 @@ func (m *Meter) accrueBoot(s Spend) {
 // whenever that number is not zero, and a spend figure shown without it would
 // be the most reassuring thing on the screen and the least true.
 type Report struct {
-	Tokens int64 `json:"tokens"`
+	// Account names which credential this report is, matching [Meter.Account]
+	// — empty for the unnamed default account. Additive so /v1/status can
+	// tell several runners' accounts apart once more than one is configured.
+	Account string `json:"account,omitempty"`
+	Tokens  int64  `json:"tokens"`
 	// Input, Output, CacheRead and CacheWrite are the same tokens by kind:
 	// the total says how much went through, and only the split says what it
 	// was worth. A window that is 90% cache reads and one that is 90% output
@@ -888,7 +912,8 @@ func (m *Meter) Report() Report {
 		maxJ = 1
 	}
 	return Report{
-		Tokens: m.spent, Unmetered: m.unmetered, Aborted: m.aborted, MaxTokens: m.Budget.MaxTokensPerWindow,
+		Account: m.Account,
+		Tokens:  m.spent, Unmetered: m.unmetered, Aborted: m.aborted, MaxTokens: m.Budget.MaxTokensPerWindow,
 		Input: m.split.Input, Output: m.split.Output,
 		CacheRead: m.split.CacheRead, CacheWrite: m.split.CacheWrite,
 		CostMicros: m.cost, MaxCostMicros: m.Budget.MaxCostPerWindow, Unpriced: m.unpriced,
@@ -950,6 +975,37 @@ func (m *Meter) resetWindow(start time.Time) {
 func (m *Meter) record(ctx context.Context, kind, subject, body string) {
 	m.Store.Log().Append(ctx, evidence.Record{
 		Tenant: m.Tenant, Scope: "control/capacity", Kind: kind, Subject: subject,
-		Actor: m.Actor, Body: []byte(body),
+		Actor: m.Actor, Body: []byte(m.withAccount(body)),
 	})
+}
+
+// withAccount adds this meter's account as an additive JSON key onto a
+// hand-formatted record body, when the account is named. Every caller of
+// [Meter.record] hands it a complete JSON object, so splicing the key in
+// after the opening brace keeps the rest of the body — and every existing
+// reader of it — untouched; a round trip through json.Marshal would risk
+// reformatting the numbers records already carry (see [Limit], whose
+// Utilization a marshal-remarshal could rewrite).
+func (m *Meter) withAccount(body string) string {
+	if m.Account == "" {
+		return body
+	}
+	account, err := json.Marshal(m.Account)
+	if err != nil {
+		return body
+	}
+	return `{"account":` + string(account) + `,` + body[1:]
+}
+
+// recordAccount reads the account key a record was written under, empty
+// when absent — the unnamed default account, never guessed as belonging to
+// whichever named account happens to be restoring.
+func recordAccount(body []byte) string {
+	var meta struct {
+		Account string `json:"account,omitempty"`
+	}
+	if json.Unmarshal(body, &meta) != nil {
+		return ""
+	}
+	return meta.Account
 }
