@@ -162,3 +162,232 @@ boxes:
 		t.Fatal("a contract path that does not resolve was accepted")
 	}
 }
+
+// TestRouteSectionsAndOpensParse: a route can narrow which sections its work
+// inherits, and name a non-default kind it opens — both riding the mapping
+// form new fields always take.
+func TestRouteSectionsAndOpensParse(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    kinds:
+      - name: hotfix
+        decompose: {decomposer: identity}
+        completion: {graph: true}
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        route: {name: issues, sections: [daemon], opens: hotfix}
+        sections:
+          - name: daemon
+            purpose: the daemon
+            paths: [internal/daemon]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Boxes[0].Repos[0].Route
+	if len(r.Sections) != 1 || r.Sections[0] != "daemon" {
+		t.Fatalf("route.sections = %v, want [daemon]", r.Sections)
+	}
+	if r.Opens != "hotfix" {
+		t.Fatalf("route.opens = %q, want hotfix", r.Opens)
+	}
+}
+
+// TestRouteSectionsNamingAnUndeclaredSectionIsRefused: mirrors
+// self_deploy.sections' own refusal — a route cannot narrow to a section the
+// repo never declared.
+func TestRouteSectionsNamingAnUndeclaredSectionIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        route: {name: issues, sections: [nope]}
+`))
+	if err == nil {
+		t.Fatal("a route naming an undeclared section was accepted")
+	}
+}
+
+// TestRouteOpensAnUnrecognisedKindIsRefused: opens must name a kind this box
+// actually declares, or one of the seeds — never defaulted past silently.
+func TestRouteOpensAnUnrecognisedKindIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        route: {name: issues, opens: nonesuch}
+`))
+	if err == nil {
+		t.Fatal("a route naming an unrecognised kind was accepted")
+	}
+}
+
+// TestRouteOpensASeedKindIsAccepted: the three seeds are always valid opens
+// targets even when the box declares no kinds of its own.
+func TestRouteOpensASeedKindIsAccepted(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        route: {name: issues, opens: incident}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Boxes[0].Repos[0].Route.Opens != "incident" {
+		t.Fatalf("route.opens = %q, want incident", c.Boxes[0].Repos[0].Route.Opens)
+	}
+}
+
+// TestFlakeRouteParsesScalarAndMapping: flake_route is the same [Route]
+// type, so it takes both the bare-name scalar and the full mapping form.
+func TestFlakeRouteParsesScalarAndMapping(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        flake_route: flakes
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Repos[0].FlakeRoute; got == nil || got.Name != "flakes" {
+		t.Fatalf("flake_route = %+v, want name flakes", got)
+	}
+
+	c, err = Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        flake_route: {name: app-flakes, label: flaky}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Boxes[0].Repos[0].FlakeRoute; got == nil || got.Name != "app-flakes" || got.Label != "flaky" {
+		t.Fatalf("flake_route = %+v, want name app-flakes label flaky", got)
+	}
+}
+
+// TestFlakeRouteAbsentStaysNil: no flake_route configured must not
+// materialize a route at all — assemble reads this nil to decide whether
+// flake summoning is wired at all.
+func TestFlakeRouteAbsentStaysNil(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Boxes[0].Repos[0].FlakeRoute != nil {
+		t.Fatalf("flake_route = %+v, want nil when not configured", c.Boxes[0].Repos[0].FlakeRoute)
+	}
+}
+
+// TestFlakeRouteEmptyNameDefaultsWithADistinctSuffix: an empty name defaults
+// the same way Route's own does, under a suffix that can never collide with
+// the repo's primary route.
+func TestFlakeRouteEmptyNameDefaultsWithADistinctSuffix(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        flake_route: {label: flaky}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := c.Boxes[0].Repos[0]
+	if r.Route.Name != "shop-app" {
+		t.Fatalf("route.name = %q, want shop-app", r.Route.Name)
+	}
+	if r.FlakeRoute.Name != "shop-app-flakes" {
+		t.Fatalf("flake_route.name = %q, want shop-app-flakes", r.FlakeRoute.Name)
+	}
+}
+
+// TestFlakeRouteNameCollisionIsRefused: flake_route's name joins the same
+// route-name uniqueness check every other route obeys.
+func TestFlakeRouteNameCollisionIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        route: issues
+        flake_route: issues
+`))
+	if err == nil {
+		t.Fatal("a flake_route colliding with another route's name was accepted")
+	}
+}
+
+// TestFlakeRouteSectionsAndOpensValidateTheSameWay: flake_route is the same
+// Route type, so it is refused for the same unknown-section and
+// unrecognised-kind reasons the primary route is.
+func TestFlakeRouteSectionsAndOpensValidateTheSameWay(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        flake_route: {sections: [nope]}
+`))
+	if err == nil {
+		t.Fatal("a flake_route naming an undeclared section was accepted")
+	}
+
+	_, err = Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+        flake_route: {opens: nonesuch}
+`))
+	if err == nil {
+		t.Fatal("a flake_route naming an unrecognised kind was accepted")
+	}
+}

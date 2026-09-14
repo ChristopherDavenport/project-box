@@ -639,14 +639,25 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			} else {
 				lp.Builder = ShellBuilder{Cmd: r.Build}
 			}
-			loops[bx.Name+"/"+r.Name] = lp
 			routes[r.Route.Name] = ingress.Route{
-				Name: r.Route.Name, Kind: ingress.RouteIssue, Opens: kind.SeedIssue,
+				Name: r.Route.Name, Kind: ingress.RouteIssue, Opens: routeOpens(r.Route),
 				Box: bx.Name, Repo: r.Name, Requester: cfg.Runner,
 				Poll: r.Route.PollDuration(), Label: r.Route.Label, Contract: r.Route.Contract,
-				Require: r.Route.Require,
+				Require: r.Route.Require, Sections: r.Route.Sections,
 			}
 			remotes[r.Route.Name] = r.Remote
+			if r.FlakeRoute != nil {
+				flakeRoute := ingress.Route{
+					Name: r.FlakeRoute.Name, Kind: ingress.RouteIssue, Opens: routeOpens(*r.FlakeRoute),
+					Box: bx.Name, Repo: r.Name, Requester: cfg.Runner,
+					Poll: r.FlakeRoute.PollDuration(), Label: r.FlakeRoute.Label, Contract: r.FlakeRoute.Contract,
+					Require: r.FlakeRoute.Require, Sections: r.FlakeRoute.Sections,
+				}
+				routes[flakeRoute.Name] = flakeRoute
+				remotes[flakeRoute.Name] = r.Remote
+				lp.Flaky = loop.OpenFlake(d.router, flakeRoute, 0)
+			}
+			loops[bx.Name+"/"+r.Name] = lp
 		}
 		if agentBuilder == nil {
 			d.planners.Delete(bx.Name)
@@ -678,6 +689,17 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 		replanner = boxPlanner
 	}
 	return loops, routes, remotes, landPR, kinds, replanner, nil
+}
+
+// routeOpens resolves a configured route's opens into the ingress kind it
+// produces. Empty keeps today's whole meaning — every route opens an issue —
+// validated at boxcfg.Load, so a non-empty value here is already known to
+// name a kind the box declares or a seed.
+func routeOpens(r boxcfg.Route) ingress.Kind {
+	if r.Opens == "" {
+		return kind.SeedIssue
+	}
+	return ingress.Kind(r.Opens)
 }
 
 // declarations resolves one box's kind declarations: the seeds, then the

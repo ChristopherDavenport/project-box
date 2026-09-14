@@ -287,6 +287,17 @@ type Route struct {
 	// otherwise, the same half-configured doctrine as a brake with no
 	// credential named.
 	Require []string `yaml:"require"`
+	// Sections narrows what this route declares work admitted through it
+	// runs in — see [ingress.Route.Sections]. Every name must be one of the
+	// repo's own declared sections; validate refuses an unknown one rather
+	// than silently opening work nowhere.
+	Sections []string `yaml:"sections"`
+	// Opens names the ingress kind this route produces — see
+	// [ingress.Route.Opens]. Empty keeps today's whole meaning: an issue,
+	// kind.SeedIssue. Set, it must name a kind this box actually declares
+	// (or one of the three seeds); an unrecognised kind is refused, never
+	// defaulted to the seed silently.
+	Opens string `yaml:"opens"`
 }
 
 // UnmarshalYAML accepts a scalar (a bare route name, polling off — today's
@@ -775,9 +786,16 @@ type Repo struct {
 	Lane   string `yaml:"lane"`
 	// Route is the ingress route that targets this repo; defaults to
 	// "<box>-<name>" with polling off. See [Route].
-	Route Route  `yaml:"route"`
-	Build string `yaml:"build"`
-	Check string `yaml:"check"`
+	Route Route `yaml:"route"`
+	// FlakeRoute is the route this repo's proven CI flakes are summoned
+	// through — see loop.OpenFlake. Nil (the default) leaves flake
+	// summoning off entirely: a proven flake is still recorded, but nobody
+	// is opened to fix it. Set, an empty name defaults to
+	// "<box>-<name>-flakes", the same treatment Route's own name gets,
+	// under a distinct suffix so the two never collide.
+	FlakeRoute *Route `yaml:"flake_route"`
+	Build      string `yaml:"build"`
+	Check      string `yaml:"check"`
 	// Land selects how a build reaches the base branch. "" (the default)
 	// pushes the built commit directly with the fenced force-with-lease
 	// push, today's behavior. "pull_request" opens or reuses a GitHub pull
@@ -1068,6 +1086,15 @@ func (c *Config) validate() error {
 				return fmt.Errorf("boxcfg: route %q defined by both %s and %s/%s — route names are the API's vocabulary and must be unique", r.Route.Name, prev, bx.Name, r.Name)
 			}
 			seenRoutes[r.Route.Name] = bx.Name + "/" + r.Name
+			if r.FlakeRoute != nil {
+				if r.FlakeRoute.Name == "" {
+					r.FlakeRoute.Name = bx.Name + "-" + r.Name + "-flakes"
+				}
+				if prev, dup := seenRoutes[r.FlakeRoute.Name]; dup {
+					return fmt.Errorf("boxcfg: route %q defined by both %s and %s/%s — route names are the API's vocabulary and must be unique", r.FlakeRoute.Name, prev, bx.Name, r.Name)
+				}
+				seenRoutes[r.FlakeRoute.Name] = bx.Name + "/" + r.Name
+			}
 			if r.Route.Poll != "" {
 				if _, err := time.ParseDuration(r.Route.Poll); err != nil {
 					return fmt.Errorf("boxcfg: box %s repo %s: route.poll: %w", bx.Name, r.Name, err)
@@ -1143,6 +1170,14 @@ func (c *Config) validate() error {
 			}
 			if err := validateSections(bx, r); err != nil {
 				return err
+			}
+			if err := validateRouteSectionsAndOpens(bx, r, &r.Route, "route"); err != nil {
+				return err
+			}
+			if r.FlakeRoute != nil {
+				if err := validateRouteSectionsAndOpens(bx, r, r.FlakeRoute, "flake_route"); err != nil {
+					return err
+				}
 			}
 		}
 		if err := validateSelfDeploy(bx, explicitCheck); err != nil {
@@ -1341,6 +1376,37 @@ func validateSections(bx *Box, r *Repo) error {
 		}
 	}
 	return nil
+}
+
+// validateRouteSectionsAndOpens refuses a route naming a section this repo
+// never declared, or a kind this box never declared and no seed names —
+// mirrors [validateSelfDeploy]'s unknown-section refusal, and the same
+// unknown-never-reads-as-zero doctrine applied to which kind a route opens.
+// label distinguishes route from flake_route in the error text; both share
+// this one check since both are the same [Route] type.
+func validateRouteSectionsAndOpens(bx *Box, r *Repo, route *Route, label string) error {
+	declared := map[string]bool{}
+	for _, s := range r.Sections {
+		declared[s.Name] = true
+	}
+	for _, name := range route.Sections {
+		if !declared[name] {
+			return fmt.Errorf("boxcfg: box %s repo %s: %s.sections names %q, which is not a declared section of repo %s", bx.Name, r.Name, label, name, r.Name)
+		}
+	}
+	if route.Opens == "" {
+		return nil
+	}
+	switch route.Opens {
+	case kind.SeedIssue, kind.SeedCampaign, kind.SeedIncident:
+		return nil
+	}
+	for _, k := range bx.Kinds {
+		if k.Name == route.Opens {
+			return nil
+		}
+	}
+	return fmt.Errorf("boxcfg: box %s repo %s: %s.opens names %q, which is neither a kind this box declares nor one of the seeds (%s, %s, %s)", bx.Name, r.Name, label, route.Opens, kind.SeedIssue, kind.SeedCampaign, kind.SeedIncident)
 }
 
 // validateKinds checks the shape of a box's declarations at load, and the
