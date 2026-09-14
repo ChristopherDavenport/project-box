@@ -183,6 +183,36 @@ func (p Priority) OrDefault() Priority {
 	return PriorityNormal
 }
 
+// Cause is why [Queue.Fail] settled an item, the way [Severity] is how
+// loudly a parking asks for a person — set by the stage that failed it, the
+// only place that knows whether the factory's own machinery broke or the
+// change itself did (issue #224).
+type Cause string
+
+const (
+	// CauseChange is the change itself: a build the agent produced, or its
+	// content, is the problem. Drops the resume point exactly as every
+	// failure always has — there is nothing here worth a retry buying back.
+	CauseChange Cause = "change"
+	// CauseInfra is the factory's own machinery — a fetch, a lease, a git
+	// exec — never a judgement on the change. Keeps the resume point: the
+	// tree a reviewer may already have looked at is still good, and a retry
+	// should not pay an agent to rebuild what infrastructure alone lost.
+	CauseInfra Cause = "infra"
+)
+
+// OrDefault resolves an unset or unrecognised cause to [CauseChange] — the
+// conservative default that preserves the drop-the-tree behavior a record
+// written before this existed already committed to. Unknown never reads as
+// keep.
+func (c Cause) OrDefault() Cause {
+	switch c {
+	case CauseChange, CauseInfra:
+		return c
+	}
+	return CauseChange
+}
+
 // WorkItem is one claimable unit of work.
 type WorkItem struct {
 	ID     string    `json:"id"`
@@ -383,6 +413,13 @@ type WorkItem struct {
 	// "still parked by the thing that just landed" from "parked for its own
 	// reasons" or "re-parked by a newer cause".
 	ParkedBy string `json:"parked_by,omitempty"`
+	// FailCause is why [Queue.Fail] settled this item — [CauseChange] or
+	// [CauseInfra], read at rest through [Cause.OrDefault] so a record
+	// written before this field existed still reads as the conservative
+	// "drop the tree" cause rather than as an unfamiliar zero value.
+	// Meaningful only while failed, and cleared on the way back off the
+	// exception queue exactly as Severity is (issue #224).
+	FailCause Cause `json:"fail_cause,omitempty"`
 	// SectionWaits counts how many claims in a row went back to Wait because
 	// a section this unit needs was held — the starvation signal the pump's
 	// fairness rule reads to name an oldest waiter. Reset to zero the moment
@@ -915,10 +952,17 @@ func (q *Queue) releaseDependents(ctx context.Context, t tenant.ID, id string) e
 	return nil
 }
 
-// Fail settles the item unsuccessfully.
-func (q *Queue) Fail(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
-	w.State, w.Note = StateFailed, reason
-	w.dropResume()
+// Fail settles the item unsuccessfully. cause tells the retry what kind of
+// trouble this was (issue #224): [CauseChange] drops the resume point
+// exactly as every failure always has, and [CauseInfra] keeps it — see
+// [Queue.ParkKeeping], which keeps a gate refusal's candidate for the same
+// reason. An infrastructure failure throws away nothing a reviewer already
+// looked at; only the change itself does.
+func (q *Queue) Fail(ctx context.Context, w WorkItem, lease forge.Lease, cause Cause, reason string) (WorkItem, error) {
+	w.State, w.Note, w.FailCause = StateFailed, reason, cause.OrDefault()
+	if w.FailCause == CauseChange {
+		w.dropResume()
+	}
 	err := q.record(ctx, w, "failed", w.ID, reason)
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
 	return w, err
@@ -1000,10 +1044,13 @@ func (q *Queue) Resolve(ctx context.Context, t tenant.ID, id string, who Identit
 // refused gate bought. A note that says to rebuild — matched case-
 // insensitively for "rebuild" — drops it instead, exactly as a retry always
 // used to, for the operator who has already judged the commit itself to be
-// the problem. A failed item has no commit worth re-offering — Fail already
-// dropped its resume point — so its retry is always a rebuild, whatever the
-// note says, and carries the failure reason forward as the rebuilt attempt's
-// Prior.Reason.
+// the problem. A failed item is the same choice once it has a candidate to
+// choose about: a [CauseInfra] failure keeps one exactly as ParkKeeping does
+// (issue #224), and its retry picks by the note precisely as a parked item's
+// does. A failed item with nothing to re-offer — a [CauseChange] failure, or
+// an infra one that never got as far as a candidate — has no commit worth
+// keeping, so its retry is always a rebuild, whatever the note says, and
+// carries the failure reason forward as the rebuilt attempt's Prior.Reason.
 func (q *Queue) Retry(ctx context.Context, t tenant.ID, id string, who Identity, note string) (WorkItem, error) {
 	return q.reopen(ctx, t, id, who, StatePending, "retried", note)
 }
@@ -1020,13 +1067,14 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id string, who Identity
 		return w, fmt.Errorf("queue: item %s is %s, not parked or failed — only an exception can be %s", id, w.State, kind)
 	}
 	wasFailed := w.State == StateFailed
-	// A failed item's attempt already produced nothing — Fail dropped its
-	// resume point on the way in, so there is no commit worth re-offering
-	// and no case for keeping it. Every retry of a failed item is a
-	// rebuild, whatever the operator's note says; a parked item still
-	// chooses, by that note, between re-checking the same commit and
-	// abandoning it.
-	rebuild := kind == "retried" && (wasFailed || strings.Contains(strings.ToLower(note), "rebuild"))
+	// A failed item with no candidate has nothing worth re-offering — Fail
+	// dropped its resume point, either because the cause was the change
+	// itself or because an infra failure never got as far as a candidate to
+	// keep — so every retry of it is a rebuild, whatever the operator's note
+	// says. A failed item that kept a candidate (a [CauseInfra] failure,
+	// issue #224) chooses by that note exactly as a parked item does.
+	noCandidate := wasFailed && w.Built == ""
+	rebuild := kind == "retried" && (noCandidate || strings.Contains(strings.ToLower(note), "rebuild"))
 	if rebuild {
 		// The attempt being abandoned is what the next one is woken
 		// knowing: the commit it produced and what refused it, with the
@@ -1081,6 +1129,7 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id string, who Identity
 	// later parking's clock with the previous parking's volume.
 	w.Severity = ""
 	w.ParkedBy = ""
+	w.FailCause = ""
 	// The actor is the operator, not the runner: this is the one transition a
 	// person makes by hand, and an audit that could not tell it from the
 	// daemon's own work would be missing the only human act in the loop. Pid

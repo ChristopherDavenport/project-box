@@ -113,14 +113,32 @@ func TestRetryReturnsParkedWorkToTheQueue(t *testing.T) {
 
 // fail drives an item to StateFailed the way a runner settling unsuccessfully
 // does: claimed, then failed with a reason.
-func fail(t *testing.T, qu *Queue, id, reason string) WorkItem {
+func fail(t *testing.T, qu *Queue, id string, cause Cause, reason string) WorkItem {
 	t.Helper()
 	w := submit(t, qu, id)
 	w, lease, err := qu.Claim(context.Background(), w)
 	if err != nil {
 		t.Fatal(err)
 	}
-	w, err = qu.Fail(context.Background(), w, lease, reason)
+	w, err = qu.Fail(context.Background(), w, lease, cause, reason)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return w
+}
+
+// failKeeping fails an item the way a [CauseInfra] failure does now: with a
+// resume point set on it first, so the failure itself does not drop it. See
+// [Queue.Fail] and [Queue.ParkKeeping], its gate-refusal counterpart.
+func failKeeping(t *testing.T, qu *Queue, id, reason string) WorkItem {
+	t.Helper()
+	w := submit(t, qu, id)
+	w, lease, err := qu.Claim(context.Background(), w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.KeepCandidate("sha-built", "sha-base", []string{"build-and-test"})
+	w, err = qu.Fail(context.Background(), w, lease, CauseInfra, reason)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,7 +319,7 @@ func TestRetryOfAFailedItemResetsTheRebaseCountWithoutTheMachineSuffix(t *testin
 	}
 	w.KeepUnfinished("sha-built", "sha-base")
 	w.RebaseCount = 2
-	w, err = qu.Fail(context.Background(), w, lease, "the runner died mid-build")
+	w, err = qu.Fail(context.Background(), w, lease, CauseChange, "the runner died mid-build")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -596,14 +614,15 @@ func TestARetryThatKeepsTheCommitCarriesNoPrior(t *testing.T) {
 	}
 }
 
-// TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason. A failed
-// item's attempt already produced nothing — Fail dropped its resume point on
-// the way in — so unlike a parked item, a retry never gets to keep it, and
-// the word "rebuild" in the operator's note is beside the point. What the
-// rebuilt run needs is the account of what went wrong, which Fail wrote to
-// the note and Retry's own note is about to overwrite: it has to be captured
-// into Prior.Reason first, kept apart from the operator's own words in
-// RetriedBy/RetryNote.
+// TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason. A
+// [CauseChange] failure's attempt is judged wrong, not merely lost to
+// infrastructure — Fail drops its resume point on the way in exactly as
+// before issue #224 (which changed only what [CauseInfra] does) — so unlike
+// a parked item, a retry never gets to keep it, and the word "rebuild" in
+// the operator's note is beside the point. What the rebuilt run needs is the
+// account of what went wrong, which Fail wrote to the note and Retry's own
+// note is about to overwrite: it has to be captured into Prior.Reason first,
+// kept apart from the operator's own words in RetriedBy/RetryNote.
 func TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason(t *testing.T) {
 	qu, ctx := q(t), context.Background()
 	w := submit(t, qu, "wi-1")
@@ -615,7 +634,7 @@ func TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason(t *testing.T
 		Gate: "review", Decision: forge.DecisionFail, Reason: "cannot match the nested case",
 	})
 	w.KeepCandidate("sha-built", "sha-base", []string{})
-	if _, err := qu.Fail(ctx, w, lease, "gate-infra: runner crashed mid-check"); err != nil {
+	if _, err := qu.Fail(ctx, w, lease, CauseChange, "review refused: cannot match the nested case"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -626,15 +645,16 @@ func TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason(t *testing.T
 	if got.State != StatePending {
 		t.Fatalf("state = %s, want pending", got.State)
 	}
-	// A failed item has no resume point to keep — Fail already dropped it —
-	// so the retry rebuilds even though the note never says "rebuild".
+	// A change-caused failure has no resume point to keep — Fail already
+	// dropped it — so the retry rebuilds even though the note never says
+	// "rebuild".
 	if got.Built != "" || got.BuiltBase != "" || got.PassedGates != nil {
 		t.Fatalf("a failed item's retry kept a resume point it never had: %+v", got)
 	}
 	if got.Prior == nil {
 		t.Fatal("a failed item's retry carried nothing of the attempt it abandoned")
 	}
-	if got.Prior.Reason != "gate-infra: runner crashed mid-check" {
+	if got.Prior.Reason != "review refused: cannot match the nested case" {
 		t.Fatalf("prior.Reason = %q, want the failure note Fail recorded", got.Prior.Reason)
 	}
 	if got.Prior.RetriedBy != "chris" || got.Prior.RetryNote != "try it again, nothing to change" {
@@ -648,7 +668,7 @@ func TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reloaded.Prior == nil || reloaded.Prior.Reason != "gate-infra: runner crashed mid-check" {
+	if reloaded.Prior == nil || reloaded.Prior.Reason != "review refused: cannot match the nested case" {
 		t.Fatalf("Load after the retry does not carry the failure reason: %+v", reloaded.Prior)
 	}
 	if _, _, err := qu.Claim(ctx, reloaded); err != nil {
@@ -656,17 +676,84 @@ func TestRetryOfAFailedItemAlwaysRebuildsWithTheFailureNoteAsReason(t *testing.T
 	}
 }
 
-// TestRetryOfAFailedItemWithNoGateVerdictsCarriesAnEmptyList. A gate-infra
-// failure never reached a gate, so there is nothing on the chain to read —
-// an empty Verdicts list beside a populated Reason is correct here, not a
-// sign that the read failed.
+// TestRetryOfAnInfraFailedItemKeepsTheResumePointUnlessToldToRebuild. Issue
+// #224: a [CauseInfra] failure keeps a candidate exactly as ParkKeeping does,
+// and reopen must stop forcing every failed item to rebuild once it did — an
+// infra-failed item with a candidate chooses by the note precisely as a
+// parked one does.
+func TestRetryOfAnInfraFailedItemKeepsTheResumePointUnlessToldToRebuild(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	w := failKeeping(t, qu, "wi-1", "mirror fetch: dial tcp: connection refused")
+	if w.Built == "" {
+		t.Fatal("setup: an infra cause dropped the resume point")
+	}
+
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "the network hiccuped; try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StatePending {
+		t.Fatalf("state = %s, want pending", got.State)
+	}
+	if got.Built != "sha-built" || got.BuiltBase != "sha-base" || len(got.PassedGates) != 1 {
+		t.Fatalf("a plain retry of an infra-failed item dropped the resume point: %+v", got)
+	}
+	if got.Prior != nil {
+		t.Fatalf("a resumed retry carried a prior: %+v", *got.Prior)
+	}
+	if got.FailCause != "" {
+		t.Fatalf("FailCause survived off the exception queue: %q", got.FailCause)
+	}
+
+	reloaded, err := qu.Load(ctx, tn, "wi-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Built != "sha-built" || reloaded.BuiltBase != "sha-base" {
+		t.Fatalf("the kept resume point did not survive the fold: %+v", reloaded)
+	}
+}
+
+// TestRetryWithRebuildInTheNoteDropsAnInfraFailedItemsResumePoint mirrors
+// TestRetryWithRebuildInTheNoteDropsTheResumePoint for a [CauseInfra]
+// failure: even a kept candidate goes when the operator's own note says the
+// commit, not the machinery, is the problem.
+func TestRetryWithRebuildInTheNoteDropsAnInfraFailedItemsResumePoint(t *testing.T) {
+	qu, ctx := q(t), context.Background()
+	failKeeping(t, qu, "wi-1", "mirror fetch: dial tcp: connection refused")
+
+	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "rebuild it — the tree looked wrong")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Built != "" || got.BuiltBase != "" || got.PassedGates != nil {
+		t.Fatalf("the operator's rebuild note should have dropped the resume point: %+v", got)
+	}
+	if got.Prior == nil || got.Prior.Reason != "mirror fetch: dial tcp: connection refused" {
+		t.Fatalf("prior = %+v, want the failure note as Reason", got.Prior)
+	}
+}
+
+// TestRetryOfAFailedItemWithNoGateVerdictsCarriesAnEmptyList. An infra
+// failure that never reached a gate — a runner dying mid-run, say, before
+// any candidate existed to keep — has nothing on the chain to read, and
+// nothing to re-offer either: it is issue #224's "no candidate" case that
+// still forces a rebuild on a [CauseInfra] failure, not the cause itself.
+// Prior still populates from the note, and an empty Verdicts list beside a
+// populated Reason is correct here, not a sign that the read failed.
 func TestRetryOfAFailedItemWithNoGateVerdictsCarriesAnEmptyList(t *testing.T) {
 	qu, ctx := q(t), context.Background()
-	fail(t, qu, "wi-1", "runner died before it ever built anything")
+	fail(t, qu, "wi-1", CauseInfra, "runner died before it ever built anything")
 
 	got, err := qu.Retry(ctx, tn, "wi-1", Identity{Name: "chris"}, "try again")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got.State != StatePending {
+		t.Fatalf("state = %s, want pending", got.State)
+	}
+	if got.Built != "" {
+		t.Fatalf("nothing was ever built for this item, so a resume point is not real: %+v", got)
 	}
 	if got.Prior == nil {
 		t.Fatal("a failed item's retry carried no prior")
@@ -685,7 +772,7 @@ func TestRetryOfAFailedItemWithNoGateVerdictsCarriesAnEmptyList(t *testing.T) {
 // landed.
 func TestResolveOfAFailedItemClosesItWithoutALanding(t *testing.T) {
 	qu, ctx := q(t), context.Background()
-	fail(t, qu, "wi-1", "repeated gate refusal, not worth another attempt")
+	fail(t, qu, "wi-1", CauseChange, "repeated gate refusal, not worth another attempt")
 
 	got, err := qu.Resolve(ctx, tn, "wi-1", Identity{Name: "chris"}, "agreed — not worth pursuing")
 	if err != nil {

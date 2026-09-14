@@ -568,14 +568,15 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	}
 	// The workspace outlives the lease for exactly as long as the resume point
 	// does: held while the item waits with a commit to come back to, has
-	// handed off with a change its successor continues, or parked with a
-	// commit a gate refused and a retry may re-ask about, handed back to
-	// Prune the moment it settles or gives that commit up. A park only ever
-	// carries Built when the gate-fail branch below kept it — every other
-	// park still empties it, so the guard already tells the two apart.
+	// handed off with a change its successor continues, parked with a commit
+	// a gate refused and a retry may re-ask about, or failed on an infra cause
+	// that left the same kind of candidate behind (issue #224) — handed back
+	// to Prune the moment it settles or gives that commit up. A park or a
+	// failure only ever carries Built when the caller kept it; every other
+	// one still empties it, so the guard already tells the two apart.
 	defer func() {
 		switch out.State {
-		case queue.StateWaiting, queue.StateHandedOff, queue.StateParked:
+		case queue.StateWaiting, queue.StateHandedOff, queue.StateParked, queue.StateFailed:
 			if out.Built != "" {
 				l.Mirror.Hold(item.ID, l.Repo.Name)
 				return
@@ -602,7 +603,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	held.set("claim", claim)
 
 	if deny, err := l.authorize(ctx, item, authz.ActionPropose); err != nil {
-		return q.Fail(ctx, item, claim, err.Error())
+		return q.Fail(ctx, item, claim, queue.CauseInfra, err.Error())
 	} else if deny != "" {
 		// A grant the factory does not hold. The control worked, and it will
 		// keep working on every retry until a person changes something.
@@ -676,11 +677,11 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	held.set("workspace", wsLease)
 
 	if err := l.Mirror.Fetch(ctx, l.Repo); err != nil {
-		return q.Fail(ctx, item, claim, err.Error())
+		return q.Fail(ctx, item, claim, queue.CauseInfra, err.Error())
 	}
 	base, err := l.Mirror.Resolve(ctx, l.Repo, ref)
 	if err != nil {
-		return q.Fail(ctx, item, claim, err.Error())
+		return q.Fail(ctx, item, claim, queue.CauseInfra, err.Error())
 	}
 	// A resume point from an earlier attempt: this item already built a commit
 	// and is back because a gate could not answer yet, or because it lost a
@@ -699,7 +700,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	if item.Built != "" {
 		adopted, ok, aerr := l.Mirror.Adopt(ctx, wsLease, forge.Commit(item.Built), base)
 		if aerr != nil {
-			return q.Fail(ctx, item, claim, aerr.Error())
+			return q.Fail(ctx, item, claim, queue.CauseInfra, aerr.Error())
 		}
 		switch {
 		case !ok:
@@ -765,7 +766,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		item.RebaseCount = 0
 		ws, err = l.Mirror.Checkout(ctx, wsLease, base)
 		if err != nil {
-			return q.Fail(ctx, item, claim, err.Error())
+			return q.Fail(ctx, item, claim, queue.CauseInfra, err.Error())
 		}
 	}
 	// The gating ChangeSet carries no lease: the branch is not ours yet, and
@@ -862,7 +863,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 					// spending the attempt the way a build refusal would —
 					// the same treatment git.CommitMessage's read gets a few
 					// lines below this stage.
-					return q.Fail(ctx, item, claim, "squash: "+sq.Error())
+					return q.Fail(ctx, item, claim, queue.CauseInfra, "squash: "+sq.Error())
 				}
 				var ho *Handoff
 				if errors.As(serr, &ho) {
@@ -884,7 +885,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 							missing := missingSections(item.Sections, widened)
 							releaseExtra, extraLeases, busy, aerr := l.acquireSections(ctx, item, missing)
 							if aerr != nil {
-								return q.Fail(ctx, item, claim, "widen: "+aerr.Error())
+								return q.Fail(ctx, item, claim, queue.CauseInfra, "widen: "+aerr.Error())
 							}
 							if busy != "" {
 								item.Sections = widened
@@ -916,7 +917,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 							var rerr error
 							item, claim, rerr = q.Retain(ctx, item, claim, prior, next)
 							if rerr != nil {
-								return q.Fail(ctx, item, claim, fmt.Sprintf("retaining attempt %d of %d: %v", next, budget, rerr))
+								return q.Fail(ctx, item, claim, queue.CauseInfra, fmt.Sprintf("retaining attempt %d of %d: %v", next, budget, rerr))
 							}
 							held.set("claim", claim)
 							continue
@@ -1025,7 +1026,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		// retry-on-refusal gated-only for the same reason).
 		msg, cmerr := git.CommitMessage(ctx, ws.Dir, string(head))
 		if cmerr != nil {
-			return q.Fail(ctx, item, claim, cmerr.Error())
+			return q.Fail(ctx, item, claim, queue.CauseInfra, cmerr.Error())
 		}
 		verdicts = nil
 		passedNow = nil
@@ -1280,7 +1281,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 				var rerr error
 				item, claim, rerr = q.Retain(ctx, item, claim, prior, next)
 				if rerr != nil {
-					return q.Fail(ctx, item, claim, fmt.Sprintf("retaining attempt %d of %d: %v", next, budget, rerr))
+					return q.Fail(ctx, item, claim, queue.CauseInfra, fmt.Sprintf("retaining attempt %d of %d: %v", next, budget, rerr))
 				}
 				held.set("claim", claim)
 				continue
@@ -1319,13 +1320,13 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	cs.CompletesPlan = l.completesPlan(ctx, item)
 
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
-		return q.Fail(ctx, item, claim, err.Error())
+		return q.Fail(ctx, item, claim, queue.CauseInfra, err.Error())
 	} else if deny != "" {
 		return q.Park(ctx, item, claim, queue.SeverityHigh, deny)
 	}
 	landLease, notOurTurn, err := l.openLandWindow(ctx, item, base)
 	if err != nil {
-		return q.Fail(ctx, item, claim, err.Error())
+		return q.Fail(ctx, item, claim, queue.CauseInfra, err.Error())
 	}
 	if notOurTurn != "" {
 		// The gates passed on this head; if the branch was merely busy, next
@@ -1622,13 +1623,13 @@ func (l *Loop) lander(inner *git.Lander) forge.Lander {
 // summoning anyone; nothing rolls back by itself.
 func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, ws forge.Workspace, cs forge.ChangeSet, base, head forge.Commit, held *heldLeases) (queue.WorkItem, error) {
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
-		return q.Fail(ctx, item, claim, err.Error())
+		return q.Fail(ctx, item, claim, queue.CauseInfra, err.Error())
 	} else if deny != "" {
 		return q.Park(ctx, item, claim, queue.SeverityHigh, deny)
 	}
 	landLease, notOurTurn, err := l.openLandWindow(ctx, item, base)
 	if err != nil {
-		return q.Fail(ctx, item, claim, err.Error())
+		return q.Fail(ctx, item, claim, queue.CauseInfra, err.Error())
 	}
 	if notOurTurn != "" {
 		item.KeepCandidate(head, base, nil)

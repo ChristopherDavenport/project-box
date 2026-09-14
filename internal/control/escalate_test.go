@@ -263,7 +263,7 @@ func TestFailedItemEscalatesAtTheDefaultThreshold(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := w.queue.Fail(ctx, item, lease, "build panicked"); err != nil {
+	if _, err := w.queue.Fail(ctx, item, lease, queue.CauseChange, "build panicked"); err != nil {
 		t.Fatal(err)
 	}
 

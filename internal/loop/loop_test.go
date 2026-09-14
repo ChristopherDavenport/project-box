@@ -324,6 +324,191 @@ func TestWaitingOnAGateDoesNotRebuild(t *testing.T) {
 	}
 }
 
+// TestInfraFailedRetryAdoptsThePriorTreeInsteadOfRebuilding is issue #224's
+// headline case. A reviewed tree used to be thrown away exactly the same for
+// an infrastructure accident as for a change the review itself refused, so a
+// retry after a flaky fetch rebuilt what an agent had already produced and a
+// person may already have looked at. A [queue.CauseInfra] failure now keeps
+// the resume point, and the workspace it points at has to survive the
+// daemon's housekeeping Prune between the failure and the retry — that is
+// what loop.go's deferred hold/discard switch is for.
+func TestInfraFailedRetryAdoptsThePriorTreeInsteadOfRebuilding(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{holdingGate{approved: &approved}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-224a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-infra", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("first pass should wait on the gate, got %s (%s)", item.State, item.Note)
+	}
+	builtSha := item.Built
+	if builtSha == "" {
+		t.Fatal("setup: a waiting item carries no resume point")
+	}
+	if builder.n != 1 {
+		t.Fatalf("builder ran %d times before the wait", builder.n)
+	}
+
+	// The remote goes away between ticks — the factory's own machinery
+	// failing, never a judgement on the change.
+	broken := e.remote + ".broken"
+	if err := os.Rename(e.remote, broken); err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := q.Load(ctx, tn, "wi-infra")
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = e.loop.Run(ctx, loaded)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateFailed {
+		t.Fatalf("a broken remote should fail the item, got %s (%s)", item.State, item.Note)
+	}
+	if item.FailCause != queue.CauseInfra {
+		t.Fatalf("FailCause = %q, want infra", item.FailCause)
+	}
+	if item.Built != builtSha {
+		t.Fatalf("an infra failure must keep the resume point: got %q, want %q", item.Built, builtSha)
+	}
+	if builder.n != 1 {
+		t.Fatalf("the failed fetch should not have rebuilt anything: %d builds", builder.n)
+	}
+
+	// The daemon's housekeeping sweep runs on a timer of its own and knows
+	// nothing about why this item failed. Without issue #224's fix to the
+	// hold/discard switch, the tree above was already reclaimable the
+	// moment the failed run above returned, and Adopt below would silently
+	// miss and fall back to a rebuild.
+	if perr := e.loop.Mirror.Prune(ctx); perr != nil {
+		t.Fatalf("prune: %v", perr)
+	}
+
+	if err := os.Rename(broken, e.remote); err != nil {
+		t.Fatal(err)
+	}
+
+	retried, err := q.Retry(ctx, tn, "wi-infra", queue.Identity{Name: "chris"}, "the remote came back; try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Built != builtSha {
+		t.Fatalf("a plain retry of an infra failure dropped the resume point: %q", retried.Built)
+	}
+
+	item, err = e.loop.Run(ctx, retried)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("the gate is still pending, got %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 1 {
+		t.Fatalf("the retry rebuilt instead of adopting the prior tree: %d builds", builder.n)
+	}
+	if item.Built != builtSha {
+		t.Fatalf("the resumed item's head moved: got %q, want %q", item.Built, builtSha)
+	}
+
+	var sawResumed bool
+	for r, err := range e.store.Log().BySubject(ctx, tn, builtSha) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "build-resumed" {
+			sawResumed = true
+		}
+	}
+	if !sawResumed {
+		t.Fatal("the retry should have adopted the prior tree at the land window, not rebuilt it")
+	}
+}
+
+// TestChangeFailedRetryRebuildsFromBase is issue #224's other half: a
+// [queue.CauseChange] failure is a judgement on the change itself, so unlike
+// an infra failure it drops the resume point exactly as every failure
+// always has, and a retry rebuilds from base. The loop itself never calls
+// Fail with this cause — every loop.go call site classified as
+// infrastructure — so this drives the failure directly through the queue,
+// exactly as a future change-classified caller would, and checks the loop
+// still does the right thing with what it is handed.
+func TestChangeFailedRetryRebuildsFromBase(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	approved := false
+	builder := &countingBuilder{}
+	e.loop.Builder = builder
+	e.loop.Gates = func(forge.Workspace) []forge.Gate {
+		return []forge.Gate{holdingGate{approved: &approved}}
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-224b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-change", "add a thing"))
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting || item.Built == "" {
+		t.Fatalf("setup: first pass should wait with a resume point, got %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 1 {
+		t.Fatalf("builder ran %d times before the wait", builder.n)
+	}
+
+	item, claim, err := q.Claim(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err = q.Fail(ctx, item, claim, queue.CauseChange, "the diff itself was wrong")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Built != "" {
+		t.Fatal("setup: a change cause should have dropped the resume point")
+	}
+
+	retried, err := q.Retry(ctx, tn, "wi-change", queue.Identity{Name: "chris"}, "try again")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retried.Built != "" {
+		t.Fatalf("a change-caused failure's retry kept a resume point it never had: %q", retried.Built)
+	}
+
+	item, err = e.loop.Run(ctx, retried)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateWaiting {
+		t.Fatalf("the gate is still pending, got %s (%s)", item.State, item.Note)
+	}
+	if builder.n != 2 {
+		t.Fatalf("a change-caused retry should rebuild from base: %d builds", builder.n)
+	}
+}
+
 // interlope lands a commit on main from outside the factory: the other unit
 // of work that won the race, seen from this one's point of view.
 func interlope(t *testing.T, remote, file, body string) {

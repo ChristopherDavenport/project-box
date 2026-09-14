@@ -126,7 +126,7 @@ func TestFailedItemsListBesideParkedOnes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.Fail(ctx, failed, lease2, "build panicked"); err != nil {
+	if _, err := q.Fail(ctx, failed, lease2, queue.CauseChange, "build panicked"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -198,7 +198,7 @@ func TestFailedItemThatOnceParkedStillLists(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.Fail(ctx, w, lease2, "build panicked again"); err != nil {
+	if _, err := q.Fail(ctx, w, lease2, queue.CauseChange, "build panicked again"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -244,7 +244,7 @@ func TestFailedCountAgreesWithBacklog(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := q.Fail(ctx, w, lease, "failed"); err != nil {
+		if _, err := q.Fail(ctx, w, lease, queue.CauseChange, "failed"); err != nil {
 			t.Fatal(err)
 		}
 	}
