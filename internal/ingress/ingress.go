@@ -21,6 +21,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/agent"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -97,6 +98,11 @@ type Ingress struct {
 	// routes increment it, and only so that a chain it starts can be
 	// stopped. See loop.OpenRepair.
 	Depth int `json:"depth,omitempty"`
+	// Priority is the claim ordering this origination's units inherit —
+	// see [queue.Priority]. Empty reads as the default downstream via
+	// OrDefault; StoreRouter.Open refuses a non-empty unrecognised value
+	// rather than silently defaulting it.
+	Priority queue.Priority `json:"priority,omitempty"`
 	// Prior is the attempt this work follows, set only where the factory
 	// reopens its own: a repair carries the landing that went red, and the
 	// run that made it. It rides the ingress because provenance is what an
@@ -310,7 +316,11 @@ type Delivery struct {
 	// the [Ingress] StoreRouter.Open builds unchanged — StoreRouter has no
 	// request to inspect, so it records what its caller asserted rather
 	// than judging it.
-	Source   Source `json:"source,omitempty"`
+	Source Source `json:"source,omitempty"`
+	// Priority is the source's claim on ordering — an operator's `box
+	// submit` flag, a polled issue's priority label. Empty leaves
+	// [Ingress.Priority] empty, the same fallback Title uses.
+	Priority queue.Priority `json:"priority,omitempty"`
 	Received time.Time
 }
 

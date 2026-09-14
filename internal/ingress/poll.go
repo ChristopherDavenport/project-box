@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -73,6 +74,7 @@ func (p *Poller) Poll(ctx context.Context, route Route, target string, now time.
 			Payload:  []byte(taskText(iss, route.Contract)),
 			Received: now,
 			Source:   Source{Subject: p.Actor, Method: "poll", Channel: "route:" + route.Name},
+			Priority: labeledPriority(iss.Labels),
 		}); err != nil {
 			return fmt.Errorf("ingress: poll %s: opening issue #%d: %w", route.Name, iss.Number, err)
 		}
@@ -109,6 +111,38 @@ func hasLabel(labels []string, label string) bool {
 		}
 	}
 	return false
+}
+
+// priorityLabels maps a label spelled exactly "priority:<level>" onto the
+// controlled vocabulary — the only spelling recognised, matching hasLabel's
+// exactness.
+var priorityLabels = map[string]queue.Priority{
+	"priority:low":    queue.PriorityLow,
+	"priority:normal": queue.PriorityNormal,
+	"priority:high":   queue.PriorityHigh,
+	"priority:urgent": queue.PriorityUrgent,
+}
+
+// labeledPriority reads a polled issue's priority off its labels, taking
+// the highest ranked among however many priority: labels are present — an
+// operator who labeled an issue both priority:normal and priority:urgent
+// meant at least the higher one. A label outside the four spellings (e.g.
+// priority:banana) is not in the controlled vocabulary and is ignored
+// rather than refusing the whole poll over one mislabeled issue, which
+// would block every other issue behind a typo. No labels recognised
+// returns empty, read as the default downstream.
+func labeledPriority(labels []string) queue.Priority {
+	var best queue.Priority
+	for _, l := range labels {
+		p, ok := priorityLabels[l]
+		if !ok {
+			continue
+		}
+		if best == "" || p.Rank() > best.Rank() {
+			best = p
+		}
+	}
+	return best
 }
 
 // taskText builds a polled issue's task text exactly as

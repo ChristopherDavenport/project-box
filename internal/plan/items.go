@@ -27,12 +27,16 @@ func Items(ing ingress.Ingress, p Plan) []queue.WorkItem {
 		for _, d := range n.DependsOn {
 			deps = append(deps, p.ItemID(d))
 		}
+		priority := n.Priority
+		if priority == "" {
+			priority = ing.Priority
+		}
 		out = append(out, queue.WorkItem{
 			ID: p.ItemID(n.ID), Tenant: ing.Tenant, Box: ing.Box,
 			Ingress: ing.ID, Plan: p.Ref, Node: n.ID, Kind: string(ing.Kind),
 			Requester: ing.Requester, Repo: repo,
 			Task: n.Task, Summary: n.Summary, Depth: ing.Depth, DependsOn: deps,
-			Sections: n.Sections, Model: n.Model, Attempts: n.Attempts,
+			Sections: n.Sections, Model: n.Model, Attempts: n.Attempts, Priority: priority,
 			// Repair work wakes with the attempt it follows rather than cold;
 			// the origination is where that travels, the same way the depth
 			// does. A fanned-out repair gives every node the same predecessor,

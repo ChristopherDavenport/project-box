@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
 // fakeLister is a [Lister] a test drives directly: it returns exactly the
@@ -79,6 +80,78 @@ func TestPollOpensOneIngressPerLabeledIssueAndRedeliversIdempotently(t *testing.
 	}
 	if again.Opened != ing.Opened {
 		t.Fatalf("second poll re-opened the ingress: %v -> %v", ing.Opened, again.Opened)
+	}
+}
+
+// TestPollMapsThePriorityLabel is issue #115 part 2: a polled issue's
+// priority label rides onto the delivery, and where an issue carries more
+// than one recognised priority: label the highest ranked wins.
+func TestPollMapsThePriorityLabel(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	router := &StoreRouter{Store: s, Tenant: tn2, Runner: "runner"}
+	lister := &fakeLister{issues: []Issue{
+		{Number: 42, Title: "checkout is down", Body: "body", Labels: []string{"box", "priority:high"}},
+	}}
+	p := &Poller{Lister: lister, Router: router, Log: s.Log(), Tenant: tn2, Actor: "runner"}
+
+	if err := p.Poll(ctx, issueRoute("chris"), "https://github.com/acme/app", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	ing, found, err := Load(ctx, s.Log(), tn2, "ing-"+hashKey("issues", "issue-42"))
+	if err != nil || !found {
+		t.Fatalf("poll did not open an ingress: found=%v err=%v", found, err)
+	}
+	if ing.Priority != queue.PriorityHigh {
+		t.Fatalf("priority = %q, want %q", ing.Priority, queue.PriorityHigh)
+	}
+}
+
+// TestPollTakesTheHighestOfTwoPriorityLabels: an operator who labeled an
+// issue both priority:normal and priority:urgent meant at least the higher
+// one, not whichever the listing happened to return first.
+func TestPollTakesTheHighestOfTwoPriorityLabels(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	router := &StoreRouter{Store: s, Tenant: tn2, Runner: "runner"}
+	lister := &fakeLister{issues: []Issue{
+		{Number: 42, Title: "checkout is down", Body: "body", Labels: []string{"box", "priority:normal", "priority:urgent"}},
+	}}
+	p := &Poller{Lister: lister, Router: router, Log: s.Log(), Tenant: tn2, Actor: "runner"}
+
+	if err := p.Poll(ctx, issueRoute("chris"), "https://github.com/acme/app", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	ing, found, err := Load(ctx, s.Log(), tn2, "ing-"+hashKey("issues", "issue-42"))
+	if err != nil || !found {
+		t.Fatalf("poll did not open an ingress: found=%v err=%v", found, err)
+	}
+	if ing.Priority != queue.PriorityUrgent {
+		t.Fatalf("priority = %q, want %q", ing.Priority, queue.PriorityUrgent)
+	}
+}
+
+// TestPollIgnoresAnOutOfVocabularyPriorityLabel: priority:banana is not one
+// of the four levels, so it sets nothing rather than refusing the whole
+// poll over one mislabeled issue.
+func TestPollIgnoresAnOutOfVocabularyPriorityLabel(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	router := &StoreRouter{Store: s, Tenant: tn2, Runner: "runner"}
+	lister := &fakeLister{issues: []Issue{
+		{Number: 42, Title: "checkout is down", Body: "body", Labels: []string{"box", "priority:banana"}},
+	}}
+	p := &Poller{Lister: lister, Router: router, Log: s.Log(), Tenant: tn2, Actor: "runner"}
+
+	if err := p.Poll(ctx, issueRoute("chris"), "https://github.com/acme/app", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	ing, found, err := Load(ctx, s.Log(), tn2, "ing-"+hashKey("issues", "issue-42"))
+	if err != nil || !found {
+		t.Fatalf("poll did not open an ingress: found=%v err=%v", found, err)
+	}
+	if ing.Priority != "" {
+		t.Fatalf("priority = %q, want empty", ing.Priority)
 	}
 }
 

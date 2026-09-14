@@ -32,6 +32,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
 // planDomain separates this hash from every other in the system, the way the
@@ -94,6 +96,9 @@ type Node struct {
 	// claim may spend on a gate or review refusal before it parks — see
 	// [queue.WorkItem.Attempts]. Zero inherits the repo's or box's default.
 	Attempts int `json:"attempts,omitempty"`
+	// Priority overrides the origination's claim ordering for this node —
+	// see [queue.Priority]. Empty inherits the ingress's; see [Items].
+	Priority queue.Priority `json:"priority,omitempty"`
 }
 
 // Fact is one input a decomposer read, and when it read it.
@@ -207,6 +212,13 @@ func (p *Plan) Seal() error {
 		if len(sections) > 0 || n.Model != "" || n.Attempts != 0 {
 			put("where:" + n.ID + ":" + strings.Join(sections, "\x00") + ":" + n.Model + ":" + strconv.Itoa(n.Attempts))
 		}
+		// Priority is a separate conditional put, not folded into "where:" —
+		// every plan sealed before priority existed must keep a byte-stable
+		// ref, the same reason "reasons:" below is its own put rather than
+		// appended to an existing one.
+		if n.Priority != "" {
+			put("priority:" + n.ID + ":" + string(n.Priority))
+		}
 		// Why: only when a node carries a reason at all, so every plan sealed
 		// before edges could carry one keeps byte-identical ref — this does not
 		// bump planDomain.
@@ -305,6 +317,11 @@ func (p *Plan) validate() error {
 		}
 		if n.Attempts < 0 {
 			return fmt.Errorf("%w: %s node %q attempts %d — a negative budget", ErrPlan, p.Ingress, n.ID, n.Attempts)
+		}
+		switch n.Priority {
+		case "", queue.PriorityLow, queue.PriorityNormal, queue.PriorityHigh, queue.PriorityUrgent:
+		default:
+			return fmt.Errorf("%w: %s node %q names priority %q — the levels are low, normal, high, urgent", ErrPlan, p.Ingress, n.ID, n.Priority)
 		}
 		byID[n.ID] = n
 	}

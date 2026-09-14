@@ -11,6 +11,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/store"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -40,6 +41,11 @@ func (s *StoreRouter) Open(ctx context.Context, r Route, d Delivery) (Ingress, b
 	if d.Key == "" {
 		return Ingress{}, false, errors.New("ingress: delivery carries no idempotency key")
 	}
+	switch d.Priority {
+	case "", queue.PriorityLow, queue.PriorityNormal, queue.PriorityHigh, queue.PriorityUrgent:
+	default:
+		return Ingress{}, false, fmt.Errorf("ingress: delivery names priority %q — the levels are low, normal, high, urgent", d.Priority)
+	}
 
 	id := "ing-" + hashKey(r.Name, d.Key)
 	if ing, ok, err := s.find(ctx, id); err != nil || ok {
@@ -68,7 +74,7 @@ func (s *StoreRouter) Open(ctx context.Context, r Route, d Delivery) (Ingress, b
 
 	ing := Ingress{ID: id, Kind: r.Opens, Tenant: s.Tenant, Box: r.Box, Requester: r.Requester,
 		Repo: r.Repo, Route: r.Name, Key: d.Key, Depth: d.Depth, Prior: d.Prior, Note: string(d.Payload),
-		Title: d.Title, Source: d.Source}
+		Title: d.Title, Source: d.Source, Priority: d.Priority}
 	body, err := json.Marshal(ing)
 	if err != nil {
 		return Ingress{}, false, err

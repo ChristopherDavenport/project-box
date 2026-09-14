@@ -5,6 +5,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
 // TestItemsCopiesTheNodesSummary. Items is the only place a node's fields
@@ -41,6 +42,45 @@ func TestItemsCopiesTheNodesAttempts(t *testing.T) {
 	}
 	if got := items[0].Attempts; got != 4 {
 		t.Fatalf("attempts: %d, want 4", got)
+	}
+}
+
+// TestItemsInheritsTheIngressPriority: a node names no priority of its own,
+// so the item it becomes takes the ingress's — the inheritance issue #115
+// part 2 asks for.
+func TestItemsInheritsTheIngressPriority(t *testing.T) {
+	ing := issue("ing-1")
+	ing.Priority = queue.PriorityHigh
+	p := Plan{Ingress: "ing-1", Replayable: true,
+		Nodes: []Node{{ID: IdentityNode, Task: "fix the thing"}}}
+	if err := p.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	items := Items(ing, p)
+	if len(items) != 1 {
+		t.Fatalf("items: %d", len(items))
+	}
+	if got := items[0].Priority; got != queue.PriorityHigh {
+		t.Fatalf("priority: %q, want %q", got, queue.PriorityHigh)
+	}
+}
+
+// TestItemsLetsANodeOverrideThePriority: a node that states its own
+// priority wins over the ingress's.
+func TestItemsLetsANodeOverrideThePriority(t *testing.T) {
+	ing := issue("ing-1")
+	ing.Priority = queue.PriorityLow
+	p := Plan{Ingress: "ing-1", Replayable: true,
+		Nodes: []Node{{ID: IdentityNode, Task: "fix the thing", Priority: queue.PriorityUrgent}}}
+	if err := p.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	items := Items(ing, p)
+	if len(items) != 1 {
+		t.Fatalf("items: %d", len(items))
+	}
+	if got := items[0].Priority; got != queue.PriorityUrgent {
+		t.Fatalf("priority: %q, want %q", got, queue.PriorityUrgent)
 	}
 }
 

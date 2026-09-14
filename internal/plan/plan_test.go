@@ -9,6 +9,7 @@ import (
 
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
 
@@ -111,6 +112,8 @@ func TestGraphsTheQueueCouldNotRun(t *testing.T) {
 		{"judgement with no author", Plan{Ingress: "i", Nodes: []Node{{ID: "a", Task: "t"}}}, "no author"},
 		{"negative attempts", Plan{Ingress: "i", Replayable: true, Nodes: []Node{
 			{ID: "a", Task: "t", Attempts: -1}}}, "negative budget"},
+		{"unrecognised priority", Plan{Ingress: "i", Replayable: true, Nodes: []Node{
+			{ID: "a", Task: "t", Priority: "banana"}}}, "the levels are low, normal, high, urgent"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -144,6 +147,47 @@ func TestANoReasonPlansRefIsUnchangedBySealsNewFields(t *testing.T) {
 	const want = "plan-c656531e9088d155a4b9d3486dfa429e"
 	if p.Ref != want {
 		t.Fatalf("a plan with no edge reasons changed ref: got %s, want %s", p.Ref, want)
+	}
+}
+
+// TestAPlanWithNoPrioritiesRefIsUnchangedBySeal pins the same ref as
+// TestANoReasonPlansRefIsUnchangedBySealsNewFields for a graph with no
+// priorities set — the "priority:" put in Seal only fires when a node's
+// Priority is non-empty, so this must digest to the exact bytes it did
+// before priority existed.
+func TestAPlanWithNoPrioritiesRefIsUnchangedBySeal(t *testing.T) {
+	p := Plan{Ingress: "ing-1", Kind: "issue", Decomposer: "x", Replayable: true,
+		Nodes: []Node{
+			{ID: "one", Task: "do one"},
+			{ID: "two", Task: "do two", DependsOn: []string{"one"}},
+		},
+	}
+	if err := p.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	const want = "plan-c656531e9088d155a4b9d3486dfa429e"
+	if p.Ref != want {
+		t.Fatalf("a plan with no priorities changed ref: got %s, want %s", p.Ref, want)
+	}
+}
+
+// TestSettingAPriorityChangesTheRef: a node's priority is part of the
+// digest, so a plan otherwise identical to
+// TestAPlanWithNoPrioritiesRefIsUnchangedBySeal but with one node's priority
+// set must seal to a different ref.
+func TestSettingAPriorityChangesTheRef(t *testing.T) {
+	p := Plan{Ingress: "ing-1", Kind: "issue", Decomposer: "x", Replayable: true,
+		Nodes: []Node{
+			{ID: "one", Task: "do one", Priority: queue.PriorityHigh},
+			{ID: "two", Task: "do two", DependsOn: []string{"one"}},
+		},
+	}
+	if err := p.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	const unchanged = "plan-c656531e9088d155a4b9d3486dfa429e"
+	if p.Ref == unchanged {
+		t.Fatal("setting a node's priority did not change the ref")
 	}
 }
 

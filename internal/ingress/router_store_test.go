@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/project-box/internal/kind"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
 // TestOpenCarriesTheDeliveryTitle. The control room reads a unit's name off
@@ -57,5 +58,52 @@ func TestOpenCarriesTheDeliverySource(t *testing.T) {
 	}
 	if loaded.Source != source {
 		t.Fatalf("source did not survive the fold: %+v, want %+v", loaded.Source, source)
+	}
+}
+
+// TestOpenCarriesTheDeliveryPriority is issue #115 part 2: the priority a
+// delivery names rides onto the ingress it opens, the same way Title and
+// Source do.
+func TestOpenCarriesTheDeliveryPriority(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	r := &StoreRouter{Store: s, Tenant: tn2, Runner: "runner"}
+	route := Route{Tenant: tn2, Name: "issues", Kind: RouteIssue, Opens: kind.SeedIssue,
+		Box: "shop", Repo: "app", Requester: "chris"}
+
+	ing, opened, err := r.Open(ctx, route, Delivery{
+		Route: "issues", Key: "k-priority", Payload: []byte("body text"), Priority: queue.PriorityHigh,
+	})
+	if err != nil || !opened {
+		t.Fatalf("open: %v %v", err, opened)
+	}
+	if ing.Priority != queue.PriorityHigh {
+		t.Fatalf("priority on the returned ingress = %q, want %q", ing.Priority, queue.PriorityHigh)
+	}
+
+	loaded, found, err := Load(ctx, s.Log(), tn2, ing.ID)
+	if err != nil || !found {
+		t.Fatalf("load: found=%v err=%v", found, err)
+	}
+	if loaded.Priority != queue.PriorityHigh {
+		t.Fatalf("priority did not survive the fold: %q, want %q", loaded.Priority, queue.PriorityHigh)
+	}
+}
+
+// TestOpenRefusesAnUnrecognisedPriority is issue #115 part 2: a non-empty
+// priority outside the four levels is refused at Open rather than silently
+// defaulted — the API and CLI rely on this refusal.
+func TestOpenRefusesAnUnrecognisedPriority(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	r := &StoreRouter{Store: s, Tenant: tn2, Runner: "runner"}
+	route := Route{Tenant: tn2, Name: "issues", Kind: RouteIssue, Opens: kind.SeedIssue,
+		Box: "shop", Repo: "app", Requester: "chris"}
+
+	_, _, err := r.Open(ctx, route, Delivery{
+		Route: "issues", Key: "k-bad-priority", Payload: []byte("body text"), Priority: "banana",
+	})
+	if err == nil {
+		t.Fatal("expected a refusal for an unrecognised priority")
 	}
 }
