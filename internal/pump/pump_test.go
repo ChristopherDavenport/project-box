@@ -547,6 +547,56 @@ func (w *world) sectionedRepo() {
 	}
 }
 
+// TestThreeDisjointSectionsDispatchInOneTick is issue #201's dispatch
+// assertion: three units in three disjoint sections, no edges between them,
+// with three seats free — nothing about fairSectionOrder or the seat-acquire
+// loop should strand any of them behind another. One Tick, one Quiesce (the
+// sanctioned barrier now that dispatch is async), and all three should have
+// run: claimed, built, and gated in this same tick.
+//
+// All three land on the one branch the repo shares, so the branch lease —
+// not this test — serializes the last step: only one of the three actually
+// reaches [queue.StateDone] here, and the other two find the branch busy and
+// come back [queue.StateWaiting] on a kept, already-built candidate (see
+// [Loop.openLandWindow]), ready to land on the very next tick without
+// rebuilding. That is a landed-or-queued-to-land outcome, not a stranding —
+// the pump's dispatch owes a candidate a seat and a build, never a guaranteed
+// landing slot when others share its branch.
+func TestThreeDisjointSectionsDispatchInOneTick(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 3})
+	ctx := context.Background()
+	w.pump.Loops["shop"].Repo.Sections = []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"api"}},
+		{Name: "web", Purpose: "the room", Paths: []string{"web"}},
+		{Name: "worker", Purpose: "the queue", Paths: []string{"worker"}},
+	}
+
+	var items []queue.WorkItem
+	for _, sec := range []string{"api", "web", "worker"} {
+		items = append(items, w.submitItem(t, sec+"-1", "fix module "+sec, func(wi *queue.WorkItem) {
+			wi.Sections = []string{sec}
+		}))
+	}
+
+	if _, err := w.pump.Tick(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the tick's dispatched runs")
+	}
+
+	for _, item := range items {
+		got, err := w.q.Load(ctx, tn, item.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ran := got.State == queue.StateDone || (got.State == queue.StateWaiting && got.Built != "")
+		if !ran {
+			t.Fatalf("item %s (section %v) was stranded rather than dispatched: %s: %s", got.ID, got.Sections, got.State, got.Note)
+		}
+	}
+}
+
 // TestAWholeRepositoryUnitStopsStarving is issue #109 by name: a unit that
 // names no section leases every one, so under a stream of newer, narrower
 // units it can starve — every tick another freed section is taken by
