@@ -233,6 +233,11 @@ type WorkItem struct {
 	Prior *agent.Prior `json:"prior,omitempty"`
 	// Head is the commit the item produced, once it has.
 	Head string `json:"head,omitempty"`
+	// Cost is what landing this item cost, folded from the capacity meter's
+	// charge records at Done — see [loop.Loop] (issue #183). Nil until the
+	// item settles; record() marshals the whole item, so it rides the done
+	// record and folds back out of [Queue.Load] for free.
+	Cost *LandingCost `json:"cost,omitempty"`
 	// Built is a commit this item has already produced but not landed: the
 	// resume point for an item waiting on a gate. Kept apart from Head, which
 	// is what a settled item landed — an item that is merely waiting must not
@@ -355,6 +360,42 @@ type WorkItem struct {
 	// way intake is separate from drain. Persists through record() marshaling
 	// the whole item, exactly as every other in-claim flag here does.
 	AwaitingReplan bool `json:"awaiting_replan,omitempty"`
+}
+
+// LandingCost is what landing an item cost: the sum of the charges of every
+// run that served it, across build attempts, rebases, and reviews (issue
+// #183). Computed once at Done and carried on the done record, never
+// recomputed by a later reader.
+//
+// Known is the money figure's own known/unknown marker, distinct from the
+// figure being zero. A charge that never said what it cost, or a
+// compaction sweep that may have carried off some of this item's charges
+// before the fold ran, makes CostMicros an undercount rather than an
+// honest total — Known false is what tells a reader "this is not a
+// number", where a bare absent or zero-valued field would silently read as
+// free. Tokens and Runs are best-effort even when Known is false: a
+// partial tally of what IS on the chain, never claimed complete.
+type LandingCost struct {
+	// CostMicros is the summed cost, in millionths of a dollar, of every
+	// metered-and-priced charge found. Meaningless as a total unless Known.
+	CostMicros int64 `json:"cost_micros"`
+	// Tokens is the summed token count across every charge found, metered
+	// or not.
+	Tokens int64 `json:"tokens"`
+	// Runs is how many charge records were summed: attempts, rebases, and
+	// reviews together.
+	Runs int `json:"runs"`
+	// Reviews is how many of those runs were a diff-judging gate's verdict
+	// — never a rebase-carried verdict, which is a review nobody paid for.
+	Reviews int `json:"reviews"`
+	// Unmetered counts charges that never said what they cost at all.
+	Unmetered int `json:"unmetered,omitempty"`
+	// Unpriced counts charges that said tokens but not money.
+	Unpriced int `json:"unpriced,omitempty"`
+	// Known is true only when at least one charge was found and every
+	// charge found was both metered and priced. False means CostMicros is
+	// not the figure — never a smaller true one.
+	Known bool `json:"known"`
 }
 
 // ErrStopped reports that the stop button is down: no new claims, tenant-wide,

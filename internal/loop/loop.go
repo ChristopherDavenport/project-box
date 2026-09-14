@@ -1340,6 +1340,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
 		checks.Status{Green: true, Lane: string(forge.LaneGated)}, l.Runner)
 	l.recordLanding(ctx, &item, ws, base, head)
+	item.Cost = l.landingCost(ctx, item, ws)
 	item, err = q.Done(ctx, item, claim, head)
 	l.recordIssueClosed(ctx, item, cs, landing)
 	return l.settle(ctx, item), err
@@ -1618,6 +1619,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 			// The red did not reproduce: the flaky record is the fact, the
 			// commit is green on the chain, and nobody is summoned.
 			item.Note = "landed green on re-run; flaky check recorded: " + reason
+			item.Cost = l.landingCost(ctx, item, ws)
 			item, derr := q.Done(ctx, item, claim, head)
 			return l.settle(ctx, item), derr
 		}
@@ -1656,12 +1658,14 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		// The item landed its change; main being red is now the repair
 		// item's problem. Done, with the note carrying the trail.
 		item.Note = note
+		item.Cost = l.landingCost(ctx, item, ws)
 		item, derr := q.Done(ctx, item, claim, head)
 		return l.settle(ctx, item), derr
 	}
 
 	checks.Write(ctx, l.Store, item.Tenant, l.Repo.Name, string(head),
 		checks.Status{Green: true, Lane: string(forge.LaneOptimistic)}, l.Runner)
+	item.Cost = l.landingCost(ctx, item, ws)
 	item, derr := q.Done(ctx, item, claim, head)
 	return l.settle(ctx, item), derr
 }
@@ -2306,6 +2310,130 @@ func (l *Loop) landWithRetries(ctx context.Context, item queue.WorkItem, lander 
 		}
 	}
 	return forge.Landing{}, fmt.Errorf("%w (after %d tries)", lastErr, maxTries)
+}
+
+// landingCost sums every charge the meter recorded under this item's own id
+// as subject into the figure [Queue.Done] writes onto the done record
+// (issue #183): every build attempt, rebase, and review the item paid for,
+// across the whole claim, not just this one Run.
+//
+// The builder charges under ws.Run and the reviewer under cs.Run — both
+// item.ID (see builder.go, reviewer.go) — so [evidence.Log.BySubject] over
+// item.ID finds every charge either of them made; the planner charges under
+// "plan-"+ingress id, an entirely different subject, so it is never even
+// considered. Money is known only when at least one charge was found and
+// every charge found was both metered and priced: a single unmetered or
+// unpriced charge, or none at all, makes CostMicros an undercount rather
+// than a total this can vouch for — unknown never reads as zero.
+func (l *Loop) landingCost(ctx context.Context, item queue.WorkItem, ws forge.Workspace) *queue.LandingCost {
+	cost := &queue.LandingCost{}
+	knownMoney := !l.capacityMaybeSwept(ctx, item)
+	for r, err := range l.Store.Log().BySubject(ctx, item.Tenant, item.ID) {
+		if err != nil {
+			// An unreadable chain proves nothing about what it would have
+			// shown: the whole figure is unknown rather than whatever partial
+			// sum was collected before the error.
+			return &queue.LandingCost{}
+		}
+		if r.Scope != "control/capacity" || r.Kind != "charge" {
+			continue
+		}
+		var s capacity.Spend
+		if json.Unmarshal(r.Body, &s) != nil {
+			knownMoney = false
+			continue
+		}
+		cost.Runs++
+		cost.Tokens += s.Tokens()
+		if !s.Reported {
+			cost.Unmetered++
+			knownMoney = false
+			continue
+		}
+		cost.CostMicros += s.CostMicros
+		if !s.Priced() {
+			cost.Unpriced++
+			knownMoney = false
+		}
+	}
+	cost.Known = cost.Runs > 0 && knownMoney
+	cost.Reviews = l.countReviews(ctx, item, ws)
+	return cost
+}
+
+// capacityMaybeSwept reports whether the compactor may have carried off some
+// of item's own charges before [Loop.landingCost] summed them (issue #183).
+//
+// control/capacity is one of [daemon.StandingScopes]: a sweep replaces every
+// record up to some point with one summary record seated at the pruned
+// head, so the oldest surviving record's own timestamp is the boundary
+// before which nothing survives. If that boundary is AFTER item's own first
+// workitem/<id> record — item was already open when the sweep ran — some of
+// the charges item generated between opening and the boundary may be gone
+// from the chain with no trace that they ever existed. If the boundary
+// predates item's opening, every charge item could have made necessarily
+// postdates it too, and nothing about item was swept.
+//
+// Unable to read either chain fails closed (true, "maybe swept"): a scope
+// with no capacity records at all reports false, since there is nothing on
+// it to have swept item's charges from.
+func (l *Loop) capacityMaybeSwept(ctx context.Context, item queue.WorkItem) bool {
+	opened, ok := l.itemOpenedAt(ctx, item)
+	if !ok {
+		return true
+	}
+	for r, err := range l.Store.Log().Since(ctx, item.Tenant, "control/capacity", 1) {
+		if err != nil {
+			return true
+		}
+		return r.At.After(opened)
+	}
+	return false
+}
+
+// itemOpenedAt is the At of item's own first workitem/<id> record.
+func (l *Loop) itemOpenedAt(ctx context.Context, item queue.WorkItem) (time.Time, bool) {
+	for r, err := range l.Store.Log().Since(ctx, item.Tenant, "workitem/"+item.ID, 0) {
+		if err != nil {
+			return time.Time{}, false
+		}
+		return r.At, true
+	}
+	return time.Time{}, false
+}
+
+// countReviews counts kind "gate" verdict records on item's own chain whose
+// gate belongs to a diff-judging gate in item's current gate set — a review
+// someone paid a reviewer to run, as opposed to a "gate-carried" record,
+// which is a rebase replaying a verdict nobody re-ran and so never appears
+// under kind "gate" at all.
+func (l *Loop) countReviews(ctx context.Context, item queue.WorkItem, ws forge.Workspace) int {
+	diffGates := map[string]bool{}
+	for _, g := range l.gatesFor(item, ws) {
+		if diffJudge(g) {
+			diffGates[g.Name()] = true
+		}
+	}
+	if len(diffGates) == 0 {
+		return 0
+	}
+	n := 0
+	for r, err := range l.Store.Log().Since(ctx, item.Tenant, "workitem/"+item.ID, 0) {
+		if err != nil {
+			break
+		}
+		if r.Kind != "gate" {
+			continue
+		}
+		var vr gateVerdictRecord
+		if json.Unmarshal(r.Body, &vr) != nil {
+			continue
+		}
+		if diffGates[vr.Gate] {
+			n++
+		}
+	}
+	return n
 }
 
 // settle runs the handoff hook after any settle; closure over termination.

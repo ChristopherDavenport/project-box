@@ -18,6 +18,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/authz"
 	"github.com/ChristopherDavenport/project-box/internal/capacity"
 	"github.com/ChristopherDavenport/project-box/internal/checks"
+	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/gate"
@@ -3295,5 +3296,175 @@ func TestASingleCommitBuildIsUnchangedBySquash(t *testing.T) {
 	landed := strings.TrimSpace(mustSh(t, e.remote, "git", "rev-parse", "refs/heads/main"))
 	if landed != string(builder.built) {
 		t.Fatalf("landed sha = %s, want the builder's own unmoved sha %s", landed, builder.built)
+	}
+}
+
+// appendCharge writes one control/capacity "charge" record straight onto the
+// store's log, standing in for what [capacity.Meter.Charge] would have
+// written for a real run — see [Loop.landingCost] (issue #183). at is set
+// explicitly, and deliberately before the item's own opening: the item's
+// workitem/<id> chain and control/capacity are independent scopes appended
+// in whatever order the test likes, and [Loop.capacityMaybeSwept] compares
+// timestamps, not append order, so a charge appended after Submit must still
+// carry an At that predates it for the "nothing was swept" case these tests
+// exercise.
+func appendCharge(t *testing.T, s *sqlite.Store, itemID string, at time.Time, body string) {
+	t.Helper()
+	if _, err := s.Log().Append(context.Background(), evidence.Record{
+		Tenant: tn, Scope: "control/capacity", Kind: "charge", Subject: itemID,
+		Actor: "runner-1", Body: []byte(body), At: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestLandingCostSumsEveryChargeOnTheItem is issue #183's happy path: every
+// charge recorded under the item's own id as subject — across builder
+// attempts and the reviewer alike — folds into one figure on the done
+// record, and the fold survives the event-sourced round trip through
+// [queue.Queue.Load].
+func TestLandingCostSumsEveryChargeOnTheItem(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	before := time.Now().Add(-time.Hour)
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-183a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, err := q.Submit(ctx, ItemFor(ing, "wi-183a", "close issue 183a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two builder-attempt charges and one reviewer charge, all metered and
+	// priced.
+	appendCharge(t, e.store, "wi-183a", before, `{"tokens":300,"cost_micros":1000,"metered":true}`)
+	appendCharge(t, e.store, "wi-183a", before, `{"tokens":400,"cost_micros":2000,"metered":true}`)
+	appendCharge(t, e.store, "wi-183a", before, `{"tokens":100,"cost_micros":500,"metered":true}`)
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("item did not finish: %+v", item)
+	}
+	if item.Cost == nil {
+		t.Fatal("done item carries no Cost")
+	}
+	if !item.Cost.Known {
+		t.Fatalf("cost should be known: %+v", item.Cost)
+	}
+	if item.Cost.CostMicros != 3500 {
+		t.Fatalf("cost_micros = %d, want 3500", item.Cost.CostMicros)
+	}
+	if item.Cost.Tokens != 800 {
+		t.Fatalf("tokens = %d, want 800", item.Cost.Tokens)
+	}
+	if item.Cost.Runs != 3 {
+		t.Fatalf("runs = %d, want 3", item.Cost.Runs)
+	}
+	if item.Cost.Unmetered != 0 || item.Cost.Unpriced != 0 {
+		t.Fatalf("expected no unmetered/unpriced charges: %+v", item.Cost)
+	}
+
+	// The fold survives the event-sourced round trip: record() marshals the
+	// whole item, so Load's fold over the chain must reproduce Cost exactly.
+	loaded, err := q.Load(ctx, tn, "wi-183a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Cost == nil || *loaded.Cost != *item.Cost {
+		t.Fatalf("Load did not preserve Cost: got %+v, want %+v", loaded.Cost, item.Cost)
+	}
+}
+
+// TestLandingCostIsUnknownWhenAnyChargeIsUnmetered is issue #183's central
+// rule: unknown never reads as zero, nor as a plausible-looking smaller sum.
+// One unmetered charge among otherwise-priced ones must flip the whole
+// money figure unknown, while still counting toward runs and the unmetered
+// tally.
+func TestLandingCostIsUnknownWhenAnyChargeIsUnmetered(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	before := time.Now().Add(-time.Hour)
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-183b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, err := q.Submit(ctx, ItemFor(ing, "wi-183b", "close issue 183b"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appendCharge(t, e.store, "wi-183b", before, `{"tokens":300,"cost_micros":1000,"metered":true}`)
+	appendCharge(t, e.store, "wi-183b", before, `{"tokens":400,"cost_micros":2000,"metered":true}`)
+	appendCharge(t, e.store, "wi-183b", before, `{"metered":false}`)
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("item did not finish: %+v", item)
+	}
+	if item.Cost == nil {
+		t.Fatal("done item carries no Cost")
+	}
+	if item.Cost.Known {
+		t.Fatalf("cost should read unknown, not the smaller metered-only sum: %+v", item.Cost)
+	}
+	if item.Cost.Unmetered != 1 {
+		t.Fatalf("unmetered = %d, want 1", item.Cost.Unmetered)
+	}
+	if item.Cost.Runs != 3 {
+		t.Fatalf("runs = %d, want 3 — an unmetered charge still counts as a run", item.Cost.Runs)
+	}
+}
+
+// TestLandingCostIgnoresChargesUnderAnotherSubject is issue #183's
+// collision guard: the planner charges under "plan-"+ingress id, never the
+// item's own id, so a charge recorded there must never bleed into an
+// item's landing cost.
+func TestLandingCostIgnoresChargesUnderAnotherSubject(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	before := time.Now().Add(-time.Hour)
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-183c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, err := q.Submit(ctx, ItemFor(ing, "wi-183c", "close issue 183c"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	appendCharge(t, e.store, "wi-183c", before, `{"tokens":300,"cost_micros":1000,"metered":true}`)
+	appendCharge(t, e.store, "plan-"+ing.ID, before, `{"tokens":9000,"cost_micros":90000,"metered":true}`)
+
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("item did not finish: %+v", item)
+	}
+	if item.Cost == nil {
+		t.Fatal("done item carries no Cost")
+	}
+	if !item.Cost.Known {
+		t.Fatalf("cost should be known: %+v", item.Cost)
+	}
+	if item.Cost.Runs != 1 {
+		t.Fatalf("runs = %d, want 1 — the plan- charge must not be counted", item.Cost.Runs)
+	}
+	if item.Cost.CostMicros != 1000 || item.Cost.Tokens != 300 {
+		t.Fatalf("the plan- charge leaked into the sum: %+v", item.Cost)
 	}
 }
