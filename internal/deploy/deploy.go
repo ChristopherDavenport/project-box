@@ -68,8 +68,8 @@ func gitIn(ctx context.Context, dir string, args ...string) (string, error) {
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_AUTHOR_NAME=project-box", "GIT_AUTHOR_EMAIL=box@invalid",
-		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=box@invalid")
+		"GIT_AUTHOR_NAME=project-box", "GIT_AUTHOR_EMAIL=noreply+pbox@christopherdavenport.tech",
+		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=noreply+pbox@christopherdavenport.tech")
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {
