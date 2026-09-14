@@ -91,7 +91,16 @@ type Loop struct {
 	// repair ingress id. Nil means even a confirmed red is recorded but
 	// nobody is summoned — configure it; see OpenRepair.
 	Red func(ctx context.Context, item queue.WorkItem, prior agent.Prior) (string, error)
-	TTL time.Duration
+	// Flaky opens remediation work when a gated landing returns a proven
+	// flake: the in-loop check went green, but an independent CI run for
+	// the same commit went red then green — issue #275's ci-flake
+	// classification, surfaced on [forge.Placement.Flakes]. It is handed
+	// the flaked test so the summons is worth answering: the package, the
+	// test, the commit sha, and which runs disagreed. Returns the opened
+	// ingress id. Nil means a proven flake is recorded but nobody is
+	// summoned — configure it; see OpenFlake.
+	Flaky func(ctx context.Context, item queue.WorkItem, f forge.FlakedTest) (string, error)
+	TTL   time.Duration
 	// Suspend, when set, makes the loop resume-aware: [Loop.buildDeadline]
 	// extends a build's timer by a detected suspend gap instead of letting
 	// it lapse on wall-clock time the run never got to spend (see
@@ -252,6 +261,12 @@ const DefaultBuildTimeout = 30 * time.Minute
 // depth is configured: a repair, a repair of that, a repair of that.
 const MaxRepairDepth = 3
 
+// MaxFlakeDepth bounds how far the factory will chase its own tail on flake
+// remediation when no depth is configured, the same shape as
+// [MaxRepairDepth] for the same reason: a flake fix whose own landing
+// flakes must not summon forever.
+const MaxFlakeDepth = 3
+
 // DefaultMaxHandoffs bounds how many times one item may ask for a fresh
 // session when the Box states no limit of its own.
 //
@@ -372,6 +387,49 @@ func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) 
 			// re-opening nothing external asserted. Run names the item
 			// whose red landing summoned this repair, so a reader can walk
 			// from the repair back to the attempt that failed.
+			Source: ingress.Source{Subject: router.Runner, Method: "factory", Channel: "factory", Run: item.ID},
+		})
+		if err != nil {
+			return "", err
+		}
+		return ing.ID, nil
+	}
+}
+
+// OpenFlake wires Flaky to an ingress route: the delivery key folds the
+// test, the package AND the sha together, so idempotency is structural
+// without conflating two different facts. The dedup sha256(route+key)
+// computes is permanent, and a test that flakes again at a later commit is
+// a new occurrence that deserves new work, while repeated observations of
+// the same head must fold to the one ingress already open for it.
+//
+// maxDepth bounds the CHAIN the same way [OpenRepair]'s does: a flake fix
+// whose own landing flakes must not summon forever. Zero uses
+// [MaxFlakeDepth]; negative means no bound, which is a decision an operator
+// can make and the factory will not make for them.
+func OpenFlake(router *ingress.StoreRouter, route ingress.Route, maxDepth int) func(context.Context, queue.WorkItem, forge.FlakedTest) (string, error) {
+	if maxDepth == 0 {
+		maxDepth = MaxFlakeDepth
+	}
+	return func(ctx context.Context, item queue.WorkItem, f forge.FlakedTest) (string, error) {
+		if maxDepth > 0 && item.Depth >= maxDepth {
+			// Deep enough. The flake is on record either way; what stops
+			// here is the factory summoning itself again.
+			return "", fmt.Errorf("flake chain reached depth %d without resolving — stopping rather than opening another: %s/%s at %s",
+				item.Depth, f.Package, f.Test, f.Sha)
+		}
+		task := fmt.Sprintf(
+			"Repo %s: test %s in package %s flaked at commit %s. Independent CI reported it red on run %d and green on run %d for the same commit — see %s. Both conclusions are real: the code failed, and the identical commit later passed. Fix the flaky test — do not skip, tag, or quarantine it without an operator saying so: a real correctness test must not be silenced by default.",
+			item.Repo, f.Test, f.Package, f.Sha, f.RedRunID, f.GreenRunID, f.URL)
+		ing, _, err := router.Open(ctx, route, ingress.Delivery{
+			Key:     fmt.Sprintf("flake-%s/%s-%s", f.Package, f.Test, f.Sha),
+			Title:   fmt.Sprintf("flaky: %s/%s", f.Package, f.Test),
+			Payload: []byte(task), Depth: item.Depth + 1,
+			// Subject names the router's own Runner — the identity this
+			// daemon runs as, the only truthful "who" available to a
+			// re-opening nothing external asserted. Run names the item
+			// whose landing proved the flake, so a reader can walk from
+			// the remediation back to the landing.
 			Source: ingress.Source{Subject: router.Runner, Method: "factory", Channel: "factory", Run: item.ID},
 		})
 		if err != nil {
@@ -1475,6 +1533,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		return l.dropped(ctx, item, err)
 	}
 	l.recordIssueClosed(ctx, item, cs, landing)
+	l.openFlakeRemediation(ctx, item, landing)
 	return l.settle(ctx, item), err
 }
 
@@ -1524,6 +1583,35 @@ func (l *Loop) recordIssueClosed(ctx context.Context, item queue.WorkItem, cs fo
 		}
 		l.record(ctx, item, "issue-closed", string(pl.Now),
 			fmt.Sprintf(`{"issue":%q,"commit":%q,"pr_url":%q,"closed_by":%q}`, cs.DrivingIssue, pl.Now, pl.PRURL, pl.IssueClosedBy))
+	}
+}
+
+// openFlakeRemediation turns every proven flake landing carries (issue #275,
+// [forge.Placement.Flakes]) into remediation work, a side effect of a
+// landing that actually settled — this runs only after [queue.Queue.Done]
+// succeeded, never on the superseded/dropped branch above it, and PRLander
+// is the only Lander that ever populates Flakes, so this is a no-op for a
+// plain git.Lander landing.
+//
+// l.Flaky nil means a proven flake is recorded but nobody is summoned. A
+// hook error is recorded and never unsettles the landing — the same posture
+// [Loop.settle] takes with a failing Handoff: losing a remediation summons
+// must not lose the fact that the change landed.
+func (l *Loop) openFlakeRemediation(ctx context.Context, item queue.WorkItem, landing forge.Landing) {
+	if l.Flaky == nil {
+		return
+	}
+	for _, pl := range landing.Landed {
+		for _, f := range pl.Flakes {
+			id, err := l.Flaky(ctx, item, f)
+			if err != nil {
+				l.record(ctx, item, "flake-remediation-failed", f.Sha,
+					fmt.Sprintf(`{"test":%q,"package":%q,"error":%q}`, f.Test, f.Package, err.Error()))
+				continue
+			}
+			l.record(ctx, item, "flake-remediation", f.Sha,
+				fmt.Sprintf(`{"test":%q,"package":%q,"ingress":%q}`, f.Test, f.Package, id))
+		}
 	}
 }
 

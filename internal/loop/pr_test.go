@@ -2,7 +2,9 @@ package loop
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/forge/git"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
+	"github.com/ChristopherDavenport/project-box/internal/kind"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 )
 
@@ -26,6 +29,10 @@ type prStub struct {
 	inner *git.Lander
 	prURL string
 	cs    forge.ChangeSet
+	// flakes, when set, is stamped onto the first landed member the way
+	// git.PRLander stamps [forge.Placement.Flakes] after observing an
+	// independent CI red-then-green for the same commit.
+	flakes []forge.FlakedTest
 }
 
 func (s *prStub) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing, error) {
@@ -35,6 +42,9 @@ func (s *prStub) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing, e
 		for i := range landing.Landed {
 			landing.Landed[i].PRURL = s.prURL
 		}
+	}
+	if err == nil && len(s.flakes) > 0 && len(landing.Landed) > 0 {
+		landing.Landed[0].Flakes = s.flakes
 	}
 	return landing, err
 }
@@ -392,5 +402,206 @@ func TestALandingTheRemoteRefusedKeepsTheCommitForTheRetry(t *testing.T) {
 	}
 	if gateRuns != 1 {
 		t.Fatalf("the retry re-ran the gate on a commit it had already passed: %d gate runs", gateRuns)
+	}
+}
+
+// flakeRoute is the ingress route flake remediation opens against — a
+// standing test fixture the way issueRoute is, not a new declared kind.
+func flakeRoute() ingress.Route {
+	return ingress.Route{Name: "flaky-tests", Kind: ingress.RouteRedMain, Opens: kind.SeedIssue, Box: "shop", Requester: "gargoyle"}
+}
+
+// TestFlakedLandingOpensRemediation is issue #275's loop half: a gated
+// landing that comes back carrying a proven flake ([forge.Placement.Flakes],
+// populated only by a Lander like PRLander that talked to an independent
+// CI) must turn into remediation work — a side effect of a landing that
+// actually settled, not a record nobody reads.
+func TestFlakedLandingOpensRemediation(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	stub := wirePRStub(e, "")
+	f := forge.FlakedTest{
+		Test: "TestWidget", Package: "internal/widget", Sha: "flake-sha-1",
+		RedRunID: 10, GreenRunID: 11, URL: "https://ci.example/run/11",
+	}
+	stub.flakes = []forge.FlakedTest{f}
+	e.loop.Flaky = OpenFlake(e.router, flakeRoute(), 0)
+
+	route := issueRoute()
+	route.Repo = "app"
+	ing, _, err := e.router.Open(ctx, route, ingress.Delivery{Key: "issue-flake-1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flake-1", "close issue flake-1"))
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("a flaked landing should still settle done: %+v", item)
+	}
+
+	var remediations []string
+	for r, err := range e.store.Log().BySubject(ctx, tn, f.Sha) {
+		if err != nil {
+			t.Fatalf("bysubject: %v", err)
+		}
+		if r.Kind == "flake-remediation" {
+			remediations = append(remediations, string(r.Body))
+		}
+	}
+	if len(remediations) != 1 {
+		t.Fatalf("want exactly one flake-remediation record, got %d: %v", len(remediations), remediations)
+	}
+	body := remediations[0]
+	if !strings.Contains(body, f.Test) || !strings.Contains(body, f.Package) {
+		t.Fatalf("remediation record does not name the flaked test: %s", body)
+	}
+	_, rest, found := strings.Cut(body, `"ingress":"`)
+	if !found {
+		t.Fatalf("remediation record does not name the opened ingress: %s", body)
+	}
+	ingID, _, _ := strings.Cut(rest, `"`)
+
+	head, err := e.store.Log().Head(ctx, tn, "ingress/"+ingID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var opened ingress.Ingress
+	if err := json.Unmarshal(head.Body, &opened); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"app", f.Package, f.Test, f.Sha, "10", "11", f.URL, "do not skip, tag, or quarantine"} {
+		if !strings.Contains(opened.Note, want) {
+			t.Fatalf("opened ingress does not name %q: %s", want, opened.Note)
+		}
+	}
+}
+
+// TestNilFlakyOpensNothing: [Loop.Flaky] unset means a proven flake is
+// recorded but nobody is summoned — the same nil-safe posture [Loop.Red]
+// takes — and the landing still settles done.
+func TestNilFlakyOpensNothing(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	stub := wirePRStub(e, "")
+	stub.flakes = []forge.FlakedTest{{
+		Test: "TestWidget", Package: "internal/widget", Sha: "flake-sha-nil",
+		RedRunID: 1, GreenRunID: 2, URL: "https://ci.example/run/2",
+	}}
+	// e.loop.Flaky is left nil, the default.
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-flake-nil"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flake-nil", "close issue flake-nil"))
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("a flaked landing should still settle done with Flaky unset: %+v", item)
+	}
+	for r, err := range e.store.Log().BySubject(ctx, tn, "flake-sha-nil") {
+		if err != nil {
+			t.Fatalf("bysubject: %v", err)
+		}
+		if strings.HasPrefix(r.Kind, "flake-remediation") {
+			t.Fatalf("nil Flaky should summon nobody, found record: %+v", r)
+		}
+	}
+}
+
+// TestFlakyHookErrorLeavesLandingSettled: a hook error is recorded and never
+// unsettles the landing — the same posture [Loop.settle] takes with a
+// failing Handoff.
+func TestFlakyHookErrorLeavesLandingSettled(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	stub := wirePRStub(e, "")
+	f := forge.FlakedTest{
+		Test: "TestWidget", Package: "internal/widget", Sha: "flake-sha-err",
+		RedRunID: 3, GreenRunID: 4, URL: "https://ci.example/run/4",
+	}
+	stub.flakes = []forge.FlakedTest{f}
+	e.loop.Flaky = func(ctx context.Context, item queue.WorkItem, got forge.FlakedTest) (string, error) {
+		return "", errors.New("router is down")
+	}
+
+	ing, _, err := e.router.Open(ctx, issueRoute(), ingress.Delivery{Key: "issue-flake-err"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+	item, _ := q.Submit(ctx, ItemFor(ing, "wi-flake-err", "close issue flake-err"))
+	item, err = e.loop.Run(ctx, item)
+	if err != nil {
+		t.Fatalf("loop: %v", err)
+	}
+	if item.State != queue.StateDone {
+		t.Fatalf("a Flaky hook error must not unsettle a landed item: %+v", item)
+	}
+
+	found := false
+	for r, err := range e.store.Log().BySubject(ctx, tn, f.Sha) {
+		if err != nil {
+			t.Fatalf("bysubject: %v", err)
+		}
+		if r.Kind == "flake-remediation-failed" {
+			found = true
+			if !strings.Contains(string(r.Body), "router is down") {
+				t.Fatalf("failure record does not carry the error: %s", r.Body)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("a Flaky hook error should still be recorded")
+	}
+}
+
+// TestSameFlakeObservedTwiceFoldsToOneIngress: the delivery key OpenFlake
+// derives folds test, package AND sha together, so a second observation of
+// the SAME flake at the SAME commit resolves to the one ingress already
+// open for it — sha256(route+key) dedup is permanent, structural, not a
+// second reading of anything.
+func TestSameFlakeObservedTwiceFoldsToOneIngress(t *testing.T) {
+	e := setup(t, []string{"true"})
+	ctx := context.Background()
+	route := flakeRoute()
+	flaky := OpenFlake(e.router, route, 0)
+	f := forge.FlakedTest{
+		Test: "TestWidget", Package: "internal/widget", Sha: "flake-sha-dedup",
+		RedRunID: 5, GreenRunID: 6, URL: "https://ci.example/run/6",
+	}
+
+	id1, err := flaky(ctx, queue.WorkItem{ID: "wi-dedup-1", Repo: "app"}, f)
+	if err != nil || id1 == "" {
+		t.Fatalf("the first observation should open: %q %v", id1, err)
+	}
+	id2, err := flaky(ctx, queue.WorkItem{ID: "wi-dedup-2", Repo: "app"}, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 != id1 {
+		t.Fatalf("the same flake at the same commit opened a second ingress: %q vs %q", id2, id1)
+	}
+
+	// The fold is structural, not a coincidence of equal ids: the router
+	// itself reports the occurrence as not fresh.
+	ing, fresh, err := e.router.Open(ctx, route, ingress.Delivery{
+		Key: fmt.Sprintf("flake-%s/%s-%s", f.Package, f.Test, f.Sha),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fresh {
+		t.Fatal("the second observation of the same flake should not be fresh")
+	}
+	if ing.ID != id1 {
+		t.Fatalf("router.Open resolved a different ingress: %q, want %q", ing.ID, id1)
 	}
 }
