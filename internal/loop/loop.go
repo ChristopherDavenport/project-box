@@ -92,6 +92,18 @@ type Loop struct {
 	// nobody is summoned — configure it; see OpenRepair.
 	Red func(ctx context.Context, item queue.WorkItem, prior agent.Prior) (string, error)
 	TTL time.Duration
+	// Suspend, when set, makes the loop resume-aware: [Loop.buildDeadline]
+	// extends a build's timer by a detected suspend gap instead of letting
+	// it lapse on wall-clock time the run never got to spend (see
+	// [Loop.suspendAwareDeadline]), and a resume notification re-asserts
+	// every lease this run currently holds — the claim, the section grant,
+	// the workspace lease and, once landing starts, the land lease (see
+	// [Loop.renewOnResume]). Nil preserves exactly today's behavior — a
+	// build bounded by a plain context.WithTimeout and leases that rely on
+	// their own TTL and Checkout's one-time renewal alone — which is every
+	// existing construction of Loop, in tests and otherwise (the
+	// [Loop.PRLander] precedent).
+	Suspend *SuspendWatch
 	// MaxHandoffs bounds how many fresh sessions one item may ask for before
 	// it parks instead. Zero means [DefaultMaxHandoffs]; negative means no bound,
 	// which is a decision an operator can make and the factory will not make
@@ -580,6 +592,15 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		}
 	}
 
+	// held tracks every lease this run currently owns so a resume
+	// notification can renew all of them (see [Loop.renewOnResume]); a nil
+	// [Loop.Suspend] still returns a usable, harmlessly-unsubscribed
+	// tracker, so every held.set below runs unconditionally rather than
+	// branching on whether suspend-awareness is configured.
+	held, detachRenewal := l.renewOnResume(ctx)
+	defer detachRenewal()
+	held.set("claim", claim)
+
 	if deny, err := l.authorize(ctx, item, authz.ActionPropose); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	} else if deny != "" {
@@ -606,8 +627,9 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		// ever spent. item.SectionWaits = 0 for the same reason the direct
 		// path below zeroes it: this run of the item is not waiting.
 		item.SectionWaits = 0
+		held.setSections(grant.leases)
 	} else {
-		releaseSections, busy, err := l.leaseSections(ctx, item)
+		releaseSections, sectionLeases, busy, err := l.leaseSections(ctx, item)
 		if err != nil {
 			return q.Park(ctx, item, claim, queue.SeverityMedium, err.Error())
 		}
@@ -617,6 +639,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		}
 		item.SectionWaits = 0
 		defer releaseSections()
+		held.setSections(sectionLeases)
 	}
 
 	leaser := l.Store.Leaser(l.Runner)
@@ -650,6 +673,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		return q.Wait(ctx, item, claim, fmt.Sprintf("workspace for %s is leased: %v", item.ID, err))
 	}
 	defer l.release(ctx, wsLease, item.ID)
+	held.set("workspace", wsLease)
 
 	if err := l.Mirror.Fetch(ctx, l.Repo); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
@@ -858,7 +882,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 						switch widened, answer := l.widenGrant(item, esc); answer {
 						case widenGranted:
 							missing := missingSections(item.Sections, widened)
-							releaseExtra, busy, aerr := l.acquireSections(ctx, item, missing)
+							releaseExtra, extraLeases, busy, aerr := l.acquireSections(ctx, item, missing)
 							if aerr != nil {
 								return q.Fail(ctx, item, claim, "widen: "+aerr.Error())
 							}
@@ -869,6 +893,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 								return l.settle(ctx, item), nil
 							}
 							defer releaseExtra()
+							held.setSections(extraLeases)
 							before := item.Sections
 							item.Sections = widened
 							body, _ := json.Marshal(struct {
@@ -893,6 +918,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 							if rerr != nil {
 								return q.Fail(ctx, item, claim, fmt.Sprintf("retaining attempt %d of %d: %v", next, budget, rerr))
 							}
+							held.set("claim", claim)
 							continue
 						case widenAsksPlanner:
 							// The need is named and every section it asks for is
@@ -978,7 +1004,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		}
 
 		if l.Lane == forge.LaneOptimistic {
-			return l.runOptimistic(ctx, q, item, claim, ws, cs, base, head)
+			return l.runOptimistic(ctx, q, item, claim, ws, cs, base, head, held)
 		}
 
 		// The commit's own message is read once per head, before any gate is
@@ -1256,6 +1282,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 				if rerr != nil {
 					return q.Fail(ctx, item, claim, fmt.Sprintf("retaining attempt %d of %d: %v", next, budget, rerr))
 				}
+				held.set("claim", claim)
 				continue
 			}
 			// The budget ran out. A refusal is never a pass by exhaustion —
@@ -1315,6 +1342,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	}
 	item.LandWaits = 0
 	defer l.release(ctx, landLease, item.ID)
+	held.set("land", landLease)
 	cs.Members[0].Lease = landLease
 	var landing forge.Landing
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
@@ -1461,7 +1489,63 @@ func (l *Loop) buildDeadline(ctx context.Context) (context.Context, context.Canc
 	if d < 0 {
 		return ctx, func() {}
 	}
-	return context.WithTimeout(ctx, d)
+	if l.Suspend == nil {
+		return context.WithTimeout(ctx, d)
+	}
+	return l.suspendAwareDeadline(ctx, d)
+}
+
+// suspendAwareDeadline is buildDeadline's bound when [Loop.Suspend] is set.
+// A plain context.WithTimeout fires on wall-clock time it cannot tell from
+// real elapsed work, so a machine suspend that moves the wall clock without
+// the build getting to run a single instruction would cut the build short
+// for time it never spent. This bound is cancel-based instead: a timer for
+// the remaining budget, and when it fires, ask [SuspendWatch.Total] for any
+// suspend gap accrued since this attempt's own baseline that has not
+// already been granted, and extend the timer by exactly that instead of
+// cancelling. Only once the timer fires with nothing new to grant does bctx
+// actually get cancelled.
+//
+// The build stage's own classification ("the clock ran out, not the
+// caller": bctx.Err() != nil && ctx.Err() == nil, a few lines above where
+// l.Builder.Build is called) reads a context.WithCancel cancellation
+// exactly as it reads context.WithTimeout's deadline-exceeded one — both
+// are bctx.Err() != nil with the parent ctx untouched — so nothing
+// downstream needs to know which kind of bound it got.
+func (l *Loop) suspendAwareDeadline(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	bctx, cancel := context.WithCancel(ctx)
+	baseline := l.Suspend.Total()
+	var granted time.Duration
+	timer := time.NewTimer(d)
+	stopped := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			select {
+			case <-bctx.Done():
+				timer.Stop()
+				return
+			case <-stopped:
+				timer.Stop()
+				return
+			case <-timer.C:
+				gap := l.Suspend.Total() - baseline - granted
+				if gap > 0 {
+					granted += gap
+					timer.Reset(gap)
+					continue
+				}
+				cancel()
+				return
+			}
+		}
+	}()
+	return bctx, func() {
+		cancel()
+		close(stopped)
+		<-done
+	}
 }
 
 func short(c forge.Commit) string {
@@ -1536,7 +1620,7 @@ func (l *Loop) lander(inner *git.Lander) forge.Lander {
 // optimistic — and the gates run afterwards as checks on the branch. A red
 // check is re-run once before repair work opens — confirm the red before
 // summoning anyone; nothing rolls back by itself.
-func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, ws forge.Workspace, cs forge.ChangeSet, base, head forge.Commit) (queue.WorkItem, error) {
+func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, ws forge.Workspace, cs forge.ChangeSet, base, head forge.Commit, held *heldLeases) (queue.WorkItem, error) {
 	if deny, err := l.authorize(ctx, item, authz.ActionLand); err != nil {
 		return q.Fail(ctx, item, claim, err.Error())
 	} else if deny != "" {
@@ -1551,6 +1635,7 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		return q.Wait(ctx, item, claim, notOurTurn)
 	}
 	defer l.release(ctx, landLease, item.ID)
+	held.set("land", landLease)
 	cs.Members[0].Lease = landLease
 	var landing forge.Landing
 	if lerr := telemetry.Stage(ctx, "land", item, func(ctx context.Context) error {
@@ -2672,6 +2757,11 @@ func (l *Loop) HoldsSection(ctx context.Context, item queue.WorkItem) bool {
 type SectionGrant struct {
 	release func()
 	once    sync.Once
+	// leases is what release actually holds, keyed by section name, kept
+	// alongside it so a resume notification can renew them (see
+	// [Loop.renewOnResume]) without this type exposing anything new to
+	// [pump.Pump], which only ever calls Release.
+	leases map[string]forge.Lease
 }
 
 // Release frees the sections this grant holds, exactly once. A nil grant
@@ -2710,11 +2800,11 @@ func (l *Loop) Claim(ctx context.Context, item queue.WorkItem) (queue.WorkItem, 
 // for RunHolding to spend later. A non-empty busy or a non-nil err both mean
 // no grant was taken, matching leaseSections' own contract.
 func (l *Loop) TakeSections(ctx context.Context, item queue.WorkItem) (grant *SectionGrant, busy string, err error) {
-	release, busy, err := l.leaseSections(ctx, item)
+	release, leases, busy, err := l.leaseSections(ctx, item)
 	if release == nil {
 		return nil, busy, err
 	}
-	return &SectionGrant{release: release}, busy, err
+	return &SectionGrant{release: release, leases: leases}, busy, err
 }
 
 // widenAnswer is what [Loop.widenGrant] decided about a structured
@@ -2905,21 +2995,22 @@ func (l *Loop) recordLanding(ctx context.Context, item *queue.WorkItem, ws forge
 
 // leaseSections takes the section leases a unit needs, in one order for every
 // taker so two units cannot deadlock over two sections. It returns a release
-// for what it holds; a non-empty busy names the section somebody else holds,
-// and who, and means nothing is held. An error names a section the plan and
-// the repository disagree about.
-func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release func(), busy string, err error) {
+// for what it holds and the leases themselves, keyed by section name, so a
+// resume notification can renew them (see [Loop.renewOnResume]); a non-empty
+// busy names the section somebody else holds, and who, and means nothing is
+// held. An error names a section the plan and the repository disagree about.
+func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release func(), leases map[string]forge.Lease, busy string, err error) {
 	// The pump's fairness rule, read before anything else here is touched: a
 	// unit reserved for an oldest waiter does not even try for a section this
 	// tick, so it cannot win a race the reservation exists to prevent.
 	if item.YieldTo != "" {
 		note := fmt.Sprintf("sections of %s are reserved for %s, next in line; this unit has waited %d turns",
 			l.Repo.Name, item.YieldTo, item.SectionWaits)
-		return nil, note, nil
+		return nil, nil, note, nil
 	}
 	for _, n := range item.Sections {
 		if _, ok := l.Repo.Section(n); !ok {
-			return nil, "", fmt.Errorf("section %q is not declared by repository %s (declared: %v) — the plan and the repository disagree about where this unit works",
+			return nil, nil, "", fmt.Errorf("section %q is not declared by repository %s (declared: %v) — the plan and the repository disagree about where this unit works",
 				n, l.Repo.Name, l.Repo.SectionNames())
 		}
 	}
@@ -2941,14 +3032,14 @@ func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release 
 // escalation branch) can take only the sections an accepted escalation adds,
 // without re-acquiring — or re-validating YieldTo against — what the claim
 // already holds.
-func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names []string) (release func(), busy string, err error) {
+func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names []string) (release func(), leases map[string]forge.Lease, busy string, err error) {
 	if len(names) == 0 {
-		return func() {}, "", nil
+		return func() {}, nil, "", nil
 	}
 	names = slices.Clone(names)
 	slices.Sort(names)
 	leaser := l.Store.Leaser(l.Runner)
-	var held []forge.Lease
+	held := make(map[string]forge.Lease, len(names))
 	release = func() {
 		// Released under a context that survives this claim's cancellation:
 		// a release lost to a cancelled ctx (restart, deadline) is exactly
@@ -2974,7 +3065,7 @@ func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names [
 			// renew it (issue #162).
 			fresh, holder, note, ok := l.reapGhost(ctx, item, req)
 			if ok {
-				held = append(held, fresh)
+				held[n] = fresh
 				continue
 			}
 			release()
@@ -2996,13 +3087,13 @@ func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names [
 			if item.SectionWaits > 0 {
 				result += fmt.Sprintf("; waited %d turns", item.SectionWaits)
 			}
-			return nil, result, nil
+			return nil, nil, result, nil
 		}
 		if err != nil {
 			release()
-			return nil, "", err
+			return nil, nil, "", err
 		}
-		held = append(held, lease)
+		held[n] = lease
 	}
-	return release, "", nil
+	return release, held, "", nil
 }
