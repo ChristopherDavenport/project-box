@@ -215,6 +215,20 @@ type Loop struct {
 	// relies on its own TTL and Checkout's one-time renewal alone — which is
 	// every existing construction of Loop (the [Suspend] precedent).
 	Pulse *Heartbeat
+	// CIWaits bounds how many times in a row a landing may find its
+	// independent CI still pending ([git.CIPending]) before the item parks
+	// as a stuck-CI exception instead of waiting again. Zero means
+	// [DefaultCIWaits]; there is no "negative means unbounded" case, for the
+	// same reason [LandRetries] has none: this field is never asked to mean
+	// anything but a real bound or the default.
+	//
+	// A pending CI is the factory pacing itself, not a refusal —
+	// [git.CIPending] answers false to [git.Transient], so landWithRetries
+	// returns it immediately rather than retrying it there, and the loop
+	// waits (StateWaiting, claimable) rather than parking on the first ask.
+	// This is what stops that pacing from running forever when the CI
+	// itself, not the loop's patience, is what is actually wedged.
+	CIWaits int
 }
 
 // WidenTests is the [Loop.Widen] policy that grants a structured
@@ -260,6 +274,26 @@ const DefaultAttempts = 2
 // all — is enough to clear a flaky miss without turning a genuinely broken
 // gate into a long wait before the park a person will see anyway.
 const DefaultGateRetries = 2
+
+// DefaultCIReruns bounds how many times [PRLander.Land] (internal/forge/git)
+// may ask GitHub to rerun a red independent CI run for one candidate before
+// a further red is final ([git.CIFailed]). Asserted here rather than by the
+// forge package — see forge.ChangeSet.CIRerunsLeft's own doc — because only
+// the loop tracks a candidate's spend across ticks and claims
+// (queue.WorkItem.CIRerunsSpent). One is enough to clear the ordinary flake
+// without turning a genuinely broken CI run into a rerun loop that spends
+// Actions minutes chasing it.
+const DefaultCIReruns = 1
+
+// DefaultCIWaits bounds how many times in a row [Loop.classifyLandErr] lets
+// a *git.CIPending hold an item in StateWaiting before parking it as a
+// stuck-CI exception, when nothing configures [Loop.CIWaits]. At the
+// dogfood's 15-second tick, 80 waits is 20 minutes — generous for a real
+// GitHub Actions run, including the one rerun [DefaultCIReruns] budgets on
+// top of it, and short enough that a genuinely wedged CI becomes an
+// exception a person sees within the hour rather than a wait that never
+// ends.
+const DefaultCIWaits = 80
 
 // DefaultLandRetries bounds how many more times a landing that errored
 // transiently is re-asked when nothing configures a bound. Two more tries —
@@ -498,7 +532,7 @@ func (l *Loop) Poll(ctx context.Context, item queue.WorkItem) bool {
 	}
 	cs := forge.ChangeSet{
 		ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
-		Intent: item.Task,
+		Intent: item.Task, CIRerunsLeft: ciRerunBudget(item),
 		Members: []forge.Member{{
 			Repo: l.Repo.Name, Branch: l.Branch,
 			Base: forge.Commit(item.BuiltBase), Head: forge.Commit(item.Built),
@@ -1060,7 +1094,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		cs = forge.ChangeSet{
 			ID: "cs-" + item.ID, Tenant: item.Tenant, Box: item.Box, Run: item.ID,
 			Intent: item.Task, DrivingIssue: drivingIssue(item.OriginKey),
-			OriginKey: item.OriginKey,
+			OriginKey: item.OriginKey, CIRerunsLeft: ciRerunBudget(item),
 			Members: []forge.Member{{
 				Repo: l.Repo.Name, Branch: l.Branch, Base: base, Head: head,
 				Summary: item.Summary,
@@ -1425,6 +1459,9 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		// post), and each retry built, checked and reviewed the same
 		// change again.
 		item.KeepCandidate(head, base, passedNow)
+		if out, cerr, handled := l.classifyLandErr(ctx, q, item, claim, lerr); handled {
+			return out, cerr
+		}
 		return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
 	}
 	// Green by construction: the gates passed before the land. Recorded all
@@ -1715,6 +1752,9 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		// the commit is kept for the retry to land as it is; no gate has
 		// run on this lane yet, so none is carried.
 		item.KeepCandidate(head, base, nil)
+		if out, cerr, handled := l.classifyLandErr(ctx, q, item, claim, lerr); handled {
+			return out, cerr
+		}
 		return q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, "land: "+lerr.Error())
 	}
 	l.recordLanding(ctx, &item, ws, base, head)
@@ -2161,6 +2201,72 @@ func (l *Loop) landBackoff(try int) time.Duration {
 		d *= 10
 	}
 	return d
+}
+
+// ciWaits bounds how many times in a row [Loop.classifyLandErr] lets a
+// *git.CIPending wait before parking. Mirrors [Loop.landRetries]'s "zero
+// means default" rule with no item-level override: pacing on GitHub's own
+// independent CI is the loop's infrastructure concern, not a per-item
+// budget.
+func (l *Loop) ciWaits() int {
+	if l.CIWaits > 0 {
+		return l.CIWaits
+	}
+	return DefaultCIWaits
+}
+
+// ciRerunBudget resolves item's remaining independent-CI rerun budget:
+// [DefaultCIReruns] minus what [queue.WorkItem.CIRerunsSpent] already
+// recorded spent, floored at zero so a persisted spend can never read back
+// as more budget than none — the [forge.ChangeSet.CIRerunsLeft] value the
+// loop, and only the loop, asserts on every cs it builds toward Land.
+func ciRerunBudget(item queue.WorkItem) int {
+	if item.CIRerunsSpent >= DefaultCIReruns {
+		return 0
+	}
+	return DefaultCIReruns - item.CIRerunsSpent
+}
+
+// classifyLandErr tells a pending or failed independent CI ([git.CIPending],
+// [git.CIFailed]) apart from every other landing error, which the caller
+// still parks itself on handled=false. The caller has already called
+// [queue.WorkItem.KeepCandidate] on item before this runs — every branch
+// here keeps that candidate, never drops it.
+//
+// A pending CI is the factory pacing itself, not a refusal: item.CIWaits
+// counts the wait, item.CIRerunsSpent records a rerun [git.CIPending] says
+// it just spent, and the item goes back to StateWaiting so the next claim's
+// recheck re-enters landing, where PRLander.Land asks GitHub again — no new
+// scheduling machinery, the same cross-tick wait every other carried gate
+// uses. Past [Loop.ciWaits] waits, or on a CI that stayed red across its
+// rerun budget ([git.CIFailed]), this parks instead: the stuck-or-red-CI
+// exception an operator sees.
+func (l *Loop) classifyLandErr(ctx context.Context, q *queue.Queue, item queue.WorkItem, claim forge.Lease, lerr error) (out queue.WorkItem, err error, handled bool) {
+	var pending *git.CIPending
+	if errors.As(lerr, &pending) {
+		item.CIWaits++
+		if pending.RerunSpent {
+			item.CIRerunsSpent++
+		}
+		bound := l.ciWaits()
+		if item.CIWaits > bound {
+			out, err = q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+				"independent ci for %s (%s) still has not concluded after %d waits — parking rather than waiting again",
+				pending.Sha, pending.URL, item.CIWaits))
+			return out, err, true
+		}
+		out, err = q.Wait(ctx, item, claim, fmt.Sprintf(
+			"waiting for CI on %s (%s), wait %d of %d", pending.Sha, pending.URL, item.CIWaits, bound))
+		return out, err, true
+	}
+	var failed *git.CIFailed
+	if errors.As(lerr, &failed) {
+		out, err = q.ParkKeeping(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+			"independent ci run %d for %s (%s) stayed red across the rerun budget",
+			failed.RunID, failed.Sha, failed.URL))
+		return out, err, true
+	}
+	return queue.WorkItem{}, nil, false
 }
 
 // gateVerdictRecord is the loop-local envelope for a concluded gate's

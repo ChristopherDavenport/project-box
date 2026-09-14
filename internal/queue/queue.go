@@ -417,6 +417,21 @@ type WorkItem struct {
 	// candidate resets: [WorkItem.dropResume] and a fresh (or rebase-refused)
 	// build.
 	RebaseCount int `json:"rebase_count,omitempty"`
+	// CIWaits counts how many times in a row this claim's landing found its
+	// independent CI still pending ([git.CIPending]) and went back to
+	// StateWaiting rather than parking — the cross-tick pacing
+	// [loop.Loop.classifyLandErr] applies before [loop.DefaultCIWaits] turns
+	// it into a stuck-CI exception. Reset wherever the candidate resets:
+	// [WorkItem.dropResume] — a fresh candidate is a fresh CI conversation.
+	CIWaits int `json:"ci_waits,omitempty"`
+	// CIRerunsSpent counts how many times this candidate's independent CI
+	// was rerun after a red conclusion ([git.CIPending.RerunSpent]), so
+	// [loop.Loop] can resolve [forge.ChangeSet.CIRerunsLeft] as a budget
+	// that persists across ticks and claims — forge.ChangeSet's own doc on
+	// CIRerunsLeft: asserted by the loop, never derived by the forge
+	// package, because only the loop tracks a candidate's spend over time.
+	// Reset wherever the candidate resets: [WorkItem.dropResume].
+	CIRerunsSpent int `json:"ci_reruns_spent,omitempty"`
 	// Note carries the parked/failed reason.
 	Note string `json:"note,omitempty"`
 	// Severity is how loudly this parking asks for a person. Set by the stage
@@ -879,6 +894,8 @@ func (w *WorkItem) dropResume() {
 	w.Built, w.BuiltBase, w.PassedGates, w.Unfinished = "", "", nil, false
 	w.RebaseCount = 0
 	w.LandWaits = 0
+	w.CIWaits = 0
+	w.CIRerunsSpent = 0
 }
 
 // KeepCandidate records a finished change to come back to instead of buying
