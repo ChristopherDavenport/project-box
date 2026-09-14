@@ -26,8 +26,10 @@ import (
 const selfDeployScope = "control/self-deploy"
 
 // selfDeployRun names the lease and workspace the chore checks out under.
-// Fixed, because by the time it is acquired claims are stopped and every run
-// has settled — nothing else is ever contending for it.
+// Fixed — not because claims are always fully settled by the time it is
+// acquired (the fence path in [Daemon.selfDeployOne] deliberately proceeds
+// with runs still in flight), but because it names its own ref namespace no
+// ordinary claim ever writes to; nothing else is ever contending for it.
 const selfDeployRun = "self-deploy"
 
 // selfDeployTTL bounds the lease the chore's checkout renews — long enough
@@ -109,6 +111,9 @@ type selfDeployedBody struct {
 // could not record itself has still made its decision, and the caller's own
 // control flow (stop/resume, refuse, re-exec) must not stall on evidence.
 func (d *Daemon) recordSelfDeployPass(ctx context.Context, box string, build version.Build, head, decision, reason string, sections []string) {
+	if decision != decisionAbandoned {
+		d.selfDeploy.settle(box)
+	}
 	at := time.Now()
 	body, err := json.Marshal(selfDeployPassBody{
 		BuildCommit: build.Commit, BuildDirty: build.Dirty, BuildKnown: build.Known,
@@ -129,6 +134,46 @@ func (d *Daemon) recordSelfDeployPass(ctx context.Context, box string, build ver
 	d.mu.Unlock()
 }
 
+// deployStarvedExceptionPrefix marks an index/exceptions record as a
+// self-deploy chore that has abandoned force_after consecutive passes on a
+// busy box — the starvation issue #254 names — rather than a rollback, a
+// flake, an ingress origination, or a work item. It must share no prefix
+// with selfDeployExceptionPrefix ("self-deploy/") or flakeSubjectPrefix
+// ("flake/") in internal/control: [control.Room.Exceptions] tests those
+// first with strings.CutPrefix/HasPrefix, and this shape has to fall through
+// to its own branch rather than be misread as one of theirs. See
+// [control.Room.Exceptions]'s matching branch, which this string's value is
+// duplicated into rather than imported — daemon already imports control, so
+// the reverse would cycle.
+const deployStarvedExceptionPrefix = "deploy-starved/"
+
+// recordDeployStarvedException appends the index/exceptions half of the
+// deploy-starved exception's two-write shape (mirrors [Daemon.recordRolledBack]).
+// The other half — the standing control/self-deploy record a fold can read
+// liveness from — is deliberately NOT a fresh write here: it is the
+// self-deploy-pass record [Daemon.recordSelfDeployPass] already appends for
+// this very abandon, under Subject "pass/<box>". Reusing that precedent
+// rather than writing a record keyed by the bare head matters: a
+// control/self-deploy record whose Subject is the bare head is exactly what
+// [Daemon.selfDeployRefused] and internal/control's rollback fold treat as
+// their own latest-record-for-subject answer, and this is neither a refusal
+// nor a rollback.
+//
+// [control.Room.Exceptions]'s matching branch folds liveness from that same
+// pass record: the exception shows while its latest decision is "abandoned",
+// and drops out the moment a later pass — deployed, refused, or simply
+// current — supersedes it, mirroring how selfDeployException drops
+// superseded rollbacks.
+func (d *Daemon) recordDeployStarvedException(ctx context.Context, box string, consecutive int) {
+	reason := fmt.Sprintf("self-deploy on box %s has abandoned %d consecutive passes — a busy box may never find the drain window quiet", box, consecutive)
+	if _, err := d.store.Log().Append(ctx, evidence.Record{
+		Tenant: d.tenant, Scope: "index/exceptions", Kind: "indexed",
+		Subject: deployStarvedExceptionPrefix + box, Actor: d.cfgRunner(), Body: []byte(reason),
+	}); err != nil {
+		slog.Error("self-deploy: recording deploy-starved exception", "box", box, "err", err)
+	}
+}
+
 // ErrSelfDeployed is Run's sentinel: the chore replaced the binary on disk
 // and the process needs to re-exec. Run returns it so its own deferred
 // httpSrv.Shutdown still runs; the caller (cmd/boxd) is the one that closes
@@ -137,11 +182,24 @@ func (d *Daemon) recordSelfDeployPass(ctx context.Context, box string, build ver
 var ErrSelfDeployed = errors.New("daemon: self-deployed, re-exec required")
 
 // selfDeployState is the daemon's memory of commits the chore has already
-// refused. Without it a bad commit would stop claims, spend a full check,
-// refuse, and resume, forever — once every housekeeping pass.
+// refused, and of how many consecutive passes each box has abandoned for
+// want of a quiet drain window. Without the first, a bad commit would stop
+// claims, spend a full check, refuse, and resume, forever — once every
+// housekeeping pass. Without the second, a busy box would abandon forever
+// too (issue #254) — ten concurrent multi-minute builds mean the drain
+// window never finds it quiet, so self-deploy never happens at all.
+//
+// Abandons is kept in memory only, never by scanning the chain: control/
+// self-deploy is deliberately excluded from compaction (see StandingScopes
+// in daemon.go) and pass records accumulate at roughly one per box per
+// HousekeepEvery — a trailing-run scan over that history would grow forever.
+// Forgetting it across a restart is acceptable: a restart is either a
+// completed deploy, where the count should reset anyway, or a crash, where
+// the bound merely restarts counting and stays just as bounded.
 type selfDeployState struct {
-	mu      sync.Mutex
-	refused map[forge.Commit]bool
+	mu       sync.Mutex
+	refused  map[forge.Commit]bool
+	abandons map[string]int
 }
 
 func (s *selfDeployState) isRefused(c forge.Commit) bool {
@@ -157,6 +215,28 @@ func (s *selfDeployState) refuse(c forge.Commit) {
 		s.refused = map[forge.Commit]bool{}
 	}
 	s.refused[c] = true
+}
+
+// abandon records one more consecutive quiesce-starved pass for box and
+// reports the new running count — the caller decides what that count means
+// against its own force_after bound.
+func (s *selfDeployState) abandon(box string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.abandons == nil {
+		s.abandons = map[string]int{}
+	}
+	s.abandons[box]++
+	return s.abandons[box]
+}
+
+// settle resets box's consecutive-abandon count. Called on any pass that
+// reaches a decision other than abandoned: the box is no longer starved,
+// whatever the count was before.
+func (s *selfDeployState) settle(box string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.abandons, box)
 }
 
 // selfDeployPassInfo is the daemon's in-memory record of its own most
@@ -175,10 +255,28 @@ type selfDeployPassInfo struct {
 // names — boxcfg.Load has already refused a block naming no repo, an unknown
 // repo, or a repo with no check.
 type selfDeployTarget struct {
-	box      string
-	from     string
-	repo     boxcfg.Repo
-	sections []string
+	box        string
+	from       string
+	repo       boxcfg.Repo
+	sections   []string
+	forceAfter int
+}
+
+// defaultSelfDeployForceAfter is the consecutive-abandon bound applied when
+// a box's self_deploy.force_after is absent or zero — see
+// [boxcfg.SelfDeploy.ForceAfter]: an unset knob means this default, never
+// "deploy on the first busy pass".
+const defaultSelfDeployForceAfter = 3
+
+// selfDeployForceAfter resolves a box's raw configured value the same way
+// [boxcfg.Config.DrainDuration] and EveryDuration resolve theirs — reading
+// the field fresh off the live config on every call, so a reload takes
+// effect on the box's very next pass.
+func selfDeployForceAfter(n int) int {
+	if n <= 0 {
+		return defaultSelfDeployForceAfter
+	}
+	return n
 }
 
 // selfDeployTargets resolves every box that has turned the chore on.
@@ -195,7 +293,8 @@ func (d *Daemon) selfDeployTargets() []selfDeployTarget {
 			if r.Name == bx.SelfDeploy.Repo {
 				out = append(out, selfDeployTarget{
 					box: bx.Name, from: bx.SelfDeploy.From, repo: r,
-					sections: bx.SelfDeploy.Sections,
+					sections:   bx.SelfDeploy.Sections,
+					forceAfter: selfDeployForceAfter(bx.SelfDeploy.ForceAfter),
 				})
 				break
 			}
@@ -353,17 +452,41 @@ func (d *Daemon) selfDeployOne(ctx context.Context, t selfDeployTarget, build ve
 	clean := d.pump.Quiesce(dctx)
 	cancel()
 	if !clean {
-		// Abandon rather than build on the strength of a drain that did not
-		// finish: no run is ever cut short for this. The head is not
-		// remembered as refused — it was never attempted — so the next
-		// housekeeping pass tries again. Abandon-on-busy behavior itself is
-		// unchanged; it now also says so on the record.
-		if rerr := d.queue.Resume(ctx, d.tenant, d.cfgRunner(), why); rerr != nil {
-			slog.Error("self-deploy: resume after abandoned quiesce", "box", t.box, "err", rerr)
+		// Track consecutive failed-quiesce passes across this whole busy
+		// spell, whichever branch below this pass takes.
+		n := d.selfDeploy.abandon(t.box)
+		if n <= t.forceAfter {
+			// Below force_after: abandon rather than build on the strength
+			// of a drain that did not finish. No run is cut short for this
+			// — the head is not remembered as refused (it was never
+			// attempted), so the next housekeeping pass tries again.
+			// Abandon-on-busy behavior itself is unchanged from before
+			// issue #254; it now also counts how many times in a row this
+			// has happened.
+			if rerr := d.queue.Resume(ctx, d.tenant, d.cfgRunner(), why); rerr != nil {
+				slog.Error("self-deploy: resume after abandoned quiesce", "box", t.box, "err", rerr)
+			}
+			slog.Warn("self-deploy: drain window elapsed with work in flight — abandoning this pass", "box", t.box, "commit", head, "consecutive", n, "force_after", t.forceAfter)
+			d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionAbandoned, "drain window elapsed with work in flight", sections)
+			if n == t.forceAfter {
+				// The Nth consecutive abandon in a row is exactly the
+				// supervised-ness failure issue #254 names: a box busy
+				// enough that the drain window never finds it quiet, so
+				// self-deploy never happens at all. Raise it in front of a
+				// person rather than let it keep silently abandoning.
+				d.recordDeployStarvedException(ctx, t.box, n)
+			}
+			return nil
 		}
-		slog.Warn("self-deploy: drain window elapsed with work in flight — abandoning this pass", "box", t.box, "commit", head)
-		d.recordSelfDeployPass(ctx, t.box, build, string(head), decisionAbandoned, "drain window elapsed with work in flight", sections)
-		return nil
+		// n > force_after: quiesce has now starved for more consecutive
+		// passes than this box tolerates. Deploy anyway rather than wait
+		// forever — do NOT abandon. In-flight runs are re-claimed after the
+		// re-exec restarts; that is safe because landing is fenced by the
+		// lease token and an expected-old-value push (docs/PLAN.md §6): a
+		// run that was mid-flight when the binary swaps loses its lease and
+		// is refused at land, never lands twice.
+		slog.Warn("self-deploy: quiesce starved past force_after — deploying on the fence with runs still in flight", "box", t.box, "commit", head, "consecutive", n, "force_after", t.forceAfter)
+		why = fmt.Sprintf("%s (forced: quiesce starved for %d consecutive passes; in-flight runs are re-claimed after restart — the lease fence makes re-runs safe)", why, t.forceAfter)
 	}
 
 	if err := d.selfDeployBuild(ctx, t, repo, head, why); err != nil {
@@ -553,7 +676,23 @@ func sectionOfPath(path string, sections []boxcfg.Section) (string, bool) {
 // has returned [ErrSelfDeployed] and the caller has finished its own
 // shutdown. Exec is nil-safe: a Daemon nobody wired for self-deploy has no
 // seam to call, and closing the store is still the right thing to do.
+//
+// By the time this runs, Run's own deferred cancelWork has already cancelled
+// every run still in flight — the fence path in [Daemon.selfDeployOne] can
+// leave some, deliberately. Cancelling is not the same as settled: nothing
+// otherwise waits for those goroutines to unwind their own store writes
+// before the store closes out from under them. The bounded Quiesce below is
+// that wait — post-cancel unwind is fast (cancelled runs exit in seconds),
+// so the bound is the same drain window the chore itself already uses, and
+// a run that ignores cancellation past it is logged and the re-exec
+// proceeds anyway rather than hanging forever.
 func (d *Daemon) Reexec() error {
+	uctx, ucancel := context.WithTimeout(context.Background(), d.drain())
+	settled := d.pump.Quiesce(uctx)
+	ucancel()
+	if !settled {
+		slog.Warn("self-deploy: post-cancel unwind did not finish within the drain window — closing the store anyway")
+	}
 	if err := d.Close(); err != nil {
 		return err
 	}

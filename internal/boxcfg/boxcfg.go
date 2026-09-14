@@ -532,10 +532,13 @@ type Box struct {
 	Seat  string `yaml:"seat"`
 	Repos []Repo `yaml:"repos"`
 	// SelfDeploy, set, turns on the standing chore that stops claims, waits
-	// for running work to settle, checks and rebuilds the daemon at the
-	// branch's new head, and re-execs on the same socket and store. Absent
-	// means never — the daemon only changes binaries when somebody restarts
-	// it, today's behavior and the default every existing config keeps.
+	// a bounded window for running work to settle, checks and rebuilds the
+	// daemon at the branch's new head, and re-execs on the same socket and
+	// store. On a box busy enough that the window never finds it quiet, the
+	// chore eventually deploys anyway rather than starving forever — see
+	// [SelfDeploy.ForceAfter]. Absent means never — the daemon only changes
+	// binaries when somebody restarts it, today's behavior and the default
+	// every existing config keeps.
 	SelfDeploy *SelfDeploy `yaml:"self_deploy"`
 }
 
@@ -555,6 +558,14 @@ type SelfDeploy struct {
 	// list is skipped rather than rebuilt. Empty means every moved head is a
 	// candidate, the behavior before this field existed.
 	Sections []string `yaml:"sections"`
+	// ForceAfter bounds how many consecutive passes may abandon on a busy
+	// box before the chore deploys anyway, runs still in flight — issue
+	// #254's fix for a box that never finds a quiet 60s window and so never
+	// deploys at all. Zero (the overwhelmingly common case: absent) means
+	// the default of 3, resolved in internal/daemon the way Config's Every
+	// and Drain defaults are; it never means "deploy on the first busy
+	// pass" — unknown never reads as zero.
+	ForceAfter int `yaml:"force_after"`
 }
 
 // Kind is box.yaml's spelling of [kind.Declaration].
@@ -1293,6 +1304,9 @@ func validateSelfDeploy(bx *Box, explicitCheck map[string]bool) error {
 			return fmt.Errorf("boxcfg: box %s: self_deploy has no repo, and the box declares %d — picking one implicitly is the derived value this system refuses everywhere else; name it in self_deploy.repo", bx.Name, len(bx.Repos))
 		}
 		sd.Repo = bx.Repos[0].Name
+	}
+	if sd.ForceAfter < 0 {
+		return fmt.Errorf("boxcfg: box %s: self_deploy.force_after %d — a negative count", bx.Name, sd.ForceAfter)
 	}
 	had, ok := explicitCheck[sd.Repo]
 	if !ok {

@@ -662,6 +662,118 @@ boxes:
 	}
 }
 
+// TestSelfDeployRaisesAnExceptionAtForceAfterThenDeploysOnTheFence: issue
+// #254 — a box busy enough that the drain window never finds it quiet must
+// not abandon forever. With force_after: 1, the first quiesce-starved pass
+// still abandons exactly as before, AND raises the deploy-starved exception
+// (the Nth consecutive abandon); the second quiesce-starved pass — one past
+// the bound — deploys on the fence, runs still in flight, rather than
+// abandoning a third time.
+func TestSelfDeployRaisesAnExceptionAtForceAfterThenDeploysOnTheFence(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	appRem, appHead := deployRepo(t, "app", validBoxdMain)
+	started := filepath.Join(dir, "started")
+	slowBuild := fmt.Sprintf("touch %s && sleep 2 && echo done > out.txt && git add -A && git -c user.name=b -c user.email=b@i commit -m work", started)
+
+	cfg := fmt.Sprintf(`
+tenant: acme
+runner: boxd
+db: %s
+root: %s
+listen: unix:/tmp/never-used.sock
+every: 1s
+drain: 50ms
+budget: {max_concurrent: 2}
+boxes:
+  - name: shop
+    self_deploy: {from: main, repo: app, force_after: 1}
+    repos:
+      - name: work
+        remote: %s
+        build: '%s'
+        check: 'test -f out.txt'
+      - name: app
+        remote: %s
+        build: 'true'
+        check: 'true'
+`, db, root, workRem, slowBuild, appRem)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	d.build = func() version.Build { return version.Build{Commit: fakeBuildCommit, Known: true} }
+	exe := filepath.Join(dir, "boxd-exe")
+	if err := os.WriteFile(exe, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	d.exePath = func() (string, error) { return exe, nil }
+
+	ts := httptest.NewServer(d.API.Handler())
+	t.Cleanup(ts.Close)
+	c, err := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.OpenIngress(ctx, "shop-work", "work-1", "slow change", "", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tick only dispatches and returns (issue #196); tickDone closes only
+	// once the slow build has actually finished, well after both passes
+	// below have already seen it in flight.
+	tickDone := make(chan struct{})
+	go func() { d.Tick(ctx); d.pump.Quiesce(ctx); close(tickDone) }()
+	waitForFile(t, started, 3*time.Second)
+
+	// Pass 1: quiesce fails, consecutive count reaches force_after (1) —
+	// abandon exactly as today, plus the exception.
+	if err := d.selfDeployChore(ctx); err != nil {
+		t.Fatalf("pass 1: selfDeployChore: %v", err)
+	}
+	// Pass 2: quiesce fails again, consecutive count now exceeds force_after
+	// — deploy on the fence instead of abandoning a second time.
+	err = d.selfDeployChore(ctx)
+	<-tickDone
+	if !errors.Is(err, ErrSelfDeployed) {
+		t.Fatalf("pass 2: selfDeployChore = %v, want ErrSelfDeployed — starved past force_after must deploy, not abandon again", err)
+	}
+
+	passes := selfDeployPasses(t, d, ctx)
+	if len(passes) != 2 {
+		t.Fatalf("passes = %+v, want exactly two", passes)
+	}
+	if passes[0].Decision != decisionAbandoned {
+		t.Fatalf("pass 1 decision = %q, want abandoned", passes[0].Decision)
+	}
+	if passes[1].Decision != decisionDeploying || passes[1].Head != string(appHead) {
+		t.Fatalf("pass 2 = %+v, want deploying at head %s — the fence path, not another abandon", passes[1], appHead)
+	}
+	if _, serr := os.Stat(exe + ".prev"); serr != nil {
+		t.Fatalf("fence deploy never installed a new binary: %v", serr)
+	}
+
+	var sawException bool
+	for r, err := range d.store.Log().Since(ctx, tenant.ID("acme"), "index/exceptions", 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Subject == deployStarvedExceptionPrefix+"shop" {
+			sawException = true
+		}
+	}
+	if !sawException {
+		t.Fatal("no deploy-starved index/exceptions record was written on the Nth (here, 1st) abandon")
+	}
+}
+
 // TestSelfDeployRecordsAnErroredPassOnFetchFailure: a pass that cannot even
 // reach the point of deciding still owes the chain an answer (issue #152) —
 // mapping a fetch failure onto "current" would be unknown reading as zero.
@@ -1017,6 +1129,123 @@ func TestReexecIsNilSafeWithNoExec(t *testing.T) {
 	if err := d.Reexec(); err != nil {
 		t.Fatalf("Reexec with nil Exec: %v", err)
 	}
+}
+
+// reexecCfg is writeCfg's shape plus an explicit drain window, needed to pin
+// how long Reexec's own post-cancel Quiesce bound is.
+func reexecCfg(t *testing.T, path, db, root, drain, workRemote, workBuild string) {
+	t.Helper()
+	cfg := fmt.Sprintf(`
+tenant: acme
+runner: boxd
+db: %s
+root: %s
+listen: unix:/tmp/never-used.sock
+every: 1s
+drain: %s
+budget: {max_concurrent: 2}
+boxes:
+  - name: shop
+    repos:
+      - name: work
+        remote: %s
+        build: '%s'
+        check: 'test -f out.txt'
+`, db, root, drain, workRemote, workBuild)
+	if err := os.WriteFile(path, []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestReexecWaitsForAnInFlightRunToUnwindBeforeClosing: issue #254's store-
+// consistency fix. By the time Reexec runs in production, Run's own deferred
+// cancelWork has already reached every in-flight run — but cancelling is not
+// settled, and closing the store out from under a goroutine still mid-write
+// is exactly the hazard this guards against. With a drain window comfortably
+// longer than the run, Reexec must not close the store (and so must not
+// return) until that run has actually finished.
+func TestReexecWaitsForAnInFlightRunToUnwindBeforeClosing(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	started := filepath.Join(dir, "started")
+	finished := filepath.Join(dir, "finished")
+	slowBuild := fmt.Sprintf("touch %s && sleep 0.3 && touch %s && echo done > out.txt", started, finished)
+	reexecCfg(t, cfgPath, db, root, "2s", workRem, slowBuild)
+
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Exec = func() error { return nil }
+
+	ts := httptest.NewServer(d.API.Handler())
+	t.Cleanup(ts.Close)
+	c, err := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.OpenIngress(ctx, "shop-work", "work-1", "slow change", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	go d.Tick(ctx)
+	waitForFile(t, started, 3*time.Second) // the build is now mid-sleep
+
+	if err := d.Reexec(); err != nil {
+		t.Fatalf("Reexec: %v", err)
+	}
+	if _, serr := os.Stat(finished); serr != nil {
+		t.Fatalf("Reexec closed the store before the in-flight run finished: %v", serr)
+	}
+}
+
+// TestReexecProceedsPastItsBoundWhenARunOutlivesIt: the bounded Quiesce must
+// not hang Reexec forever — a run that is still going once the drain window
+// elapses is logged and left, and Reexec proceeds to close the store and
+// call Exec anyway rather than waiting out the run's full duration.
+func TestReexecProceedsPastItsBoundWhenARunOutlivesIt(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	db, root := filepath.Join(dir, "box.db"), filepath.Join(dir, "forge")
+	workRem := bare(t, "work")
+	started := filepath.Join(dir, "started")
+	finished := filepath.Join(dir, "finished")
+	slowBuild := fmt.Sprintf("touch %s && sleep 2 && touch %s && echo done > out.txt", started, finished)
+	reexecCfg(t, cfgPath, db, root, "50ms", workRem, slowBuild)
+
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	d.Exec = func() error { called = true; return nil }
+
+	ts := httptest.NewServer(d.API.Handler())
+	t.Cleanup(ts.Close)
+	c, err := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.OpenIngress(ctx, "shop-work", "work-1", "slow change", "", ""); err != nil {
+		t.Fatal(err)
+	}
+	go d.Tick(ctx)
+	waitForFile(t, started, 3*time.Second) // the build is now mid-sleep, well past the 50ms drain
+
+	start := time.Now()
+	if err := d.Reexec(); err != nil {
+		t.Fatalf("Reexec: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("Reexec took %s, want roughly the 50ms drain bound — it must not hang for the in-flight run's full duration", elapsed)
+	}
+	if !called {
+		t.Fatal("Reexec did not call Exec")
+	}
+	waitForFile(t, finished, 5*time.Second) // let the ignored run finish before the test tears down
 }
 
 // TestStatusReportsTheFollowedBranchHead: self_deploy set means /v1/status

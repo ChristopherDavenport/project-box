@@ -1011,6 +1011,14 @@ func (d *Daemon) Run(ctx context.Context) error {
 			if !clean {
 				slog.Warn("drain window elapsed with work in flight — cancelled; fencing makes re-runs safe")
 			}
+			// cancelWork just reached every run still in flight, but
+			// cancelling is not the same as settled: nothing else waits for
+			// those goroutines to unwind their own store writes before the
+			// caller closes the store behind this return. Same hazard
+			// Reexec's post-cancel Quiesce guards; bounded the same way.
+			uctx, ucancel := context.WithTimeout(context.Background(), d.drain())
+			d.pump.Quiesce(uctx)
+			ucancel()
 			return ctx.Err()
 		case <-time.After(d.Every()):
 			// Observed first, before anything else this tick does: a

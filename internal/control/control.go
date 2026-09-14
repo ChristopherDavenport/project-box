@@ -163,6 +163,23 @@ func (r *Room) Exceptions(ctx context.Context) ([]Exception, error) {
 			}
 			continue
 		}
+		if box, ok := strings.CutPrefix(rec.Subject, deployStarvedSubjectPrefix); ok {
+			// A self-deploy chore that has abandoned force_after consecutive
+			// passes on a busy box — see internal/daemon's
+			// recordDeployStarvedException, the only writer of this subject
+			// shape. Folded from the standing control/self-deploy pass
+			// record rather than this index record's own body, so the item
+			// drops out the moment a later pass for the box supersedes the
+			// run of abandons that raised it.
+			ex, live, err := r.deployStarvedException(ctx, box, now, objective, told)
+			if err != nil {
+				return nil, err
+			}
+			if live {
+				out = append(out, ex)
+			}
+			continue
+		}
 		if strings.HasPrefix(rec.Subject, flakeSubjectPrefix) {
 			// A test the loop proved flaky twice — see
 			// [Loop.foldFlakeException], the only writer of this subject
@@ -1039,6 +1056,81 @@ func (r *Room) selfDeployException(ctx context.Context, head string, now time.Ti
 			ID: id, Tenant: r.Tenant,
 			Kind: "self-deploy", State: queue.StateParked,
 			Note: string(latest.Body), Severity: queue.SeverityHigh,
+		},
+		Parked: latest.At, AgeSec: int64(age.Seconds()),
+		Escalations: countAfter(told[id], latest.At),
+		Overdue:     age >= objective,
+	}, true, nil
+}
+
+// deployStarvedSubjectPrefix marks an index/exceptions record as a
+// self-deploy chore that has abandoned force_after consecutive passes on a
+// busy box (issue #254) — a box whose drain window never finds it quiet, so
+// self-deploy never happens at all — rather than a rollback, a flake, an
+// origination, or a work item. The value is duplicated from
+// internal/daemon's deployStarvedExceptionPrefix rather than imported, the
+// same tradeoff selfDeploySubjectPrefix documents above.
+const deployStarvedSubjectPrefix = "deploy-starved/"
+
+// selfDeployPassKind and selfDeployPassAbandoned name the kind
+// internal/daemon's self-deploy chore records for one housekeeping pass, and
+// the decision string it writes on an abandoned one — duplicated for the
+// same reason as selfDeployRolledBackKind above.
+const (
+	selfDeployPassKind      = "self-deploy-pass"
+	selfDeployPassAbandoned = "abandoned"
+)
+
+// selfDeployPassBody mirrors the JSON body internal/daemon's
+// recordSelfDeployPass writes to "pass/<box>" on control/self-deploy —
+// duplicated rather than imported for the same layering reason as flakeBody:
+// this package stays the read model.
+type selfDeployPassBody struct {
+	Decision string `json:"decision"`
+	Reason   string `json:"reason"`
+}
+
+// deployStarvedException folds one busy-box starvation exception into the
+// room's shape, reading the latest control/self-deploy pass record for
+// subject "pass/<box>" rather than trusting the index record's own body — so
+// the item drops out the moment a later pass for the box deploys (fence or
+// clean), is refused, or simply finds the box current, superseding the run
+// of abandons that raised it. Mirrors how selfDeployException drops
+// superseded rollbacks.
+func (r *Room) deployStarvedException(ctx context.Context, box string, now time.Time, objective time.Duration, told map[string][]time.Time) (Exception, bool, error) {
+	var latest evidence.Record
+	for rec, err := range r.Store.Log().BySubject(ctx, r.Tenant, "pass/"+box) {
+		if err != nil {
+			return Exception{}, false, err
+		}
+		if rec.Scope != selfDeployScope || rec.Kind != selfDeployPassKind {
+			continue
+		}
+		if latest.Seq == 0 || rec.Seq > latest.Seq {
+			latest = rec
+		}
+	}
+	if latest.Seq == 0 {
+		return Exception{}, false, nil
+	}
+	var body selfDeployPassBody
+	if err := json.Unmarshal(latest.Body, &body); err != nil {
+		return Exception{}, false, fmt.Errorf("control: self-deploy pass record for box %s: %w", box, err)
+	}
+	if body.Decision != selfDeployPassAbandoned {
+		return Exception{}, false, nil
+	}
+	// id is short and stable — a box name, not a pass count — so
+	// recordEscalation's told-counting (keyed by x.ID, same as
+	// selfDeployException above) keeps counting against the same exception
+	// across every pass it stays live for, rather than a new id per pass.
+	id := deployStarvedSubjectPrefix + box
+	age := now.Sub(latest.At)
+	return Exception{
+		WorkItem: queue.WorkItem{
+			ID: id, Tenant: r.Tenant, Box: box,
+			Kind: "self-deploy", State: queue.StateParked,
+			Note: body.Reason, Severity: queue.SeverityHigh,
 		},
 		Parked: latest.At, AgeSec: int64(age.Seconds()),
 		Escalations: countAfter(told[id], latest.At),
