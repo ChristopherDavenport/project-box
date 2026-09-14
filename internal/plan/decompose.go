@@ -140,10 +140,48 @@ func Make(ctx context.Context, reg *Registry, ing ingress.Ingress, decl kind.Dec
 		Decomposer: name, Replayable: d.Replayable(), AgentRef: res.AgentRef,
 		Facts: res.Facts, Nodes: res.Nodes,
 	}
+	if err := checkEdgeReasons(p); err != nil {
+		return Plan{}, err
+	}
 	if err := p.Seal(); err != nil {
 		return Plan{}, err
 	}
 	return p, nil
+}
+
+// checkEdgeReasons refuses a judgement plan whose dependency edges name no
+// reason — a chain nothing asked to justify itself, the failure mode issue
+// #201 exists to close. Sequence and Identity are exempt: their edges are
+// functions of a governed declaration, not a planner's discretion, so there
+// is no judgement to justify.
+//
+// This runs in Make, not in [Plan.validate], and that placement is
+// deliberate: validate backs [Plan.Seal], and Seal has a second caller —
+// pump.amendPlanNode re-seals a plan already on the chain during a replan.
+// A plan minted before this commit can carry a reasonless edge, and a
+// replan on one of its units must still be able to re-seal the plan it is
+// amending rather than being refused over an edge the replan did not touch.
+// Only the minting path in Make needs to hold a NEW judgement plan to the
+// new bar.
+func checkEdgeReasons(p Plan) error {
+	if p.Replayable {
+		return nil
+	}
+	byID := make(map[string]Node, len(p.Nodes))
+	for _, n := range p.Nodes {
+		byID[n.ID] = n
+	}
+	for _, n := range p.Nodes {
+		for _, d := range n.DependsOn {
+			if _, ok := byID[d]; !ok {
+				continue
+			}
+			if strings.TrimSpace(n.EdgeReasons[d]) == "" {
+				return fmt.Errorf("%w: %s node %q depends on %q with no reason — a judgement plan's edge must name the symbol or file it waits for", ErrPlan, p.Ingress, n.ID, d)
+			}
+		}
+	}
+	return nil
 }
 
 // IdentityNode is the single node an identity plan produces.

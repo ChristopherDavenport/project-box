@@ -474,13 +474,13 @@ const plannerContract = `
 ## Your answer
 You are planning, not building: read what you need to decide how this origination becomes units of work, and edit nothing. Reply with ONE JSON object as the last thing in your message:
 
-{"units":[{"id":"api-endpoint","task":"...","summary":"...","sections":["api"],"depends_on":[],"model":"","attempts":0}],"why":"one paragraph"}
+{"units":[{"id":"api-endpoint","task":"...","summary":"...","sections":["api"],"depends_on":[{"on":"schema","for":"db.UsersTable"}],"model":"","attempts":0}],"why":"one paragraph"}
 
 - Prefer one unit. Split only where two units can be built and verified independently, or where one must land before another can start.
 - id: a plain token, unique in this plan. task: the complete instruction a builder needs, self-contained — the builder will not see this conversation.
 - summary: one line the room shows for this unit; the task is what the builder reads.
 - sections: the declared section names the unit's paths fall in. Empty means the whole repository, which waits for every section.
-- depends_on: ids that must land first.
+- depends_on: a unit depends on another ONLY when it compiles or tests against code that unit lands — ideas, names and conventions are not dependencies, the task text carries them. Prefer units in disjoint sections with no edges between them, so they run side by side rather than in a chain. Each edge is {"on": the id it waits for, "for": the symbol or file it waits for} — never a bare id; a dependency with nothing to name in "for" is not a dependency.
 - model: leave empty unless the unit is trivial enough for a cheaper tier or hard enough to need a stronger one; a value the harness lists.
 - attempts: leave at 0 to inherit the box's default budget; set a small integer only when the unit's difficulty warrants more or fewer tries than that default.
 - If the origination is a question, a decision, or already satisfied by the code as it stands, do not plan: reply with a single line starting with ESCALATE: and the reason.
@@ -553,15 +553,47 @@ func replanPrompt(bundle agent.Bundle, unit plan.ReplanUnit, pl plan.Plan, esc p
 // graph engine spells it.
 type planAnswer struct {
 	Units []struct {
-		ID        string   `json:"id"`
-		Task      string   `json:"task"`
-		Summary   string   `json:"summary"`
-		Sections  []string `json:"sections"`
-		DependsOn []string `json:"depends_on"`
-		Model     string   `json:"model"`
-		Attempts  int      `json:"attempts"`
+		ID        string          `json:"id"`
+		Task      string          `json:"task"`
+		Summary   string          `json:"summary"`
+		Sections  []string        `json:"sections"`
+		DependsOn []dependsOnEdge `json:"depends_on"`
+		Model     string          `json:"model"`
+		Attempts  int             `json:"attempts"`
 	} `json:"units"`
 	Why string `json:"why"`
+}
+
+// dependsOnEdge is one entry of a unit's depends_on list. It accepts both
+// shapes a planner may reply with: the old bare id string, and the new
+// {"on": "<id>", "for": "<symbol or file it waits for>"} object — so a
+// running dogfood planner mid-upgrade, and every fixture and transcript
+// already recorded against the old schema, keep parsing. On is the
+// dependency's id either way; For is empty for the bare-string shape, which
+// [parsePlan] refuses for a judgement plan: a chain with no reason is exactly
+// the failure #201 exists to close.
+type dependsOnEdge struct {
+	On  string
+	For string
+}
+
+// UnmarshalJSON accepts a bare JSON string (On, no reason) or an object with
+// "on" and "for".
+func (d *dependsOnEdge) UnmarshalJSON(b []byte) error {
+	var id string
+	if err := json.Unmarshal(b, &id); err == nil {
+		d.On, d.For = id, ""
+		return nil
+	}
+	var obj struct {
+		On  string `json:"on"`
+		For string `json:"for"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return fmt.Errorf("depends_on entry is neither a bare id string nor {\"on\":...,\"for\":...}: %w", err)
+	}
+	d.On, d.For = obj.On, obj.For
+	return nil
 }
 
 // parsePlan reads the planner's answer out of its message and checks it
@@ -600,12 +632,22 @@ func parsePlan(text string, repo forge.Repo) ([]plan.Node, error) {
 				return nil, fmt.Errorf("unit %s names section %q, which repository %s does not declare (declared: %v)", u.ID, s, repo.Name, repo.SectionNames())
 			}
 		}
+		deps := make([]string, 0, len(u.DependsOn))
+		var reasons map[string]string
 		for _, d := range u.DependsOn {
-			if !ids[d] {
-				return nil, fmt.Errorf("unit %s depends on %q, which the plan does not contain", u.ID, d)
+			if !ids[d.On] {
+				return nil, fmt.Errorf("unit %s depends on %q, which the plan does not contain", u.ID, d.On)
 			}
+			if strings.TrimSpace(d.For) == "" {
+				return nil, fmt.Errorf("unit %s depends on %q with no \"for\" — a judgement planner's edge must name the symbol or file it waits for", u.ID, d.On)
+			}
+			deps = append(deps, d.On)
+			if reasons == nil {
+				reasons = map[string]string{}
+			}
+			reasons[d.On] = strings.TrimSpace(d.For)
 		}
-		nodes = append(nodes, plan.Node{ID: u.ID, Task: strings.TrimSpace(u.Task), Summary: strings.TrimSpace(u.Summary), Sections: u.Sections, DependsOn: u.DependsOn, Model: strings.TrimSpace(u.Model), Attempts: u.Attempts})
+		nodes = append(nodes, plan.Node{ID: u.ID, Task: strings.TrimSpace(u.Task), Summary: strings.TrimSpace(u.Summary), Sections: u.Sections, DependsOn: deps, EdgeReasons: reasons, Model: strings.TrimSpace(u.Model), Attempts: u.Attempts})
 	}
 	return nodes, nil
 }

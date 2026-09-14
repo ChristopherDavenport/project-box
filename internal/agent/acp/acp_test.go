@@ -953,7 +953,7 @@ func fakeAgent(scenario string) {
 				}
 				answer := "Read the tree. Two units, the view after the endpoint.\n\n```json\n" +
 					`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets in internal/api (returns {\"widgets\":[]})","summary":"Widgets endpoint","sections":["` + section + `"],"depends_on":[],"model":"haiku"},` +
-					`{"id":"room-view","task":"Render widgets in web/src","summary":"Widgets view","sections":["web"],"depends_on":["api-endpoint"]}],"why":"the view needs the endpoint"}` +
+					`{"id":"room-view","task":"Render widgets in web/src","summary":"Widgets view","sections":["web"],"depends_on":[{"on":"api-endpoint","for":"the widgets JSON shape"}]}],"why":"the view needs the endpoint"}` +
 					"\n```\nHANDOFF: widgets live under internal/api\n"
 				if scenario == "planner-noplan" {
 					answer = "I looked around and it all seems fine to me."

@@ -369,7 +369,7 @@ func TestAPlanCarriesPerUnitAttempts(t *testing.T) {
 	}}
 	text := "```json\n" +
 		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","summary":"Widgets endpoint","sections":["api"],"depends_on":[],"attempts":3},` +
-		`{"id":"room-view","task":"Render widgets","summary":"Widgets view","sections":["api"],"depends_on":["api-endpoint"]}],"why":"two units"}` +
+		`{"id":"room-view","task":"Render widgets","summary":"Widgets view","sections":["api"],"depends_on":[{"on":"api-endpoint","for":"the widget response type"}]}],"why":"two units"}` +
 		"\n```"
 	nodes, err := parsePlan(text, repo)
 	if err != nil {
@@ -380,6 +380,49 @@ func TestAPlanCarriesPerUnitAttempts(t *testing.T) {
 	}
 	if nodes[1].Attempts != 0 {
 		t.Fatalf("a unit that names no attempts must inherit, not carry a stray budget: %+v", nodes[1])
+	}
+}
+
+// TestAnEdgesReasonSurvivesIntoTheNode: the object shape {"on":...,"for":...}
+// parses into both DependsOn (the edge) and EdgeReasons (why), the fields
+// [plan.Plan.Seal] folds into the digest and [plan.Plan.validate] requires of
+// a judgement plan.
+func TestAnEdgesReasonSurvivesIntoTheNode(t *testing.T) {
+	repo := forge.Repo{Name: "app", Sections: []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
+	}}
+	text := "```json\n" +
+		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","summary":"Widgets endpoint","sections":["api"],"depends_on":[]},` +
+		`{"id":"room-view","task":"Render widgets","summary":"Widgets view","sections":["api"],"depends_on":[{"on":"api-endpoint","for":"widget.Response"}]}],"why":"two units"}` +
+		"\n```"
+	nodes, err := parsePlan(text, repo)
+	if err != nil {
+		t.Fatalf("parsePlan: %v", err)
+	}
+	view := nodes[1]
+	if len(view.DependsOn) != 1 || view.DependsOn[0] != "api-endpoint" {
+		t.Fatalf("the edge was lost: %+v", view)
+	}
+	if view.EdgeReasons["api-endpoint"] != "widget.Response" {
+		t.Fatalf("the edge's reason was lost: %+v", view)
+	}
+}
+
+// TestABareStringEdgeIsRefused: a bare id with no "for" is exactly the
+// unreasoned chain #201 exists to close, so parsePlan refuses it in the
+// planner's own terms rather than silently accepting an old-schema answer
+// that [plan.Plan.validate] would refuse anyway further downstream.
+func TestABareStringEdgeIsRefused(t *testing.T) {
+	repo := forge.Repo{Name: "app", Sections: []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
+	}}
+	text := "```json\n" +
+		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","summary":"Widgets endpoint","sections":["api"],"depends_on":[]},` +
+		`{"id":"room-view","task":"Render widgets","summary":"Widgets view","sections":["api"],"depends_on":["api-endpoint"]}],"why":"two units"}` +
+		"\n```"
+	_, err := parsePlan(text, repo)
+	if err == nil || !strings.Contains(err.Error(), "room-view") || !strings.Contains(err.Error(), "api-endpoint") || !strings.Contains(err.Error(), `"for"`) {
+		t.Fatalf("a bare-string edge with no reason was not refused: %v", err)
 	}
 }
 

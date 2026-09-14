@@ -74,6 +74,24 @@ func TestDiff(t *testing.T) {
 			b:    []Node{base[0], base[1]},
 			want: Delta{},
 		},
+		{
+			// A re-justified edge is a different judgement even when the edge
+			// itself — which node depends on which — is unchanged.
+			name: "reason-only change on an unchanged edge is a change",
+			a: []Node{
+				{ID: "one", Task: "do one"},
+				{ID: "two", Task: "do two", DependsOn: []string{"one"}, EdgeReasons: map[string]string{"one": "uses Foo()"}},
+			},
+			b: []Node{
+				{ID: "one", Task: "do one"},
+				{ID: "two", Task: "do two", DependsOn: []string{"one"}, EdgeReasons: map[string]string{"one": "uses Bar()"}},
+			},
+			want: Delta{Changed: []NodeChange{{
+				ID:     "two",
+				Before: Node{ID: "two", Task: "do two", DependsOn: []string{"one"}, EdgeReasons: map[string]string{"one": "uses Foo()"}},
+				After:  Node{ID: "two", Task: "do two", DependsOn: []string{"one"}, EdgeReasons: map[string]string{"one": "uses Bar()"}},
+			}}},
+		},
 	}
 
 	for _, c := range cases {

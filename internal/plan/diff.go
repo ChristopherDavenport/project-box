@@ -62,11 +62,27 @@ func Diff(a, b Plan) Delta {
 }
 
 // sameNode reports whether two nodes with the same ID declare the same
-// work: same task, repo and tier, and the same DependsOn and Sections sets
-// regardless of the order either side listed them in.
+// work: same task, repo and tier, the same DependsOn and Sections sets
+// regardless of the order either side listed them in, and the same reason
+// for each edge — a dependency re-justified on different grounds is a
+// different judgement even when the edge itself is unchanged.
 func sameNode(a, b Node) bool {
 	return a.Task == b.Task && a.Repo == b.Repo && a.Model == b.Model &&
-		sameSet(a.DependsOn, b.DependsOn) && sameSet(a.Sections, b.Sections)
+		sameSet(a.DependsOn, b.DependsOn) && sameSet(a.Sections, b.Sections) &&
+		sameReasons(a.EdgeReasons, b.EdgeReasons)
+}
+
+// sameReasons compares two edge-reason maps for equality.
+func sameReasons(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if b[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func sameSet(a, b []string) bool {

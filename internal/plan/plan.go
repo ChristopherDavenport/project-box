@@ -71,6 +71,15 @@ type Node struct {
 	// the work graph, and until there was a decomposition stage nothing
 	// outside a test had ever written one.
 	DependsOn []string `json:"depends_on,omitempty"`
+	// EdgeReasons names, for a dependency in DependsOn, the symbol or file the
+	// edge waits for — keyed by the dependency's node id. A judgement plan's
+	// edge with no entry here is a chain nothing asked to justify itself,
+	// which [Plan.validate] refuses; a replayable decomposer's chain is a
+	// function of a governed declaration and is exempt. Kept parallel to
+	// DependsOn rather than folded into a typed edge so old record bodies —
+	// and [queue.WorkItem.DependsOn], which this is copied into — keep
+	// unmarshaling exactly as they always have.
+	EdgeReasons map[string]string `json:"edge_reasons,omitempty"`
 	// Sections names the regions of the repository this unit is expressed
 	// in. It is the second half of what a decomposition decides: not only
 	// WHAT the units are and in what order, but WHERE each one works — which
@@ -131,6 +140,15 @@ type Plan struct {
 	// At is when the plan was made. Provenance, not identity: excluded from
 	// the digest for the reason [Fact.AsOf] is.
 	At time.Time `json:"at"`
+	// Depth is 1 + the longest dependency chain ending at any node — a node
+	// with no dependencies has depth 1. Width is the largest number of nodes
+	// sharing one depth. Both are projections of the graph [Plan.Seal] already
+	// validated, computed for the operator who wants to see whether a
+	// decomposition fanned out or chained without recounting the edges by
+	// hand, and — like At — excluded from the digest: they follow from the
+	// graph rather than adding to what it means.
+	Depth int `json:"depth,omitempty"`
+	Width int `json:"width,omitempty"`
 }
 
 // Seal validates the graph and fills [Plan.Ref].
@@ -189,9 +207,68 @@ func (p *Plan) Seal() error {
 		if len(sections) > 0 || n.Model != "" || n.Attempts != 0 {
 			put("where:" + n.ID + ":" + strings.Join(sections, "\x00") + ":" + n.Model + ":" + strconv.Itoa(n.Attempts))
 		}
+		// Why: only when a node carries a reason at all, so every plan sealed
+		// before edges could carry one keeps byte-identical ref — this does not
+		// bump planDomain.
+		if len(n.EdgeReasons) > 0 {
+			keys := make([]string, 0, len(n.EdgeReasons))
+			for k := range n.EdgeReasons {
+				keys = append(keys, k)
+			}
+			slices.Sort(keys)
+			parts := make([]string, 0, len(keys))
+			for _, k := range keys {
+				parts = append(parts, k+"="+n.EdgeReasons[k])
+			}
+			put("reasons:" + n.ID + ":" + strings.Join(parts, "\x00"))
+		}
 	}
 	p.Ref = "plan-" + hex.EncodeToString(h.Sum(nil))[:32]
+
+	byID := make(map[string]Node, len(p.Nodes))
+	for _, n := range p.Nodes {
+		byID[n.ID] = n
+	}
+	depth := nodeDepths(byID)
+	widthAt := map[int]int{}
+	for _, d := range depth {
+		widthAt[d]++
+		if d > p.Depth {
+			p.Depth = d
+		}
+	}
+	for _, w := range widthAt {
+		if w > p.Width {
+			p.Width = w
+		}
+	}
 	return nil
+}
+
+// nodeDepths computes each node's depth: 1 + the max depth of its
+// dependencies, 1 for a node with none. Callable only after [Plan.validate]
+// has confirmed the graph is acyclic — the recursion below does not
+// itself guard against a cycle.
+func nodeDepths(byID map[string]Node) map[string]int {
+	depth := make(map[string]int, len(byID))
+	var compute func(id string) int
+	compute = func(id string) int {
+		if d, ok := depth[id]; ok {
+			return d
+		}
+		max := 0
+		for _, d := range byID[id].DependsOn {
+			if v := compute(d); v > max {
+				max = v
+			}
+		}
+		depth[id] = 1 + max
+		return depth[id]
+	}
+	for id := range byID {
+		compute(id)
+	}
+	return depth
 }
 
 // validate refuses a graph the queue could not run.

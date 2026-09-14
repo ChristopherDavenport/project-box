@@ -125,6 +125,126 @@ func TestGraphsTheQueueCouldNotRun(t *testing.T) {
 	}
 }
 
+// TestANoReasonPlansRefIsUnchangedBySealsNewFields pins the ref a plan with no
+// edge reasons got before this commit. The conditional "reasons:" put in Seal
+// only fires when a node's EdgeReasons is non-empty, so a plan that carries
+// none must still digest to the exact bytes it always did — planDomain does
+// NOT bump for this change, and this is the test that would fail if the put
+// ever stopped being conditional.
+func TestANoReasonPlansRefIsUnchangedBySealsNewFields(t *testing.T) {
+	p := Plan{Ingress: "ing-1", Kind: "issue", Decomposer: "x", Replayable: true,
+		Nodes: []Node{
+			{ID: "one", Task: "do one"},
+			{ID: "two", Task: "do two", DependsOn: []string{"one"}},
+		},
+	}
+	if err := p.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	const want = "plan-c656531e9088d155a4b9d3486dfa429e"
+	if p.Ref != want {
+		t.Fatalf("a plan with no edge reasons changed ref: got %s, want %s", p.Ref, want)
+	}
+}
+
+// judgeChain is a two-node judgement decomposer whose second node depends on
+// the first — the shape TestAJudgementPlansReasonlessEdgeIsRefused needs to
+// drive the refusal through Make, the same door production work uses, rather
+// than through Seal directly, which pump.amendPlanNode also calls to re-seal
+// a plan already on the chain.
+type judgeChain struct{ reason string }
+
+func (judgeChain) Name() string     { return "judge-chain" }
+func (judgeChain) Replayable() bool { return false }
+func (j judgeChain) Decompose(context.Context, ingress.Ingress, kind.Declaration) (Result, error) {
+	reasons := map[string]string(nil)
+	if j.reason != "" {
+		reasons = map[string]string{"one": j.reason}
+	}
+	return Result{AgentRef: "agentref-1", Nodes: []Node{
+		{ID: "one", Task: "do one"},
+		{ID: "two", Task: "do two", DependsOn: []string{"one"}, EdgeReasons: reasons},
+	}}, nil
+}
+
+// TestAJudgementPlansReasonlessEdgeIsRefused. #201: the planner decomposed
+// into chains because nothing asked an edge to justify itself. The refusal
+// is exercised at Make, where a new judgement plan is minted — not at Seal,
+// which pump.amendPlanNode also calls to re-seal a plan already on the
+// chain, and which must keep re-sealing a plan minted before this commit
+// even when the edge it is amending still carries no reason.
+func TestAJudgementPlansReasonlessEdgeIsRefused(t *testing.T) {
+	reg, err := NewRegistry(judgeChain{}, Sequence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decl := kind.Declaration{Name: "issue", Completion: kind.Completion{Graph: true},
+		Decompose: kind.Decomposition{Decomposer: "judge-chain"}}
+	_, err = Make(context.Background(), reg, issue("ing-1"), decl)
+	if err == nil {
+		t.Fatal("accepted a judgement plan whose edge names no reason")
+	}
+	if !errors.Is(err, ErrPlan) || !strings.Contains(err.Error(), `"two"`) || !strings.Contains(err.Error(), `"one"`) {
+		t.Fatalf("refusal does not name the edge: %v", err)
+	}
+
+	// The same edge with a reason attached is accepted.
+	regReasoned, err := NewRegistry(judgeChain{reason: "uses one.Helper()"}, Sequence{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Make(context.Background(), regReasoned, issue("ing-1"), decl); err != nil {
+		t.Fatalf("a reasoned edge was refused: %v", err)
+	}
+}
+
+// TestAPlanSealedBeforeEdgesCarriedReasonsStillReSeals: pump.amendPlanNode
+// re-seals a plan already on the chain during a replan, over the node the
+// replan touched — not the reasonless edge, which the replan never looked
+// at. A plan minted before this commit can carry one, and re-sealing it must
+// not become impossible retroactively: the reason requirement is Make's
+// gate on NEW judgement plans, not Seal's gate on every plan that ever
+// exists.
+func TestAPlanSealedBeforeEdgesCarriedReasonsStillReSeals(t *testing.T) {
+	p := Plan{Ingress: "ing-1", Replayable: false, AgentRef: "agentref-1", Nodes: []Node{
+		{ID: "one", Task: "do one"},
+		{ID: "two", Task: "do two", DependsOn: []string{"one"}},
+	}}
+	if err := p.Seal(); err != nil {
+		t.Fatalf("a pre-existing reasonless-edge plan could not re-seal: %v", err)
+	}
+}
+
+// TestSequenceAndIdentityAreExemptFromTheReasonRequirement. Their graphs are
+// functions of a governed declaration, not a planner's discretion — there is
+// no judgement for the edge to justify.
+func TestSequenceAndIdentityAreExemptFromTheReasonRequirement(t *testing.T) {
+	ing := issue("ing-inc")
+	ing.Kind = kind.SeedIncident
+	if _, err := Make(context.Background(), Default(), ing, seed(t, kind.SeedIncident)); err != nil {
+		t.Fatalf("a replayable chain with no edge reasons was refused: %v", err)
+	}
+}
+
+// TestDiamondWidthAndDepth: a; b and c depend on a; d depends on b and c.
+func TestDiamondWidthAndDepth(t *testing.T) {
+	p := Plan{Ingress: "ing-1", Replayable: true, Nodes: []Node{
+		{ID: "a", Task: "t"},
+		{ID: "b", Task: "t", DependsOn: []string{"a"}},
+		{ID: "c", Task: "t", DependsOn: []string{"a"}},
+		{ID: "d", Task: "t", DependsOn: []string{"b", "c"}},
+	}}
+	if err := p.Seal(); err != nil {
+		t.Fatal(err)
+	}
+	if p.Depth != 3 {
+		t.Fatalf("depth = %d, want 3", p.Depth)
+	}
+	if p.Width != 2 {
+		t.Fatalf("width = %d, want 2", p.Width)
+	}
+}
+
 // TestAnOrdinaryIssueIsNotRenamedByTheStage. The decomposition stage arrives on
 // top of a running factory, and `wi-<ingress>` is on live chains, in evidence,
 // and in ids an operator has already read out of the control room.
