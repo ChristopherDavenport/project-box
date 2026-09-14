@@ -71,6 +71,10 @@ type Reviewer struct {
 	// source the builders use, which is what makes the reviewer's tier a
 	// role in box.yaml rather than a second configuration.
 	Composer *agent.Composer
+	// Runner is the declared runner NAME this review was given — see
+	// [agent.Request.Runner]. Wired by the daemon; unset in production for
+	// now.
+	Runner string
 	// Seat gives the reviewer continuity: what one review learned about a
 	// repository wakes the next one.
 	Seat      *seat.Seat
@@ -164,8 +168,9 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 
 	req := agent.Request{
 		Tenant: r.Tenant, Role: agent.RoleGate, Box: r.Box, Repo: r.Repo.Name, Run: run,
-		Task:  cs.Intent,
-		Extra: []agent.Layer{reviewerLayer()},
+		Task:   cs.Intent,
+		Runner: r.Runner,
+		Extra:  []agent.Layer{reviewerLayer()},
 	}
 	if len(prior) > 0 {
 		req.Extra = append(req.Extra, reviewerPriorLayer(prior))
@@ -199,7 +204,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 	}
 	rec.json(ctx, "agent-run", bundle.Ref, runRecord{
 		AgentRef: bundle.Ref, Role: string(agent.RoleGate), Mode: bundle.Tools.PermissionMode,
-		Seat: r.seatName(), Envelope: envelope, Layers: layers,
+		Seat: r.seatName(), Envelope: envelope, Layers: layers, Runner: bundle.Runner,
 	})
 
 	// The same three paths every run gets, so a confining wrapper is told the
@@ -254,7 +259,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
 			Credential: res.Usage.Credential(), Env: res.EnvNames,
-			Session: res.Session.ID, Role: "reviewer",
+			Session: res.Session.ID, Role: "reviewer", Runner: bundle.Runner,
 		})
 	}
 	// The unit's own run key, not a run of the reviewer's own: a unit's cost
@@ -272,7 +277,7 @@ func (r *Reviewer) Evaluate(ctx context.Context, cs forge.ChangeSet) (forge.Verd
 		}
 		return forge.Verdict{}, fmt.Errorf("acp: reviewer: %w", err)
 	}
-	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed)))
+	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed, bundle.Runner)))
 	rec.json(ctx, "agent-text", bundle.Ref, textRecord{AgentRef: bundle.Ref, Text: res.Text, StopReason: res.StopReason})
 	if r.Seat != nil {
 		if notes := handoffNotes(res.Text); len(notes) > 0 {

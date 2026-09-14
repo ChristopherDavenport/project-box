@@ -277,6 +277,24 @@ func TestTheGateSessionRecordCarriesEnvNamesNoValues(t *testing.T) {
 	}
 }
 
+// TestTheGateRunnerRidesEveryRecordOnlyWhenDeclared: the same runner-carrying
+// contract [TestTheRunnerRidesEveryRecordOnlyWhenDeclared] asserts for a
+// build, from the reviewer's own call site.
+func TestTheGateRunnerRidesEveryRecordOnlyWhenDeclared(t *testing.T) {
+	rv, cs, s, _ := reviewerRig(t, "review-pass")
+	rv.Runner = "gha-runner-1"
+	ctx := context.Background()
+	if _, err := rv.Evaluate(ctx, cs); err != nil {
+		t.Fatalf("evaluate: %v", err)
+	}
+	kinds := chain(t, s, cs.Run)
+	for _, name := range []string{"agent-run", "agent-session", "agent-result"} {
+		if !strings.Contains(kinds[name], `"runner":"gha-runner-1"`) {
+			t.Fatalf("the declared runner is not on %s:\n%s", name, kinds[name])
+		}
+	}
+}
+
 // TestTheGateFailsWithItsReason: a rejection travels as a rejection, with the
 // words a builder has to act on.
 func TestTheGateFailsWithItsReason(t *testing.T) {

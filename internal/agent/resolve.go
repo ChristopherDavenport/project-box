@@ -138,7 +138,7 @@ func (c *Composer) Resolve(ctx context.Context, req Request) (Bundle, error) {
 		return Bundle{}, fmt.Errorf("agent: no layers resolve for role %q in box %q", req.Role, req.Box)
 	}
 
-	b := Bundle{Tenant: req.Tenant, Role: req.Role, Box: req.Box, Layers: layers, Envelope: env}
+	b := Bundle{Tenant: req.Tenant, Role: req.Role, Box: req.Box, Layers: layers, Envelope: env, Runner: req.Runner}
 	var prose []string
 	skills := map[string]SkillRef{}
 	var skillOrder []string
@@ -301,6 +301,11 @@ func (c *Composer) Explain(_ context.Context, b Bundle) ([]byte, error) {
 		envelope = b.Envelope.String()
 	}
 	fmt.Fprintf(&w, "envelope: %s\n", envelope)
+	runner := b.Runner
+	if runner == "" {
+		runner = "(none declared)"
+	}
+	fmt.Fprintf(&w, "runner: %s\n", runner)
 	for _, k := range slices.Sorted(maps.Keys(b.Session)) {
 		fmt.Fprintf(&w, "session.%s: %s\n", k, b.Session[k])
 	}
@@ -380,6 +385,13 @@ func ref(b Bundle) string {
 	}
 	if b.Envelope != nil {
 		put("envelope:" + b.Envelope.String())
+	}
+	// Conditional, following [plan.Plan.Seal]'s precedent for an additive
+	// field: every ref sealed before Runner existed named no runner, so
+	// putting it only when set keeps those refs byte-stable rather than
+	// bumping resolveDomain for a field most bundles will never carry.
+	if b.Runner != "" {
+		put("runner:" + b.Runner)
 	}
 	for _, r := range b.Context.Repos {
 		mode := "ro"

@@ -66,6 +66,11 @@ type Builder struct {
 	// Composer resolves the bundle; Role defaults to builder.
 	Composer *agent.Composer
 	Role     agent.Role
+	// Runner is the declared runner NAME this build was given, from the box
+	// configuration's runners list — see [agent.Request.Runner]. Wired by
+	// the daemon; unset in production for now, which rides the bundle and
+	// every record as absent rather than as a guessed host name.
+	Runner string
 	// Envelope is the data handling this work's origination declared. It is
 	// the origination's, not the Box's — the Box's bound is the composer's
 	// ceiling. A composer with a ceiling and nothing here refuses every run,
@@ -140,7 +145,7 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		}
 		envelopeIn = declared
 	}
-	req := agent.Request{Tenant: b.Tenant, Role: role, Box: b.Box, Repo: ws.Repo, Run: ws.Run, Task: task, Envelope: envelopeIn}
+	req := agent.Request{Tenant: b.Tenant, Role: role, Box: b.Box, Repo: ws.Repo, Run: ws.Run, Task: task, Envelope: envelopeIn, Runner: b.Runner}
 	// What is true of this harness, stated once and first: issue #195. Nine
 	// dogfood runs ended a turn waiting on a shell call Claude Code offered
 	// to move to the background — under ACP no notification ever follows,
@@ -481,6 +486,7 @@ func (b *Builder) runOnce(ctx context.Context, rc attemptCtx, sent, resume, cont
 	b.recordJSON(ctx, ws.Run, "agent-run", bundle.Ref, runRecord{
 		AgentRef: bundle.Ref, Role: string(rc.Role), Mode: bundle.Tools.PermissionMode,
 		Seat: b.seatName(), Envelope: envelope, Layers: layers, Continues: continues,
+		Runner: bundle.Runner,
 	})
 	// And the same fact to whoever is watching, at the same moment. The
 	// record answers afterwards; this is what puts the unit on a live view
@@ -532,7 +538,7 @@ func (b *Builder) runOnce(ctx context.Context, rc attemptCtx, sent, resume, cont
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
 			Credential: res.Usage.Credential(), Env: res.EnvNames,
-			Session: res.Session.ID, Role: "builder",
+			Session: res.Session.ID, Role: "builder", Runner: bundle.Runner,
 		})
 	}
 	// Cost is charged even when the run failed. A session that errored
@@ -552,7 +558,7 @@ func (b *Builder) runOnce(ctx context.Context, rc attemptCtx, sent, resume, cont
 			// its result record now rather than never: a dropped call still
 			// answers "what did this run cost and how did it end", which is
 			// exactly what a bare error return here has always thrown away.
-			b.record(ctx, ws.Run, "agent-result", bundle.Ref, resultBody(res, elapsed))
+			b.record(ctx, ws.Run, "agent-result", bundle.Ref, resultBody(res, elapsed, bundle.Runner))
 		}
 		return res, err
 	}
@@ -567,7 +573,7 @@ func (b *Builder) runOnce(ctx context.Context, rc attemptCtx, sent, resume, cont
 	// reads are the bulk of an agent re-reading a repository and are priced
 	// an order of magnitude below input. Four runs came in between $0.68 and
 	// $1.54 per million and nothing on the record could say why.
-	b.record(ctx, ws.Run, "agent-result", bundle.Ref, resultBody(res, elapsed))
+	b.record(ctx, ws.Run, "agent-result", bundle.Ref, resultBody(res, elapsed, bundle.Runner))
 	// What the agent actually said, kept rather than mined.
 	//
 	// res.Text was read twice — for HANDOFF lines and for the ESCALATE text
@@ -936,6 +942,9 @@ type runRecord struct {
 	// inferred from the agent-session record sharing an id with an earlier
 	// one — a shared id says what happened, not that this run knew it.
 	Continues string `json:"continues,omitempty"`
+	// Runner is the declared runner this run was given — see
+	// [agent.Bundle.Runner]. Empty for a run that named none.
+	Runner string `json:"runner,omitempty"`
 }
 
 // agentResumeRecord narrates a continuation attempt: the session it tried to
@@ -1018,6 +1027,11 @@ type sessionRecord struct {
 	// workitem/<id> scope, and a continuation that picked up the reviewer's
 	// session id would resume the wrong agent.
 	Role string `json:"role,omitempty"`
+	// Runner is the declared runner this run was given — see
+	// [agent.Bundle.Runner]. One field covers all three roles' sessions: a
+	// field added for one role and not the others would read as unknown for
+	// the rest. Empty for a run that named none.
+	Runner string `json:"runner,omitempty"`
 }
 
 // recordJSON writes a narrative record whose body is a marshalled value —
@@ -1292,7 +1306,13 @@ func taskOnce(bundle agent.Bundle, task string) string {
 // of; the account's own limit beside those, because it is the one number the
 // meter cannot see. Unknown dialect updates ride along, so a metric that
 // drifts to zero is visible here rather than inferred from a table of zeros.
-func resultBody(res Result, elapsed time.Duration) string {
+//
+// runner is the declared runner the run was given — see [agent.Bundle.Runner]
+// — spliced in as an additive key when set, the same technique
+// [capacity.Meter.withAccount] uses: splicing after the opening brace keeps
+// every existing reader of this hand-formatted body untouched, where a round
+// trip through json.Marshal could reformat the numbers already in it.
+func resultBody(res Result, elapsed time.Duration, runner string) string {
 	unknown, _ := json.Marshal(res.UnknownUpdates)
 	tools, _ := json.Marshal(tally(res.ToolCalls))
 	denied, _ := json.Marshal(tally(res.Denied))
@@ -1300,7 +1320,7 @@ func resultBody(res Result, elapsed time.Duration) string {
 	if res.Usage.RateLimit != nil {
 		rateLimit, _ = json.Marshal(res.Usage.RateLimit)
 	}
-	return fmt.Sprintf(`{"stop":%q,"aborted_reason":%q,"tool_calls":%d,"unenforced":%d,"denied":%d,"escalated":%v,"wall_ms":%d,`+
+	body := fmt.Sprintf(`{"stop":%q,"aborted_reason":%q,"tool_calls":%d,"unenforced":%d,"denied":%d,"escalated":%v,"wall_ms":%d,`+
 		`"tokens":%d,"input_tokens":%d,"output_tokens":%d,"cached_read_tokens":%d,"cached_write_tokens":%d,`+
 		`"cost_usd":%.4f,"metered":%v,"model":%q,"context_used":%d,"context_size":%d,"rate_limit":%s,`+
 		`"unknown_updates":%s,"tools":%s,"denied_tools":%s}`,
@@ -1309,4 +1329,12 @@ func resultBody(res Result, elapsed time.Duration) string {
 		res.Usage.CachedReadTokens, res.Usage.CachedWriteTokens,
 		res.Usage.CostUSD, res.Usage.Reported, res.Session.Model(), res.Usage.ContextUsed, res.Usage.ContextSize, rateLimit,
 		unknown, tools, denied)
+	if runner == "" {
+		return body
+	}
+	r, err := json.Marshal(runner)
+	if err != nil {
+		return body
+	}
+	return `{"runner":` + string(r) + `,` + body[1:]
 }

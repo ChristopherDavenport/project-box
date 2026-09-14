@@ -152,6 +152,30 @@ func TestThePlannerSessionRecordCarriesEnvNamesNoValues(t *testing.T) {
 	}
 }
 
+// TestThePlannerRunnerRidesEveryRecordOnlyWhenDeclared: the same runner-
+// carrying contract [TestTheRunnerRidesEveryRecordOnlyWhenDeclared] asserts
+// for a build, from the planner's own call site.
+func TestThePlannerRunnerRidesEveryRecordOnlyWhenDeclared(t *testing.T) {
+	p, ing, _ := plannerRig(t, "planner")
+	p.Runner = "gha-runner-1"
+	ctx := context.Background()
+	if _, err := p.Decompose(ctx, ing, plannerDecl()); err != nil {
+		t.Fatalf("decompose: %v", err)
+	}
+	kinds := map[string]string{}
+	for r, err := range p.Store.Log().Since(ctx, btn, ingress.Scope(ing.ID), 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		kinds[r.Kind] = string(r.Body)
+	}
+	for _, name := range []string{"agent-run", "agent-session", "agent-result"} {
+		if !strings.Contains(kinds[name], `"runner":"gha-runner-1"`) {
+			t.Fatalf("the declared runner is not on %s:\n%s", name, kinds[name])
+		}
+	}
+}
+
 // TestThePlanSealsAndBecomesItems runs the planner through the plan package:
 // registered by box, opted into by the declaration, sealed as a judgement
 // with its author, and turned into items that carry where and on what.

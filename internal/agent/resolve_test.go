@@ -191,3 +191,46 @@ func TestSessionOptionsMergePerKey(t *testing.T) {
 		t.Fatalf("Explain does not show the session option:\n%s", e)
 	}
 }
+
+// TestRunnerRidesTheDigestOnlyWhenDeclared: the runner a request names is
+// carried on the resolved bundle and moves the agentref, but only when set —
+// a request that names none must produce the exact ref every request named
+// before Runner existed, since every ref already recorded on a chain was
+// sealed under that assumption. a656973b1aba92529ed4e8aece869132de023bd4d09
+// 6b3f0cf06630aa150f979 is [request]'s ref computed by the code as it stood
+// immediately before this field was added — the pin that proves it.
+func TestRunnerRidesTheDigestOnlyWhenDeclared(t *testing.T) {
+	c := &Composer{Source: layers()}
+	unset, err := c.Resolve(context.Background(), request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const preChangeRef = "a656973b1aba92529ed4e8aece869132de023bd4d096b3f0cf06630aa150f979"
+	if unset.Ref != preChangeRef {
+		t.Fatalf("an undeclared runner moved the agentref: got %s, want %s", unset.Ref, preChangeRef)
+	}
+	if unset.Runner != "" {
+		t.Fatalf("an undeclared runner was recorded as %q", unset.Runner)
+	}
+
+	req := request()
+	req.Runner = "gha-runner-1"
+	set, err := c.Resolve(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Runner != "gha-runner-1" {
+		t.Fatalf("the declared runner was not carried onto the bundle: %q", set.Runner)
+	}
+	if set.Ref == unset.Ref {
+		t.Fatal("a declared runner did not move the agentref")
+	}
+
+	explained, err := c.Explain(context.Background(), set)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(explained, []byte("runner: gha-runner-1")) {
+		t.Fatalf("Explain does not show the declared runner:\n%s", explained)
+	}
+}

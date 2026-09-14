@@ -68,6 +68,10 @@ type Planner struct {
 	// harness source the builders use, which is what makes the planner's
 	// tier a role in box.yaml rather than a second configuration.
 	Composer *agent.Composer
+	// Runner is the declared runner NAME this plan was given — see
+	// [agent.Request.Runner]. Wired by the daemon; unset in production for
+	// now.
+	Runner string
 	// Seat gives the planner continuity: its handoff notes wake the next
 	// plan. Nil plans cold every time.
 	Seat      *seat.Seat
@@ -129,7 +133,7 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 
 	req := agent.Request{
 		Tenant: p.Tenant, Role: agent.RolePlanner, Box: p.Box, Repo: repo.Name, Run: run,
-		Task: plan.TaskOf(ing), Envelope: decl.Envelope,
+		Task: plan.TaskOf(ing), Envelope: decl.Envelope, Runner: p.Runner,
 		Extra: []agent.Layer{sectionsLayer(repo)},
 	}
 	if p.Seat != nil {
@@ -156,7 +160,7 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 	}
 	rec.json(ctx, "agent-run", bundle.Ref, runRecord{
 		AgentRef: bundle.Ref, Role: string(agent.RolePlanner), Mode: bundle.Tools.PermissionMode,
-		Seat: p.seatName(), Envelope: envelope, Layers: layers,
+		Seat: p.seatName(), Envelope: envelope, Layers: layers, Runner: bundle.Runner,
 	})
 
 	// The same three paths every run gets, so a confining wrapper is told
@@ -196,7 +200,7 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
 			Credential: res.Usage.Credential(), Env: res.EnvNames,
-			Session: res.Session.ID, Role: "planner",
+			Session: res.Session.ID, Role: "planner", Runner: bundle.Runner,
 		})
 	}
 	if p.Spend != nil && res.Prompted {
@@ -219,7 +223,7 @@ func (p *Planner) Decompose(ctx context.Context, ing ingress.Ingress, decl kind.
 		}
 		return plan.Result{}, fmt.Errorf("acp: planner: %w: %w", plan.ErrNoAnswer, werr)
 	}
-	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed)))
+	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed, bundle.Runner)))
 	rec.json(ctx, "agent-text", bundle.Ref, textRecord{AgentRef: bundle.Ref, Text: res.Text, StopReason: res.StopReason})
 	if p.Seat != nil {
 		if notes := handoffNotes(res.Text); len(notes) > 0 {
@@ -277,7 +281,7 @@ func (p *Planner) Replan(ctx context.Context, origination ingress.Ingress, pl pl
 
 	req := agent.Request{
 		Tenant: p.Tenant, Role: agent.RolePlanner, Box: p.Box, Repo: repo.Name, Run: run,
-		Task: unit.Task, Extra: []agent.Layer{sectionsLayer(repo)},
+		Task: unit.Task, Runner: p.Runner, Extra: []agent.Layer{sectionsLayer(repo)},
 	}
 	bundle, err := p.Composer.Resolve(ctx, req)
 	if err != nil {
@@ -294,7 +298,7 @@ func (p *Planner) Replan(ctx context.Context, origination ingress.Ingress, pl pl
 	}
 	rec.json(ctx, "agent-run", bundle.Ref, runRecord{
 		AgentRef: bundle.Ref, Role: string(agent.RolePlanner), Mode: bundle.Tools.PermissionMode,
-		Seat: p.seatName(), Envelope: envelope, Layers: layers,
+		Seat: p.seatName(), Envelope: envelope, Layers: layers, Runner: bundle.Runner,
 	})
 
 	contextDir, skillsDir := forge.ContextDir(tree), forge.SkillsDir(tree)
@@ -332,7 +336,7 @@ func (p *Planner) Replan(ctx context.Context, origination ingress.Ingress, pl pl
 			AgentRef: bundle.Ref, Model: res.Session.Model(), Modes: res.Session.Modes,
 			Config: res.Session.Config, Commands: res.Session.Commands,
 			Credential: res.Usage.Credential(), Env: res.EnvNames,
-			Session: res.Session.ID, Role: "planner",
+			Session: res.Session.ID, Role: "planner", Runner: bundle.Runner,
 		})
 	}
 	if p.Spend != nil && res.Prompted {
@@ -348,7 +352,7 @@ func (p *Planner) Replan(ctx context.Context, origination ingress.Ingress, pl pl
 		}
 		return plan.ReplanNode{}, fmt.Errorf("acp: planner: replan: %w: %w", plan.ErrNoAnswer, werr)
 	}
-	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed)))
+	rec.raw(ctx, "agent-result", bundle.Ref, []byte(resultBody(res, elapsed, bundle.Runner)))
 	rec.json(ctx, "agent-text", bundle.Ref, textRecord{AgentRef: bundle.Ref, Text: res.Text, StopReason: res.StopReason})
 	// Unwrapped, exactly as Decompose returns its own escalation (line
 	// above): [Pump.runReplan] parks on any error this returns, and a

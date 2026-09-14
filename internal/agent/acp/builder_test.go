@@ -713,6 +713,70 @@ func TestTheSessionRecordCarriesEnvNamesNoValues(t *testing.T) {
 	}
 }
 
+// TestTheRunnerRidesEveryRecordOnlyWhenDeclared: issue #217's agent-plane
+// half. A Builder given a runner name carries it onto the agentref and into
+// every record a run writes — agent-run, agent-session, agent-result — and a
+// Builder given none leaves the key absent from all three and the agentref
+// unmoved from a plain run's, exactly as before this field existed.
+func TestTheRunnerRidesEveryRecordOnlyWhenDeclared(t *testing.T) {
+	records := func(t *testing.T, runner string) (run, session, result string) {
+		t.Helper()
+		s, lp, router, _, _ := rig(t, "worker")
+		lp.Builder.(*Builder).Runner = runner
+		key := "issue-runner-unset"
+		if runner != "" {
+			key = "issue-runner-set"
+		}
+		item := runItem(t, s, lp, router, key, "add the widget package")
+		if item.State != queue.StateDone {
+			t.Fatalf("item: %+v", item)
+		}
+		for r, err := range s.Log().Since(context.Background(), btn, "workitem/wi-"+key, 1) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch r.Kind {
+			case "agent-run":
+				run = string(r.Body)
+			case "agent-session":
+				session = string(r.Body)
+			case "agent-result":
+				result = string(r.Body)
+			}
+		}
+		return run, session, result
+	}
+
+	plainRun, plainSession, plainResult := records(t, "")
+	for name, body := range map[string]string{"agent-run": plainRun, "agent-session": plainSession, "agent-result": plainResult} {
+		if strings.Contains(body, `"runner"`) {
+			t.Fatalf("an undeclared runner appeared on %s:\n%s", name, body)
+		}
+	}
+	var plainRef struct {
+		AgentRef string `json:"agentref"`
+	}
+	if err := json.Unmarshal([]byte(plainRun), &plainRef); err != nil {
+		t.Fatal(err)
+	}
+
+	namedRun, namedSession, namedResult := records(t, "gha-runner-1")
+	for name, body := range map[string]string{"agent-run": namedRun, "agent-session": namedSession, "agent-result": namedResult} {
+		if !strings.Contains(body, `"runner":"gha-runner-1"`) {
+			t.Fatalf("the declared runner is not on %s:\n%s", name, body)
+		}
+	}
+	var namedRef struct {
+		AgentRef string `json:"agentref"`
+	}
+	if err := json.Unmarshal([]byte(namedRun), &namedRef); err != nil {
+		t.Fatal(err)
+	}
+	if namedRef.AgentRef == plainRef.AgentRef {
+		t.Fatal("a declared runner did not move the agentref")
+	}
+}
+
 // TestTheSectionReachesThePromptAndTheRef. A section is a layer: the agent is
 // told where it works and what to run while there, the layer is on the run
 // record, and a plan's tier for the unit reaches the session and the result.

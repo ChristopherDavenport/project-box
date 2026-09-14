@@ -273,6 +273,12 @@ type Request struct {
 	// than defaulted. Where a declaration comes from is not settled here: it
 	// belongs on the governed kind declaration, which does not exist yet.
 	Envelope *Envelope
+	// Runner is the declared runner NAME this run was given, from the box
+	// configuration's runners list — wired in by the caller, never resolved
+	// here. Empty means the caller named none, which the bundle carries as
+	// absent rather than as a guessed or defaulted host name: unknown never
+	// reads as zero.
+	Runner string
 }
 
 // Bundle is a resolved, content-addressed agent definition.
@@ -301,7 +307,11 @@ type Bundle struct {
 	// digest, so a different envelope is a different agent on the record,
 	// exactly as continuity notes already are. Nil where no classification
 	// regime applies.
-	Envelope   *Envelope
+	Envelope *Envelope
+	// Runner is the declared runner this run was given — see [Request.Runner].
+	// Empty means the request named none, and is recorded as nothing rather
+	// than defaulted to a host name.
+	Runner     string
 	ResolvedAt time.Time
 }
 
