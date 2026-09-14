@@ -183,6 +183,13 @@ type Daemon struct {
 	// path of its own, including one that does not exist, to exercise the
 	// unreadable case without depending on the real kernel file.
 	bootIDPath string
+	// suspend is the one [loop.SuspendWatch] this daemon owns, threaded into
+	// every [loop.Loop] assemble builds so a single Observe call per tick (in
+	// Run) extends every in-flight run's leases and deadlines the same way,
+	// regardless of which box or repo they belong to. Survives Reload —
+	// assemble reads it off d rather than constructing a fresh one — so a
+	// reload never resets the wall/mono baseline mid-suspend-detection.
+	suspend *loop.SuspendWatch
 
 	mu    sync.RWMutex
 	every time.Duration
@@ -217,6 +224,7 @@ func New(path string) (*Daemon, error) {
 		exePath:    os.Executable,
 		build:      version.ThisBuild,
 		bootIDPath: defaultBootIDPath,
+		suspend:    &loop.SuspendWatch{},
 		router:     router,
 		poller: &ingress.Poller{
 			Lister: newGHIssueLister(ghAuthToken), Router: router, Log: s.Log(),
@@ -452,7 +460,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 			reviews := r.Review == boxcfg.ReviewJudgement
 			lp := &loop.Loop{
 				Store: d.store, Runner: d.cfgRunner(), Mirror: d.mirror, Repo: repo, Branch: r.Branch,
-				Lane: forge.Lane(r.Lane), Meter: d.meter, Widen: bx.Widen,
+				Lane: forge.Lane(r.Lane), Meter: d.meter, Widen: bx.Widen, Suspend: d.suspend,
 				Gates: func(ws forge.Workspace) []forge.Gate {
 					gates := []forge.Gate{gate.Command{Label: "check", Dir: ws.Dir,
 						Commands: [][]string{{"sh", "-c", check}}}}
@@ -923,6 +931,13 @@ func (d *Daemon) Run(ctx context.Context) error {
 			}
 			return ctx.Err()
 		case <-time.After(d.Every()):
+			// Observed first, before anything else this tick does: a
+			// detected gap renews every in-flight run's leases and
+			// deadlines (see [loop.Loop.Suspend]'s Subscribe wiring)
+			// synchronously, inside Observe, so PollRoutes, Tick's own
+			// reaper, and dispatch all see post-renewal state rather than
+			// racing a suspend's aftermath.
+			d.observeSuspend(workCtx)
 			d.PollRoutes(workCtx, time.Now())
 			if _, err := d.Tick(workCtx); err != nil {
 				slog.Error("tick", "err", err)
@@ -1152,6 +1167,61 @@ func (d *Daemon) recordStarted(ctx context.Context) error {
 	}
 	_, err = d.store.Log().Append(ctx, evidence.Record{
 		Tenant: d.tenant, Scope: daemonStartedScope, Kind: "daemon-started",
+		Subject: subject, Actor: d.cfgRunner(), Body: encoded,
+	})
+	return err
+}
+
+// observeSuspend calls d.suspend.Observe with this daemon's own tick
+// interval as threshold and, when it reports a gap, records it. Its own
+// method rather than inlined in Run's select, the same shape as PollRoutes
+// above, so a test can drive one tick's suspend observation directly against
+// a fake-clocked d.suspend without spinning up Run's listener and select
+// loop.
+func (d *Daemon) observeSuspend(ctx context.Context) {
+	gap := d.suspend.Observe(d.Every())
+	if gap <= 0 {
+		return
+	}
+	if err := d.recordResumed(ctx, gap); err != nil {
+		slog.Error("daemon-resumed: recording", "err", err)
+	}
+}
+
+// daemonResumedBody is the JSON body of a daemon-resumed record. GapNS
+// carries the machine form a consumer can compute with; Gap carries
+// [time.Duration.String]'s human form beside it, the same say-it-both-ways
+// shape [SpendOf] and its kin use elsewhere in this package, so a person
+// reading the chain does not have to do the division themselves.
+type daemonResumedBody struct {
+	GapNS int64  `json:"gap_ns"`
+	Gap   string `json:"gap"`
+}
+
+// recordResumed appends the daemon-resumed record: [loop.SuspendWatch.Observe]
+// found a wall-vs-monotonic gap this tick, meaning the host was suspended for
+// roughly that long. Only called when a gap was detected — unlike
+// daemon-started, there is no "resumed with a zero gap" case to distinguish
+// from absence, so the record's mere existence is the fact.
+//
+// Subject is the host's own boot id, read the same way [Daemon.recordStarted]
+// does, rather than the gap itself: a boot id lets every daemon-resumed
+// record for one uptime be found beside the daemon-started record that began
+// it, which the gap's own string value cannot do (two suspends of the same
+// length are indistinguishable by gap alone).
+func (d *Daemon) recordResumed(ctx context.Context, gap time.Duration) error {
+	body := daemonResumedBody{GapNS: int64(gap), Gap: gap.String()}
+	encoded, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("daemon: encoding daemon-resumed record: %w", err)
+	}
+	bootID, ok := readBootID(d.bootIDPath)
+	subject := bootID
+	if !ok {
+		subject = "unknown"
+	}
+	_, err = d.store.Log().Append(ctx, evidence.Record{
+		Tenant: d.tenant, Scope: daemonStartedScope, Kind: "daemon-resumed",
 		Subject: subject, Actor: d.cfgRunner(), Body: encoded,
 	})
 	return err

@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
+	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/version"
 )
 
@@ -90,6 +92,111 @@ func TestRecordStartedUnreadableBootIDIsUnknownNotEmpty(t *testing.T) {
 	}
 	if recs[0].Subject != "unknown" {
 		t.Fatalf("subject = %q, want the explicit unknown marker", recs[0].Subject)
+	}
+}
+
+// TestObserveSuspendOverTenMinuteJumpRecordsTheGap: one tick's observation
+// over a wall clock that jumped ten minutes while the monotonic clock did
+// not move at all — the pure-suspend shape, see [loop.SuspendWatch.Observe]
+// — appends exactly one daemon-resumed record on the standing control/daemon
+// chain, carrying the ten-minute gap in both the machine and human form the
+// body promises.
+func TestObserveSuspendOverTenMinuteJumpRecordsTheGap(t *testing.T) {
+	ctx := context.Background()
+	d, _ := plainDaemon(t)
+
+	wall := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mono := time.Unix(0, 0)
+	d.suspend = &loop.SuspendWatch{
+		Wall: func() time.Time { return wall },
+		Mono: func() time.Time { return mono },
+	}
+	d.observeSuspend(ctx) // baseline: first Observe always reports zero
+
+	wall = wall.Add(10 * time.Minute)
+	d.observeSuspend(ctx)
+
+	recs := daemonStartedRecords(t, d, ctx)
+	if len(recs) != 1 {
+		t.Fatalf("control/daemon = %d records, want exactly 1: %+v", len(recs), recs)
+	}
+	rec := recs[0]
+	if rec.Kind != "daemon-resumed" {
+		t.Fatalf("kind = %q, want daemon-resumed", rec.Kind)
+	}
+	if rec.Actor != d.cfgRunner() {
+		t.Fatalf("actor = %q, want the daemon's own runner identity %q", rec.Actor, d.cfgRunner())
+	}
+	var body daemonResumedBody
+	if err := json.Unmarshal(rec.Body, &body); err != nil {
+		t.Fatal(err)
+	}
+	if body.GapNS != int64(10*time.Minute) || body.Gap != (10*time.Minute).String() {
+		t.Fatalf("body = %+v, want a ten-minute gap in both forms", body)
+	}
+}
+
+// TestObserveSuspendWithNothingInFlightTouchesOnlyItsOwnRecord: the same
+// ten-minute jump, with no run ever dispatched on this daemon, appends the
+// one daemon-resumed record and nothing else — no parks, no reaps, no other
+// chain touched. observeSuspend never calls Tick or the pump, so this is the
+// noagent test rig's own "assert the chain quiet" shape applied to a single
+// standing scope rather than the whole loop.
+func TestObserveSuspendWithNothingInFlightTouchesOnlyItsOwnRecord(t *testing.T) {
+	ctx := context.Background()
+	d, _ := plainDaemon(t)
+
+	wall := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mono := time.Unix(0, 0)
+	d.suspend = &loop.SuspendWatch{
+		Wall: func() time.Time { return wall },
+		Mono: func() time.Time { return mono },
+	}
+	d.observeSuspend(ctx)
+	wall = wall.Add(10 * time.Minute)
+	d.observeSuspend(ctx)
+
+	if recs := daemonStartedRecords(t, d, ctx); len(recs) != 1 {
+		t.Fatalf("control/daemon = %d records, want exactly 1: %+v", len(recs), recs)
+	}
+	for _, scope := range []string{"control/claims", "control/capacity", "index/ingress", "index/pending"} {
+		var n int
+		for r, err := range d.store.Log().Since(ctx, d.tenant, scope, 1) {
+			if err != nil {
+				t.Fatal(err)
+			}
+			n++
+			_ = r
+		}
+		if n != 0 {
+			t.Fatalf("%s = %d records, want 0 — observing a suspend must not touch any other chain", scope, n)
+		}
+	}
+}
+
+// TestObserveSuspendWithNoGapAppendsNothing: a tick where the monotonic clock
+// advanced by roughly as much as the wall clock did — ordinary elapsed time,
+// not a suspend — must leave the control/daemon chain untouched. The record
+// exists only when a gap was detected, so there is no zero-gap record to
+// distinguish from an absent one.
+func TestObserveSuspendWithNoGapAppendsNothing(t *testing.T) {
+	ctx := context.Background()
+	d, _ := plainDaemon(t)
+
+	wall := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	mono := time.Unix(0, 0)
+	d.suspend = &loop.SuspendWatch{
+		Wall: func() time.Time { return wall },
+		Mono: func() time.Time { return mono },
+	}
+	d.observeSuspend(ctx)
+
+	wall = wall.Add(time.Second)
+	mono = mono.Add(time.Second)
+	d.observeSuspend(ctx)
+
+	if recs := daemonStartedRecords(t, d, ctx); len(recs) != 0 {
+		t.Fatalf("control/daemon = %d records, want 0 — no suspend was observed: %+v", len(recs), recs)
 	}
 }
 
