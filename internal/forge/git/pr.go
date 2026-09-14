@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -90,6 +91,7 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 		return forge.Landing{}, errors.New("git: empty ChangeSet")
 	}
 	prURLs := make(map[string]string, len(cs.Members))
+	flakesByRepo := make(map[string][]forge.FlakedTest, len(cs.Members))
 	for _, mem := range cs.Members {
 		repo, ok := p.inner.m.Repo(mem.Repo)
 		if !ok {
@@ -149,8 +151,12 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 		// precondition of the fence, keyed to mem.Head the same way every
 		// check and record in this function already is (docs/PLAN.md §6
 		// "Approvals bind to a commit").
-		if err := p.awaitIndependentCI(ctx, cs, mem, tok, owner, name); err != nil {
+		flakes, err := p.awaitIndependentCI(ctx, cs, mem, tok, owner, name)
+		if err != nil {
 			return forge.Landing{}, err
+		}
+		if len(flakes) > 0 {
+			flakesByRepo[mem.Repo] = flakes
 		}
 	}
 
@@ -170,6 +176,7 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 			continue
 		}
 		pl.PRURL = prURL
+		pl.Flakes = flakesByRepo[pl.Repo]
 		body := fmt.Sprintf(`{"pr_url":%q,"issue":%q,"completes_plan":%t}`, prURL, cs.DrivingIssue, cs.CompletesPlan)
 		if cs.DrivingIssue == "" {
 			// An empty DrivingIssue is itself a finding, not a default: the
@@ -618,18 +625,142 @@ func (p *PRLander) workflowRuns(ctx context.Context, token, owner, repo, sha str
 
 // rerunFailedJobs asks GitHub to rerun only the failed jobs of runID — a red
 // is not blocked on sight while the rerun budget allows another look.
+//
+// CRITICAL: rerunning resets runID's own latest attempt, so a caller wanting
+// to inspect what actually failed (see [PRLander.failedRunTests]) must do so
+// before calling this, while the red attempt is still the run's latest —
+// never after.
 func (p *PRLander) rerunFailedJobs(ctx context.Context, token, owner, repo string, runID int64) error {
 	endpoint := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/rerun-failed-jobs", p.apiBase, owner, repo, runID)
 	return p.call(ctx, http.MethodPost, endpoint, token, nil, nil)
 }
 
+// ciJob is the subset of a GitHub Actions job [PRLander] needs from the
+// list-jobs-for-a-run endpoint: enough to tell which of a completed run's
+// jobs actually failed, so only their logs are worth fetching.
+type ciJob struct {
+	ID         int64  `json:"id"`
+	Conclusion string `json:"conclusion"`
+}
+
+// jobsForRun lists every job GitHub recorded for runID.
+func (p *PRLander) jobsForRun(ctx context.Context, token, owner, repo string, runID int64) ([]ciJob, error) {
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/jobs", p.apiBase, owner, repo, runID)
+	var out struct {
+		Jobs []ciJob `json:"jobs"`
+	}
+	if err := p.call(ctx, http.MethodGet, endpoint, token, nil, &out); err != nil {
+		return nil, fmt.Errorf("list jobs for run %d: %w", runID, err)
+	}
+	return out.Jobs, nil
+}
+
+// jobLogs fetches jobID's raw log. GitHub answers this endpoint with a 302
+// redirect to a plain-text blob rather than JSON, so this bypasses p.call's
+// JSON decoder entirely and reads the body straight off the response the
+// default-redirect-following client lands on.
+func (p *PRLander) jobLogs(ctx context.Context, token, owner, repo string, jobID int64) (string, error) {
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/actions/jobs/%d/logs", p.apiBase, owner, repo, jobID)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := p.httpClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", &HTTPError{
+			Method: http.MethodGet, Endpoint: endpoint,
+			StatusCode: resp.StatusCode, Status: resp.Status,
+			Body: strings.TrimSpace(string(data)),
+		}
+	}
+	return string(data), nil
+}
+
+// ciFailingTest pairs one failing Go test with the package a failed job's
+// log reported it under.
+type ciFailingTest struct {
+	Test    string `json:"test"`
+	Package string `json:"package"`
+}
+
+var (
+	ciFailTestLine = regexp.MustCompile(`^(?:\S+ )?--- FAIL: (\S+)`)
+	ciFailPkgLine  = regexp.MustCompile(`^(?:\S+ )?FAIL\t(\S+)`)
+)
+
+// parseCIFailingTests reads one job's raw log for the go-test failure shape
+// above, pairing each failing test name with the package summary line that
+// follows it in log order — mirroring internal/loop's parseFailingTests
+// without importing loop (the same layering reason control duplicates
+// flakeBody rather than importing loop). GitHub prepends an RFC3339
+// timestamp to every log line; tolerated here as an optional leading token
+// rather than assumed to match one exact layout. A test name never closed
+// out by a following package line is dropped rather than guessed at —
+// unknown never reads as zero.
+func parseCIFailingTests(log string) []ciFailingTest {
+	var out []ciFailingTest
+	var pending []string
+	for _, line := range strings.Split(log, "\n") {
+		if m := ciFailTestLine.FindStringSubmatch(line); m != nil {
+			pending = append(pending, m[1])
+			continue
+		}
+		if m := ciFailPkgLine.FindStringSubmatch(line); m != nil {
+			for _, name := range pending {
+				out = append(out, ciFailingTest{Test: name, Package: m[1]})
+			}
+			pending = nil
+		}
+	}
+	return out
+}
+
+// failedRunTests fetches runID's jobs and, for each that did not succeed,
+// its raw log, parsing out the tests that failed. Any error along the way —
+// jobs unreachable, a job's log unreachable, an unparseable log — answers
+// no tests rather than blocking or failing the caller: this evidence is
+// secondary to the landing, the same posture [PRLander.priorFailedRun]
+// documents. Must be called while runID's red attempt is still its latest —
+// see [PRLander.rerunFailedJobs]'s CRITICAL note.
+func (p *PRLander) failedRunTests(ctx context.Context, token, owner, repo string, runID int64) []ciFailingTest {
+	jobs, err := p.jobsForRun(ctx, token, owner, repo, runID)
+	if err != nil {
+		return nil
+	}
+	var out []ciFailingTest
+	for _, j := range jobs {
+		if j.Conclusion == "success" {
+			continue
+		}
+		log, err := p.jobLogs(ctx, token, owner, repo, j.ID)
+		if err != nil {
+			continue
+		}
+		out = append(out, parseCIFailingTests(log)...)
+	}
+	return out
+}
+
 // ciAttemptBody is the shape [PRLander.awaitIndependentCI] writes as a
 // "ci-attempt" record's body, and reads back to recognize a red this
 // ChangeSet's head sha already carried — see [PRLander.priorFailedRun].
+// Tests is additive: record bodies here are subset-unmarshaled by readers,
+// so an older record with no such key still decodes, just with Tests absent
+// rather than an empty slice read as "no tests failed."
 type ciAttemptBody struct {
-	RunID      int64  `json:"run_id"`
-	Conclusion string `json:"conclusion"`
-	Rerun      bool   `json:"rerun"`
+	RunID      int64           `json:"run_id"`
+	Conclusion string          `json:"conclusion"`
+	Rerun      bool            `json:"rerun"`
+	Tests      []ciFailingTest `json:"tests,omitempty"`
 }
 
 // priorFailedRun asks the evidence chain — not GitHub, which only ever
@@ -639,10 +770,10 @@ type ciAttemptBody struct {
 // flaky-quarantine flow consumes; recording it is [PRLander.awaitIndependentCI]'s
 // whole obligation to that flow. Any read failure answers "no prior red
 // found" rather than block the landing this evidence is secondary to.
-func (p *PRLander) priorFailedRun(ctx context.Context, cs forge.ChangeSet, sha string) (int64, bool) {
+func (p *PRLander) priorFailedRun(ctx context.Context, cs forge.ChangeSet, sha string) (runID int64, conclusion string, tests []ciFailingTest, ok bool) {
 	for r, err := range p.inner.log.BySubject(ctx, cs.Tenant, sha) {
 		if err != nil {
-			return 0, false
+			return 0, "", nil, false
 		}
 		if r.Kind != "ci-attempt" {
 			continue
@@ -652,57 +783,89 @@ func (p *PRLander) priorFailedRun(ctx context.Context, cs forge.ChangeSet, sha s
 			continue
 		}
 		if b.Conclusion == "failure" {
-			return b.RunID, true
+			return b.RunID, b.Conclusion, b.Tests, true
 		}
 	}
-	return 0, false
+	return 0, "", nil, false
+}
+
+// ciFlakeBody is the body [PRLander.awaitIndependentCI] writes to a
+// "ci-flake" record — issue #275's full classification: which sha, which
+// two runs, what each concluded, and the tests parsed from the red run's
+// failed jobs' logs when that parse succeeded.
+type ciFlakeBody struct {
+	Sha             string          `json:"sha"`
+	RedRunID        int64           `json:"red_run_id"`
+	GreenRunID      int64           `json:"green_run_id"`
+	RedConclusion   string          `json:"red_conclusion"`
+	GreenConclusion string          `json:"green_conclusion"`
+	Tests           []ciFailingTest `json:"tests,omitempty"`
 }
 
 // awaitIndependentCI resolves mem.Head's independently-triggered GitHub CI
 // and refuses to let [PRLander.Land] proceed to the fenced push until it has
 // concluded green. It reads GitHub exactly once per call — the long wait
 // across ticks belongs to the loop that calls Land again, not a blocking
-// poll held here while a lease's claim is live.
-func (p *PRLander) awaitIndependentCI(ctx context.Context, cs forge.ChangeSet, mem forge.Member, tok, owner, name string) error {
+// poll held here while a lease's claim is live. The returned []forge.FlakedTest
+// is non-empty only when this call's green followed a recorded red for the
+// same sha (the flake fingerprint) and that red's failed jobs' logs parsed
+// at least one test name — nil in every other case, including a first-time
+// green and a flake whose logs never parsed.
+func (p *PRLander) awaitIndependentCI(ctx context.Context, cs forge.ChangeSet, mem forge.Member, tok, owner, name string) ([]forge.FlakedTest, error) {
 	sha := string(mem.Head)
 	runs, err := p.workflowRuns(ctx, tok, owner, name, sha)
 	if err != nil {
-		return fmt.Errorf("git: pr: independent ci for %s: %w", mem.Repo, err)
+		return nil, fmt.Errorf("git: pr: independent ci for %s: %w", mem.Repo, err)
 	}
 	if len(runs) == 0 {
 		// No workflow run has been recorded for this sha at all — GitHub has
 		// not answered, which is not the same fact as GitHub having answered
 		// green. Unknown never reads as zero.
-		return &CIPending{Sha: sha}
+		return nil, &CIPending{Sha: sha}
 	}
 	for _, r := range runs {
 		if r.Status != "completed" {
-			return &CIPending{Sha: sha, URL: r.HTMLURL}
+			return nil, &CIPending{Sha: sha, URL: r.HTMLURL}
 		}
 	}
 	for _, r := range runs {
 		if r.Conclusion == "success" {
 			continue
 		}
+		// The red attempt observed here is still runs[i]'s latest — fetch
+		// its jobs' logs now, before any rerun resets that latest attempt to
+		// green (see [PRLander.rerunFailedJobs]'s CRITICAL note).
+		tests := p.failedRunTests(ctx, tok, owner, name, r.ID)
 		if cs.CIRerunsLeft > 0 {
 			if err := p.rerunFailedJobs(ctx, tok, owner, name, r.ID); err != nil {
-				return fmt.Errorf("git: pr: rerun ci for %s: %w", mem.Repo, err)
+				return nil, fmt.Errorf("git: pr: rerun ci for %s: %w", mem.Repo, err)
 			}
-			p.inner.record(ctx, cs, "ci-attempt", sha,
-				fmt.Sprintf(`{"run_id":%d,"conclusion":%q,"rerun":true}`, r.ID, r.Conclusion))
-			return &CIPending{Sha: sha, URL: r.HTMLURL, RerunSpent: true}
+			body, _ := json.Marshal(ciAttemptBody{RunID: r.ID, Conclusion: r.Conclusion, Rerun: true, Tests: tests})
+			p.inner.record(ctx, cs, "ci-attempt", sha, string(body))
+			return nil, &CIPending{Sha: sha, URL: r.HTMLURL, RerunSpent: true}
 		}
-		p.inner.record(ctx, cs, "ci-attempt", sha,
-			fmt.Sprintf(`{"run_id":%d,"conclusion":%q,"rerun":false}`, r.ID, r.Conclusion))
-		return &CIFailed{Sha: sha, RunID: r.ID, URL: r.HTMLURL}
+		body, _ := json.Marshal(ciAttemptBody{RunID: r.ID, Conclusion: r.Conclusion, Rerun: false, Tests: tests})
+		p.inner.record(ctx, cs, "ci-attempt", sha, string(body))
+		return nil, &CIFailed{Sha: sha, RunID: r.ID, URL: r.HTMLURL}
 	}
 
 	// Every run for this sha concluded success: this is the landing's
 	// authorization, recorded before inner.Land so the chain shows
 	// certification preceding the push.
-	if redID, ok := p.priorFailedRun(ctx, cs, sha); ok {
-		p.inner.record(ctx, cs, "ci-flake", sha,
-			fmt.Sprintf(`{"sha":%q,"red_run_id":%d,"green_run_id":%d}`, sha, redID, runs[0].ID))
+	var flaked []forge.FlakedTest
+	if redID, redConclusion, tests, ok := p.priorFailedRun(ctx, cs, sha); ok {
+		body, _ := json.Marshal(ciFlakeBody{
+			Sha: sha, RedRunID: redID, GreenRunID: runs[0].ID,
+			RedConclusion: redConclusion, GreenConclusion: "success",
+			Tests: tests,
+		})
+		p.inner.record(ctx, cs, "ci-flake", sha, string(body))
+		for _, t := range tests {
+			flaked = append(flaked, forge.FlakedTest{
+				Test: t.Test, Package: t.Package, Sha: sha,
+				RedRunID: redID, GreenRunID: runs[0].ID, URL: runs[0].HTMLURL,
+			})
+		}
 	}
 	ids := make([]string, len(runs))
 	for i, r := range runs {
@@ -710,7 +873,7 @@ func (p *PRLander) awaitIndependentCI(ctx context.Context, cs forge.ChangeSet, m
 	}
 	p.inner.record(ctx, cs, "ci-verdict", sha,
 		fmt.Sprintf(`{"run_ids":[%s],"sha":%q,"conclusion":"success","url":%q}`, strings.Join(ids, ","), sha, runs[0].HTMLURL))
-	return nil
+	return flaked, nil
 }
 
 // Review is one reviewer's decision on the pull request an [EnsureRequest]

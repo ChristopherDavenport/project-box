@@ -73,4 +73,25 @@ type Placement struct {
 	// zero: if GitHub reports closed with no closed_by, this stays empty
 	// and the emptiness is itself the finding.
 	IssueClosedBy string
+	// Flakes lists the tests issue #275's classification names for this
+	// placement's commit: an independent CI that went red then green on the
+	// same sha, with the failing tests parsed from the red run's own failed
+	// jobs' logs. Populated only by a Lander that talks to a code host
+	// (git.PRLander) and only when it actually observed that red-then-green
+	// pattern for this Repo — a plain git.Lander landing and a green-first-
+	// time PR landing both leave this nil, so a caller never mistakes
+	// silence for "no flake occurred" when the truth is "nobody checked."
+	Flakes []FlakedTest
+}
+
+// FlakedTest is one test issue #275's ci-flake classification named: it
+// failed on an independent CI run that a later run, for the same sha,
+// reported green — the fingerprint the flaky-quarantine flow consumes.
+type FlakedTest struct {
+	Test       string
+	Package    string
+	Sha        string
+	RedRunID   int64
+	GreenRunID int64
+	URL        string
 }

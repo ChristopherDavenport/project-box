@@ -105,6 +105,45 @@ type fakeGitHub struct {
 	ciCalls   map[string]int
 	// reruns logs every run id POSTed to .../rerun-failed-jobs, in order.
 	reruns []int64
+	// jobsByRun configures GET .../actions/runs/{id}/jobs's answer, keyed by
+	// run id. A run with no entry answers zero jobs — the common case, since
+	// most tests never send CI red at all.
+	jobsByRun map[int64][]ghJob
+	// logsByJob configures the plain-text body GET .../actions/jobs/{id}/logs
+	// answers, via a 302 redirect to a bare blob path — the shape the real
+	// API uses — keyed by job id.
+	logsByJob map[int64]string
+	// jobLogsFail500 makes every job log fetch answer 500 instead of a
+	// redirect, for the "a log-fetch failure must not block the landing"
+	// test.
+	jobLogsFail500 bool
+}
+
+// ghJob is one Actions job as the jobs-for-a-run endpoint reports it —
+// enough for PRLander.failedRunTests to decode: id and conclusion.
+type ghJob struct {
+	ID         int64  `json:"id"`
+	Conclusion string `json:"conclusion"`
+}
+
+// setJobs configures runID's jobs answer for GET .../actions/runs/{id}/jobs.
+func (g *fakeGitHub) setJobs(runID int64, jobs []ghJob) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.jobsByRun == nil {
+		g.jobsByRun = map[int64][]ghJob{}
+	}
+	g.jobsByRun[runID] = jobs
+}
+
+// setJobLog configures jobID's raw log body for GET .../actions/jobs/{id}/logs.
+func (g *fakeGitHub) setJobLog(jobID int64, log string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.logsByJob == nil {
+		g.logsByJob = map[int64]string{}
+	}
+	g.logsByJob[jobID] = log
 }
 
 // ghWorkflowRun is one GitHub Actions workflow run as the actions/runs
@@ -239,6 +278,18 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The job-logs endpoint answers a 302 to a plain-text blob, not JSON
+	// under /repos/... — this stands in for wherever GitHub's own redirect
+	// actually points.
+	if strings.HasPrefix(r.URL.Path, "/blobs/") && r.Method == http.MethodGet {
+		id, _ := strconv.ParseInt(strings.TrimPrefix(r.URL.Path, "/blobs/"), 10, 64)
+		g.mu.Lock()
+		log := g.logsByJob[id]
+		g.mu.Unlock()
+		w.Write([]byte(log))
+		return
+	}
+
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) < 4 || parts[0] != "repos" {
 		http.NotFound(w, r)
@@ -333,6 +384,19 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 		g.reruns = append(g.reruns, id)
 		w.WriteHeader(http.StatusCreated)
 		json.NewEncoder(w).Encode(map[string]string{})
+	case len(parts) == 7 && parts[3] == "actions" && parts[4] == "runs" && parts[6] == "jobs" && r.Method == http.MethodGet:
+		id, _ := strconv.ParseInt(parts[5], 10, 64)
+		var out struct {
+			Jobs []ghJob `json:"jobs"`
+		}
+		out.Jobs = g.jobsByRun[id]
+		json.NewEncoder(w).Encode(out)
+	case len(parts) == 7 && parts[3] == "actions" && parts[4] == "jobs" && parts[6] == "logs" && r.Method == http.MethodGet:
+		if g.jobLogsFail500 {
+			http.Error(w, "boom", http.StatusInternalServerError)
+			return
+		}
+		http.Redirect(w, r, "/blobs/"+parts[5], http.StatusFound)
 	case len(parts) == 6 && parts[3] == "pulls" && parts[5] == "reviews" && r.Method == http.MethodGet:
 		number, _ := strconv.Atoi(parts[4])
 		out := g.reviewsByNumber[number]
@@ -2063,6 +2127,9 @@ func TestPRLandRerunsFailedRunWhenBudgetAllows(t *testing.T) {
 	x.gh.setCIRuns(string(head), []ghWorkflowRun{
 		{ID: 7, Status: "completed", Conclusion: "failure", HTMLURL: "https://github.com/acme/app/actions/runs/7"},
 	})
+	x.gh.setJobs(7, []ghJob{{ID: 70, Conclusion: "failure"}})
+	x.gh.setJobLog(70, "2024-01-01T00:00:00.0000000Z --- FAIL: TestWidget (0.00s)\n"+
+		"2024-01-01T00:00:00.0000001Z FAIL\tgithub.com/acme/app/widget\t0.01s\n")
 
 	_, err := x.pr.Land(context.Background(), cs)
 	var pending *CIPending
@@ -2085,6 +2152,9 @@ func TestPRLandRerunsFailedRunWhenBudgetAllows(t *testing.T) {
 			body := string(r.Body)
 			if !strings.Contains(body, `"run_id":7`) || !strings.Contains(body, `"failure"`) || !strings.Contains(body, `"rerun":true`) {
 				t.Fatalf("ci-attempt body = %s, want run id 7, conclusion failure, rerun true", body)
+			}
+			if !strings.Contains(body, `"tests":[{"test":"TestWidget","package":"github.com/acme/app/widget"}]`) {
+				t.Fatalf("ci-attempt body = %s, want the red run's failing test parsed out, timestamp prefix tolerated", body)
 			}
 			found = true
 		}
@@ -2180,6 +2250,12 @@ func TestPRLandRecordsCIVerdictBeforeInnerLand(t *testing.T) {
 	if ciVerdictSeq >= landSeq {
 		t.Fatalf("ci-verdict (seq %d) did not precede land (seq %d): certification must come before the push it authorizes", ciVerdictSeq, landSeq)
 	}
+
+	for _, pl := range landing.Landed {
+		if len(pl.Flakes) != 0 {
+			t.Fatalf("Landed[%s].Flakes = %+v, want none: green on the first try is not a flake", pl.Repo, pl.Flakes)
+		}
+	}
 }
 
 // TestPRLandRecordsFlakeAfterRerunSucceeds is issue #273's rule 6: the
@@ -2193,6 +2269,9 @@ func TestPRLandRecordsFlakeAfterRerunSucceeds(t *testing.T) {
 		[]ghWorkflowRun{{ID: 7, Status: "completed", Conclusion: "failure", HTMLURL: "https://github.com/acme/app/actions/runs/7"}},
 		[]ghWorkflowRun{{ID: 7, Status: "completed", Conclusion: "success", HTMLURL: "https://github.com/acme/app/actions/runs/7"}},
 	)
+	x.gh.setJobs(7, []ghJob{{ID: 70, Conclusion: "failure"}})
+	x.gh.setJobLog(70, "2024-01-01T00:00:00.0000000Z --- FAIL: TestWidget (0.00s)\n"+
+		"2024-01-01T00:00:00.0000001Z FAIL\tgithub.com/acme/app/widget\t0.01s\n")
 
 	if _, err := x.pr.Land(context.Background(), cs); err == nil {
 		t.Fatal("want a pending/rerun error from the first, red, attempt")
@@ -2216,11 +2295,81 @@ func TestPRLandRecordsFlakeAfterRerunSucceeds(t *testing.T) {
 			if !strings.Contains(body, `"red_run_id":7`) || !strings.Contains(body, `"green_run_id":7`) {
 				t.Fatalf("ci-flake body = %s, want it to name the red and green run ids", body)
 			}
+			if !strings.Contains(body, `"red_conclusion":"failure"`) || !strings.Contains(body, `"green_conclusion":"success"`) {
+				t.Fatalf("ci-flake body = %s, want both conclusions named", body)
+			}
+			if !strings.Contains(body, `"tests":[{"test":"TestWidget","package":"github.com/acme/app/widget"}]`) {
+				t.Fatalf("ci-flake body = %s, want the parsed failing test", body)
+			}
 			found = true
 		}
 	}
 	if !found {
 		t.Fatal("no ci-flake evidence recorded after green arrived following a rerun")
+	}
+
+	flakeFound := false
+	for _, pl := range landing.Landed {
+		for _, fl := range pl.Flakes {
+			if fl.Test == "TestWidget" && fl.Package == "github.com/acme/app/widget" &&
+				fl.Sha == string(head) && fl.RedRunID == 7 && fl.GreenRunID == 7 {
+				flakeFound = true
+			}
+		}
+	}
+	if !flakeFound {
+		t.Fatalf("no matching FlakedTest on the returned Landing: %+v", landing.Landed)
+	}
+}
+
+// TestPRLandFlakeRecordsWithoutTestsWhenLogFetchFails is issue #275's
+// failure posture: any error fetching a failed job's log must never block
+// or fail the landing — the flake still gets recorded, with tests absent
+// rather than fabricated, and the returned Landing carries no FlakedTest for
+// a red whose failing tests were never known.
+func TestPRLandFlakeRecordsWithoutTestsWhenLogFetchFails(t *testing.T) {
+	x := fixPR(t)
+	cs, head := buildForLand(t, x, 1)
+	x.gh.setCIRuns(string(head),
+		[]ghWorkflowRun{{ID: 7, Status: "completed", Conclusion: "failure", HTMLURL: "https://github.com/acme/app/actions/runs/7"}},
+		[]ghWorkflowRun{{ID: 7, Status: "completed", Conclusion: "success", HTMLURL: "https://github.com/acme/app/actions/runs/7"}},
+	)
+	x.gh.setJobs(7, []ghJob{{ID: 70, Conclusion: "failure"}})
+	x.gh.jobLogsFail500 = true
+
+	if _, err := x.pr.Land(context.Background(), cs); err == nil {
+		t.Fatal("want a pending/rerun error from the first, red, attempt")
+	}
+
+	landing, err := x.pr.Land(context.Background(), cs)
+	if err != nil {
+		t.Fatalf("retried land despite the log-fetch failure: %v", err)
+	}
+	if !landing.Complete() {
+		t.Fatalf("retried landing incomplete: %+v", landing)
+	}
+
+	found := false
+	for r, err := range x.f.store.Log().Since(context.Background(), tn, "changeset/cs-1", 1) {
+		if err != nil {
+			t.Fatalf("since: %v", err)
+		}
+		if r.Kind == "ci-flake" && r.Subject == string(head) {
+			body := string(r.Body)
+			if strings.Contains(body, `"tests"`) {
+				t.Fatalf("ci-flake body = %s, want no tests key: the log fetch failed, so no test name is known", body)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no ci-flake evidence recorded despite the log-fetch failure")
+	}
+
+	for _, pl := range landing.Landed {
+		if len(pl.Flakes) != 0 {
+			t.Fatalf("Landed[%s].Flakes = %+v, want none: no test name was ever known", pl.Repo, pl.Flakes)
+		}
 	}
 }
 
