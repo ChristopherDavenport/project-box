@@ -272,18 +272,47 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 	// under the default budget attempt 2 IS the last and goes cold below
 	// exactly as before this existed — continuation only fires once the
 	// budget is 3 or more (a per-plan attempts knob, or the box's own).
-	if hasItem && item.Prior != nil && item.Prior.Attempt > 1 && item.Prior.Attempt < item.Prior.Of {
+	//
+	// item.SuspendResume is the other route in: a FRESH claim whose only
+	// prior attempt aborted because the machine suspended mid-turn (the
+	// loop's Aborted classification, internal/loop/loop.go) rather than the
+	// transport dropping the call on its own. Nothing here decides between
+	// the two — either is enough to try a resume — but they carry different
+	// continuation text, since a suspend-marked item may have no [agent.Prior]
+	// at all (a fresh claim carries no in-claim budget to continue within).
+	suspendResume := hasItem && item.SuspendResume
+	retryContinue := hasItem && item.Prior != nil && item.Prior.Attempt > 1 && item.Prior.Attempt < item.Prior.Of
+	if retryContinue || suspendResume {
 		if id, ok, err := b.priorBuilderSession(ctx, ws.Run); err != nil {
 			return "", fmt.Errorf("acp: finding the prior attempt's session: %w", err)
 		} else if ok {
-			head, err := b.runAttempt(ctx, rc, continuationPrompt(*item.Prior), id, id)
+			continuation := sent
+			if retryContinue {
+				continuation = continuationPrompt(*item.Prior)
+			} else {
+				continuation = suspendResumePrompt()
+			}
+			head, err := b.runAttempt(ctx, rc, continuation, id, id)
 			switch {
 			case err == nil:
+				if suspendResume {
+					// Notable enough to name on the chain even when it
+					// worked: unlike an ordinary in-claim retry's
+					// continuation, which is the expected case and carries
+					// no note of its own, a session surviving the machine
+					// underneath it going to sleep is worth recording as its
+					// own fact.
+					b.recordJSON(ctx, ws.Run, "agent-resume", bundle.Ref, agentResumeRecord{Session: id, Reason: "suspend"})
+				}
 				return head, nil
 			case errors.Is(err, ErrResume):
 				// A failed continuation costs this note, never the attempt:
 				// the cold run below is recorded as its own ordinary one.
-				b.recordJSON(ctx, ws.Run, "agent-resume", bundle.Ref, agentResumeRecord{Session: id, Refused: err.Error()})
+				rec := agentResumeRecord{Session: id, Refused: err.Error()}
+				if suspendResume {
+					rec.Reason = "suspend"
+				}
+				b.recordJSON(ctx, ws.Run, "agent-resume", bundle.Ref, rec)
 			default:
 				return head, err
 			}
@@ -567,6 +596,14 @@ func continuationPrompt(prior agent.Prior) string {
 		fmt.Fprintf(&w, "## What the checks said\n%s\n\n", prior.Reason)
 	}
 	return w.String()
+}
+
+// suspendResumePrompt is what a session resumed after a machine suspend is
+// sent instead of the whole composed prompt: the session already holds it,
+// and nothing here needs relitigating the way a gate's refusal does — the
+// transport dropped mid-turn for a reason that was never the agent's.
+func suspendResumePrompt() string {
+	return "The machine this session was running on suspended mid-turn, and the connection dropped before you could finish. Nothing was refused and nothing decided against you — carry on from where you left off and commit when done.\n"
 }
 
 // commit is the adapter's half of the working contract — the agent commits,
@@ -867,13 +904,29 @@ type runRecord struct {
 	Continues string `json:"continues,omitempty"`
 }
 
-// agentResumeRecord narrates a continuation that did not happen: the session
-// a retry tried to continue, and why the attempt refused rather than ran. A
-// failed continuation costs this note, never the build — the cold attempt
-// that follows is recorded as its own ordinary run.
+// agentResumeRecord narrates a continuation attempt: the session it tried to
+// continue, why it went looking for one, and — on a failed continuation —
+// why the attempt refused rather than ran. A failed continuation costs this
+// note, never the build: the cold attempt that follows is recorded as its
+// own ordinary run.
+//
+// Refused is empty on a successful continuation, which for an ordinary
+// in-claim retry (see item.Prior in [Builder.Build]) writes no record at
+// all — continuing and succeeding is the mundane case there, told apart
+// from a cold run by runRecord.Continues alone. Reason exists because
+// that is not true of every continuation: one following a suspend (see
+// item.SuspendResume) is notable whether or not it succeeds, so that path
+// writes this record either way, naming "suspend" so a chain reader can
+// tell it apart from the ordinary kind.
 type agentResumeRecord struct {
 	Session string `json:"session"`
-	Refused string `json:"refused"`
+	// Reason is empty for an ordinary in-claim retry's continuation — the
+	// session record and runRecord.Continues already say what happened, and
+	// item.Prior's own carried reason says why. Set to "suspend" for a
+	// continuation item.SuspendResume asked for, the one case this record
+	// is written even when the continuation succeeded.
+	Reason  string `json:"reason,omitempty"`
+	Refused string `json:"refused,omitempty"`
 }
 
 // layerRecord is one composed layer, named the way Explain names it.

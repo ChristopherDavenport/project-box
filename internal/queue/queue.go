@@ -373,6 +373,22 @@ type WorkItem struct {
 	// returns without aborting, so one old abort cannot push a much-later one
 	// over the bound.
 	AbortedTries int `json:"aborted_tries,omitempty"`
+	// SuspendResume marks a claim whose most recent build attempt aborted
+	// because the machine it ran on suspended mid-turn — see
+	// [loop.SuspendWatch] — rather than the transport merely dropping the
+	// call on its own. Set by the loop's Aborted classification instead of
+	// counting the attempt against AbortedTries, and read by acp.Builder to
+	// resume the ACP session the aborted attempt opened rather than paying
+	// for a cold one over a turn that never got to answer. The queue is
+	// event-sourced and record() marshals the whole item, so this persists
+	// through Wait for free the same way AbortedTries does. A deliberately
+	// plain bool rather than a manufactured [agent.Prior]: Prior's fields
+	// carry doc-mandated meanings (internal/agent/carry.go) about an
+	// operator's own words and a gate's judgement, neither of which a
+	// suspend is. Cleared the moment the next attempt starts, whatever that
+	// attempt's own outcome turns out to be — a build spends this marker
+	// exactly once.
+	SuspendResume bool `json:"suspend_resume,omitempty"`
 	// DeferredTries counts how many times in a row this claim's build or
 	// gate review has deferred for the account window — the run's own
 	// provider report that the window is exhausted, mid-flight rather than

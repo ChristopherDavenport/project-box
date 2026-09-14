@@ -816,6 +816,18 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 			// #95, confirmed by review: a within-claim rebuild after a
 			// carried rebase must not keep riding the stale comparison).
 			rebaseCarriesDiff, rebasePatchID = false, ""
+			// A build attempt spends this marker exactly once: cleared here,
+			// before the attempt runs, so whatever this attempt's own
+			// outcome turns out to be — a clean build, another abort, an
+			// escalation — the item persisted from it never carries a stale
+			// "resume the session" instruction into some later, unrelated
+			// attempt. The Aborted branch below sets it again, but only when
+			// THIS attempt's own abort is the suspend's doing.
+			item.SuspendResume = false
+			var suspendBaseline time.Duration
+			if l.Suspend != nil {
+				suspendBaseline = l.Suspend.Total()
+			}
 			if serr := telemetry.Stage(ctx, "build", item, func(ctx context.Context) error {
 				bctx, cancelBuild := l.buildDeadline(ctx)
 				defer cancelBuild()
@@ -954,6 +966,27 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 					// Meter.Start already fired above, so the item's start is
 					// counted whether this attempt lands or not — only the
 					// build itself is retried.
+					//
+					// A machine suspend mid-turn LOOKS exactly like the
+					// transport dropping the call — the agent process's own
+					// connection stalls the same way either way — but it is
+					// not the same event: nobody's account should be charged
+					// AbortedTries for time the machine spent asleep, and the
+					// retry that follows should pick the same session back up
+					// rather than paying for a cold one over a turn that
+					// never got to answer. l.Suspend.Total() is cumulative,
+					// so a gap since suspendBaseline (snapshotted before this
+					// attempt's build ran) is a suspend this attempt's own
+					// window saw, not an older one already accounted for.
+					if l.Suspend != nil {
+						if gap := l.Suspend.Total() - suspendBaseline; gap > 0 {
+							item.SuspendResume = true
+							note := fmt.Sprintf("build aborted by a machine suspend of %s mid-turn: resuming the same session next attempt: %s",
+								gap, ab.Reason)
+							item, _ = q.Wait(ctx, item, claim, note)
+							return l.settle(ctx, item), nil
+						}
+					}
 					if item.AbortedTries < MaxAbortedRetries {
 						item.AbortedTries++
 						note := fmt.Sprintf("build aborted (retry %d of %d): %s",
