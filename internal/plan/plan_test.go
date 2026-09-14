@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -315,6 +316,55 @@ func TestAnOrdinaryIssueIsNotRenamedByTheStage(t *testing.T) {
 	}
 	if got := wave.ItemID("local-acme-r1"); got != "wi-ing-1-local-acme-r1" {
 		t.Fatalf("a wave of one collapsed to %s", got)
+	}
+}
+
+// TestANodeWithNoSectionsInheritsTheIngresss is issue #275, intake half: a
+// route's declared sections are the default for a plan node that names none,
+// applied at the one choke point where a decomposer's nodes become the plan —
+// so it reaches the identity decomposer too, and the item Items produces.
+func TestANodeWithNoSectionsInheritsTheIngresss(t *testing.T) {
+	ing := issue("ing-1")
+	ing.Sections = []string{"flaky"}
+	p, err := Make(context.Background(), Default(), ing, seed(t, kind.SeedIssue))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Nodes[0].Sections; !slices.Equal(got, []string{"flaky"}) {
+		t.Fatalf("node sections: %v, want [flaky]", got)
+	}
+	items := Items(ing, p)
+	if len(items) != 1 || !slices.Equal(items[0].Sections, []string{"flaky"}) {
+		t.Fatalf("item sections: %v, want [flaky]", items[0].Sections)
+	}
+}
+
+// namedSections is a decomposer whose one node names its own sections, used
+// to pin that a node's own declaration beats the ingress's — the route's
+// sections are a default, never an override.
+type namedSections struct{}
+
+func (namedSections) Name() string     { return "test-named-sections" }
+func (namedSections) Replayable() bool { return true }
+func (namedSections) Decompose(_ context.Context, ing ingress.Ingress, _ kind.Declaration) (Result, error) {
+	return Result{Nodes: []Node{{ID: "work", Task: TaskOf(ing), Sections: []string{"own"}}}}, nil
+}
+
+// TestANodeNamingItsOwnSectionsKeepsThemOverTheIngresss.
+func TestANodeNamingItsOwnSectionsKeepsThemOverTheIngresss(t *testing.T) {
+	reg, err := NewRegistry(namedSections{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ing := issue("ing-1")
+	ing.Sections = []string{"flaky"}
+	decl := kind.Declaration{Name: "t", Decompose: kind.Decomposition{Decomposer: "test-named-sections"}}
+	p, err := Make(context.Background(), reg, ing, decl)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Nodes[0].Sections; !slices.Equal(got, []string{"own"}) {
+		t.Fatalf("node sections: %v, want [own] — the ingress's default overrode the node's own", got)
 	}
 }
 

@@ -135,6 +135,17 @@ func Make(ctx context.Context, reg *Registry, ing ingress.Ingress, decl kind.Dec
 	if d.Replayable() && res.AgentRef != "" {
 		return Plan{}, fmt.Errorf("plan: %s claims to be replayable and named an agentref — a deterministic decomposer with an author is one of the two lying", name)
 	}
+	// A node that names no sections inherits the ingress's — the route's
+	// declaration is a default, never an override, so a node that already
+	// named its own keeps them. Applied before validate so the section-token
+	// check covers an inherited value the same as a planner-named one, and
+	// before Seal so an inherited section changes the ref exactly as a
+	// planner-named one would.
+	for i := range res.Nodes {
+		if len(res.Nodes[i].Sections) == 0 {
+			res.Nodes[i].Sections = ing.Sections
+		}
+	}
 	p := Plan{
 		Ingress: ing.ID, Kind: string(ing.Kind),
 		Decomposer: name, Replayable: d.Replayable(), AgentRef: res.AgentRef,

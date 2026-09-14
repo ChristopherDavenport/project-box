@@ -127,6 +127,10 @@ type Ingress struct {
 	// postmortem; asserting either is a recorded act, not a field somebody
 	// set.
 	Facts map[string]string `json:"facts,omitempty"`
+	// Sections is copied from the route that opened this ingress; see
+	// [Route.Sections]. Empty on ingresses opened before sections were
+	// recorded, same as Route and Key above.
+	Sections []string `json:"sections,omitempty"`
 }
 
 // Fact answers one completion fact.
@@ -283,6 +287,13 @@ type Route struct {
 	// not enforce it. Empty means the wire enforces nothing beyond its own
 	// defaults.
 	Require []string `json:"require,omitempty"`
+	// Sections declares the sections work admitted by this route runs in.
+	// It is applied downstream as the default for any plan node that names
+	// none. A route is operator configuration, so this is a declaration,
+	// not software policy: it sets what a node inherits when it names
+	// nothing itself, never what a node that already named sections runs
+	// with.
+	Sections []string `json:"sections,omitempty"`
 }
 
 // Delivery is one firing of a route.

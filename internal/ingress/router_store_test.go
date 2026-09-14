@@ -2,6 +2,7 @@ package ingress
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/ChristopherDavenport/project-box/internal/kind"
@@ -58,6 +59,37 @@ func TestOpenCarriesTheDeliverySource(t *testing.T) {
 	}
 	if loaded.Source != source {
 		t.Fatalf("source did not survive the fold: %+v, want %+v", loaded.Source, source)
+	}
+}
+
+// TestOpenCarriesTheRouteSections is issue #275, intake half: a route that
+// declares which sections its work runs in hands that declaration onto every
+// ingress it opens, the same way Repo and Key are copied, and it survives the
+// fold like Source does.
+func TestOpenCarriesTheRouteSections(t *testing.T) {
+	s := openStore(t)
+	ctx := context.Background()
+	r := &StoreRouter{Store: s, Tenant: tn2, Runner: "runner"}
+	route := Route{Tenant: tn2, Name: "issues", Kind: RouteIssue, Opens: kind.SeedIssue,
+		Box: "shop", Repo: "app", Requester: "chris", Sections: []string{"flaky"}}
+
+	ing, opened, err := r.Open(ctx, route, Delivery{
+		Route: "issues", Key: "k-sections",
+	})
+	if err != nil || !opened {
+		t.Fatalf("open: %v %v", err, opened)
+	}
+	want := []string{"flaky"}
+	if !slices.Equal(ing.Sections, want) {
+		t.Fatalf("sections on the returned ingress = %v, want %v", ing.Sections, want)
+	}
+
+	loaded, found, err := Load(ctx, s.Log(), tn2, ing.ID)
+	if err != nil || !found {
+		t.Fatalf("load: found=%v err=%v", found, err)
+	}
+	if !slices.Equal(loaded.Sections, want) {
+		t.Fatalf("sections did not survive the fold: %v, want %v", loaded.Sections, want)
 	}
 }
 
