@@ -12,7 +12,7 @@ import {
 } from './api.js';
 import { ActivityController } from './sse.js';
 import {
-  age, title, taskURL, short, sameCommit, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, place, hold, why,
+  age, title, taskURL, short, sameCommit, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, source, ask, place, hold, why,
   describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail, cardTitle,
   sessionHeading, currentSession, cardStage, roleSplit, roleSplitLine, ROLE_APPEARANCE, factCite, originTotals,
 } from './format.js';
@@ -863,6 +863,7 @@ export class BoxExceptions extends LitElement {
           <span>${it.state === 'failed' ? 'failed' : 'parked'} <box-when .at=${it.parked}></box-when></span>
           ${it.overdue ? html`<span class="overdue">past the response-time objective</span>` : nothing}
           ${it.escalations ? html`<span>escalated out of band ${it.escalations}×</span>` : nothing}
+          ${ask(it) ? html`<span>ask ${ask(it)}</span>` : nothing}
           <span>item <box-hash label="item id" .value=${it.id} href=${'/items/' + it.id} chars="18"></box-hash></span>
         </div>
         ${it.note ? html`<p class="note">${it.note}</p>` : nothing}
@@ -1457,6 +1458,7 @@ export class BoxIngress extends LitElement {
         <dl class="facts" style="margin-top: var(--jh-space-400)">
           <dt>Ingress</dt><dd><box-hash label="ingress id" .value=${ing.id} chars="24"></box-hash></dd>
           <dt>Where</dt><dd>${place(ing) || html`<span class="muted">—</span>`}${ing.requester ? html` · requested by ${ing.requester}` : nothing}</dd>
+          <dt>Source</dt><dd>${source(ing) || html`<span class="muted">not recorded</span>`}</dd>
           ${ing.opened ? html`<dt>Opened</dt><dd><box-when .at=${ing.opened} abs></box-when> <span class="helper">(<box-when .at=${ing.opened}></box-when>)</span></dd>` : nothing}
           ${ing.reason ? html`<dt>Reason</dt><dd>${ing.reason}</dd>` : nothing}
         </dl>

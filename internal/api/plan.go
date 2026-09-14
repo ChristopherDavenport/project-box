@@ -68,6 +68,15 @@ type IngressView struct {
 	Task      string    `json:"task"`
 	Requester string    `json:"requester,omitempty"`
 	Opened    time.Time `json:"opened"`
+	// SourceSubject, SourceMethod and SourceChannel are who delivered this
+	// occurrence and how — see [ingress.Source] — and SourceRun names the
+	// run that reopened it, set only on the factory's own repairs. Empty on
+	// ingresses opened before sources were recorded: a reader must render
+	// that as "not recorded", never as a fabricated identity.
+	SourceSubject string `json:"source_subject,omitempty"`
+	SourceMethod  string `json:"source_method,omitempty"`
+	SourceChannel string `json:"source_channel,omitempty"`
+	SourceRun     string `json:"source_run,omitempty"`
 	// Standing is "", planned, failed, retried or resolved — the newest
 	// planning event on the origination's chain, empty meaning the judgement
 	// is still running. Nil Plans (a daemon carrying no decomposer) leaves it
@@ -90,6 +99,8 @@ func (s *Server) ingress(w http.ResponseWriter, r *http.Request) {
 	out := IngressView{
 		ID: ing.ID, Box: ing.Box, Repo: ing.Repo,
 		Task: plan.TaskOf(ing), Requester: ing.Requester, Opened: ing.Opened,
+		SourceSubject: ing.Source.Subject, SourceMethod: ing.Source.Method,
+		SourceChannel: ing.Source.Channel, SourceRun: ing.Source.Run,
 	}
 	if s.Plans != nil {
 		st, err := s.Plans.Standing(r.Context(), s.Tenant, id)

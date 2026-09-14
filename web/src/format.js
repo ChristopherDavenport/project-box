@@ -178,10 +178,29 @@ export function tools(t) {
 }
 
 /** origin is where a unit came from, in the operator's words: the route and
- *  the occurrence key. The ingress id is a record locator, not an origin, and
- *  is never shown here. */
+ *  the occurrence key, falling back to who delivered it and how when there
+ *  is no route to name. The ingress id is a record locator, not an origin,
+ *  and is never shown here. */
 export function origin(e) {
   if (e?.route) return e.key ? `${e.route} / ${e.key}` : e.route;
+  return source(e);
+}
+
+/** source is who delivered an origination's occurrence and how — subject,
+ *  method and channel, joined the way an operator reads a trail rather than
+ *  a record. Empty when the origination predates sources being recorded;
+ *  callers render that as absence, never as a fabricated identity. */
+export function source(e) {
+  return [e?.source_subject, e?.source_method, e?.source_channel].filter(Boolean).join(' · ');
+}
+
+/** ask is who to ask about a parked exception: the source that delivered its
+ *  origination, falling back to the ingress requester — labeled as the
+ *  requester, never passed off as a source — when there is no source to
+ *  name. Empty when neither is recorded. */
+export function ask(e) {
+  if (e?.source_subject) return e.source_subject;
+  if (e?.requester) return `${e.requester} (requester)`;
   return '';
 }
 

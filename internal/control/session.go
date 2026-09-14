@@ -474,7 +474,9 @@ func (r *Room) judgement(ctx context.Context, id string) (Session, bool, error) 
 		ID: id, Box: ing.Box, Repo: ing.Repo, Ingress: id,
 		Task: clip(firstLine(plan.TaskOf(ing)), 200), Summary: ing.Title,
 		Seat: ran.Seat, AgentRef: ran.AgentRef,
-		Opened: ing.Opened,
+		Opened:        ing.Opened,
+		SourceSubject: ing.Source.Subject, SourceMethod: ing.Source.Method,
+		SourceChannel: ing.Source.Channel, SourceRun: ing.Source.Run,
 	}
 	as := fold.rows(0)
 	tokens, cost := agentTotals(as)

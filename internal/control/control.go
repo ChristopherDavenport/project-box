@@ -102,6 +102,14 @@ type Exception struct {
 	Escalations int `json:"escalations"`
 	// Overdue reports the age having passed the room's objective.
 	Overdue bool `json:"overdue"`
+	// SourceSubject is who to ask about this exception: the source that
+	// delivered its origination — see [ingress.Source]. Set only on a
+	// judgement-failed origination (failedPlan), where the ingress is
+	// already in hand; empty when the origination predates sources being
+	// recorded. A reader falling back to Requester for "who to ask" must
+	// label it as the requester, not as a source — this field says nothing
+	// when there is nothing to say.
+	SourceSubject string `json:"source_subject,omitempty"`
 }
 
 // Exceptions lists items currently parked or failed: everything the factory
@@ -352,6 +360,15 @@ type QueueEntry struct {
 	Ingress string `json:"ingress,omitempty"`
 	Route   string `json:"route,omitempty"`
 	Key     string `json:"key,omitempty"`
+	// SourceSubject, SourceMethod and SourceChannel are who delivered the
+	// origination's occurrence and how — see [ingress.Source]. SourceRun
+	// names the run that reopened it, set only when the factory delivered
+	// its own repair. Empty for ingresses opened before sources were
+	// recorded, same as Route and Key above.
+	SourceSubject string `json:"source_subject,omitempty"`
+	SourceMethod  string `json:"source_method,omitempty"`
+	SourceChannel string `json:"source_channel,omitempty"`
+	SourceRun     string `json:"source_run,omitempty"`
 	// Kind is the declaration this work was opened under, and Plan the
 	// content address of the decomposition that called for it — the link the
 	// chain gained between the origination and its work.
@@ -707,6 +724,8 @@ func (r *Room) entry(ctx context.Context, id string, f *frontier) (QueueEntry, e
 		// key and nothing anywhere said why.
 		if ing, ok, err := ingress.Load(ctx, r.Store.Log(), r.Tenant, w.Ingress); err == nil && ok {
 			e.Route, e.Key = ing.Route, ing.Key
+			e.SourceSubject, e.SourceMethod = ing.Source.Subject, ing.Source.Method
+			e.SourceChannel, e.SourceRun = ing.Source.Channel, ing.Source.Run
 		}
 	}
 	return e, nil
@@ -854,8 +873,9 @@ func (r *Room) failedPlan(ctx context.Context, id string, now time.Time, objecti
 			State: queue.StateParked, Note: "planning failed: " + st.Reason, Severity: queue.SeverityMedium,
 		},
 		Parked: st.At, AgeSec: int64(age.Seconds()),
-		Escalations: countAfter(told[id], st.At),
-		Overdue:     age >= objective,
+		Escalations:   countAfter(told[id], st.At),
+		Overdue:       age >= objective,
+		SourceSubject: ing.Source.Subject,
 	}, true, nil
 }
 
