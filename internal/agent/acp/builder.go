@@ -658,7 +658,7 @@ func prompt(bundle agent.Bundle, task, contextDir, wsDir string) string {
 	}
 	w.WriteString(`
 ## Working contract
-- You are in a git workspace. Make the change and COMMIT it (git add, git commit) with a clear message. Do not push: landing is the factory's job, not yours.
+- You are in a git workspace. Make the change and COMMIT it (git add, git commit) with a clear message in this repository's voice. End the message with attribution trailers, each on its own line: "Co-Authored-By: Project Box <noreply+pbox@christopherdavenport.tech>", and a "Co-Authored-By:" line naming the model you are and its no-reply address, when it has one. Do not push: landing is the factory's job, not yours.
 - If you cannot or should not proceed, escalate instead of guessing: call the _box/escalate method with {"reason": "...", "needs_sections": [...], "paths": [...]} if your harness allows it — needs_sections names the declared sections the change needs beyond this one and paths the exact files, when you can say either; otherwise reply with a single line starting with ESCALATE: and your reason (that fallback stays free text — the structured fields are the verb's alone).
 - If you are not finished but are running out of room, hand off rather than degrading: call the _box/handoff method with {"reason": "...", "notes": "..."} if your harness allows it; otherwise reply with a single line starting with HANDOFF-NOW: and your reason. Commit what you have first — a fresh session continues in this same workspace, so what you leave committed is what it starts from.
 - End your final message with lines starting with "HANDOFF: " carrying anything your successor needs to know.
