@@ -43,6 +43,7 @@ const NAV = [
   { href: '/exceptions', label: 'Exceptions' },
   { href: '/flakes', label: 'Flakes' },
   { href: '/sections', label: 'Sections' },
+  { href: '/landings', label: 'Landings' },
   { href: '/submit', label: 'Submit' },
 ];
 
@@ -246,6 +247,7 @@ export class BoxApp extends LitElement {
     { path: '/exceptions', render: () => html`<box-exceptions></box-exceptions>` },
     { path: '/flakes', render: () => html`<box-flakes></box-flakes>` },
     { path: '/sections', render: () => html`<box-sections></box-sections>` },
+    { path: '/landings', render: () => html`<box-landings></box-landings>` },
     { path: '/items/:id', render: ({ id }) => html`<box-item .itemId=${id}></box-item>` },
     { path: '/ingress/:id', render: ({ id }) => html`<box-ingress .ingressId=${id}></box-ingress>` },
     { path: '/origins/:key', render: ({ key }) => html`<box-origins .originKey=${key}></box-origins>` },

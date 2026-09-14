@@ -8,13 +8,13 @@ import { Task } from '@lit/task';
 import {
   getStatus, getItems, getExceptions, getFlakes, getSections, getItem, getItemEvidence, getIngress, getProvenance, getProvenanceChain, provenanceExportURL,
   getSessions, getSession, openIngress,getRunFrames, reload, retryItem, resolveItem,
-  getPlan, getIngressPlans, getPlanDiff, getOrigins, originsExportURL,
+  getPlan, getIngressPlans, getPlanDiff, getOrigins, originsExportURL, getLandings,
 } from './api.js';
 import { ActivityController } from './sse.js';
 import {
   age, title, taskURL, short, sameCommit, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, source, ask, place, hold, why,
   describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, PRIORITY_APPEARANCE, firstLine, clip, toolDetail, cardTitle,
-  sessionHeading, currentSession, cardStage, roleSplit, roleSplitLine, ROLE_APPEARANCE, factCite, originTotals,
+  sessionHeading, currentSession, cardStage, roleSplit, roleSplitLine, ROLE_APPEARANCE, factCite, originTotals, perLandingCost, landingRow,
 } from './format.js';
 import { settled, orderList, planeOrder } from './order.js';
 import { base, toast, focusInto } from './ui.js';
@@ -190,6 +190,14 @@ export class BoxDashboard extends LitElement {
         ${sp ? this._tile(fmtTokens(sp.tokens), 'tokens', { sub: sp.max_tokens ? `of ${fmtTokens(sp.max_tokens)} this window` : 'this window' }) : nothing}
         ${sp && (sp.cost_micros || sp.max_cost_micros)
           ? this._tile(fmtUSD(sp.cost_micros), 'spend', { sub: sp.max_cost_micros ? `of ${fmtUSD(sp.max_cost_micros)}` : 'this window' })
+          : nothing}
+        ${sp?.per_landing
+          ? this._tile(perLandingCost(sp.per_landing).text, 'cost / landing', {
+              href: '/landings',
+              sub: sp.per_landing.unknown
+                ? `${sp.per_landing.unknown} of ${sp.per_landing.count} unknown this window`
+                : `${sp.per_landing.count} landed this window`,
+            })
           : nothing}
       </div>
       <dl class="facts">
@@ -1069,6 +1077,107 @@ export class BoxSections extends LitElement {
   }
 }
 customElements.define('box-sections', BoxSections);
+
+/**
+ * Landings: GET /v1/landings, newest first — the per-item counterpart to
+ * the dashboard's cost-per-landing tile (issue #183). Cost, tokens, attempt
+ * and review count per row, and the fold both cutoffs (the meter's window,
+ * and since this daemon booted) already produced, never re-derived here.
+ * A row whose cost the fold could not price shows 'unknown' in place of the
+ * money and token cells — fmtUSD's null-coerces-to-zero is exactly the trap
+ * this page exists to avoid, so every cell goes through [landingRow] first.
+ */
+export class BoxLandings extends LitElement {
+  static styles = [base, css`
+    :host { display: grid; gap: var(--jh-space-400); }
+    .reading { margin: 0; font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; min-width: 560px; }
+    caption { text-align: left; padding-bottom: var(--jh-space-200); font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    th, td { text-align: left; vertical-align: top; padding: var(--jh-space-200) var(--jh-space-300) var(--jh-space-200) 0;
+             border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    thead th { white-space: nowrap; font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+    tbody th { font-weight: 500; }
+    .unknown { color: var(--jh-color-content-secondary-enabled); }
+  `];
+
+  _task = new Task(this, { task: async (_, { signal }) => getLandings(signal), args: () => [] });
+
+  constructor() {
+    super();
+    this._activity = new ActivityController(this, {
+      limit: 1,
+      onEvent: (a) => { if (/index\/landings/.test(a.scope)) this._refresh(); },
+    });
+  }
+
+  _refresh() {
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => this._task.run(), 400);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    clearTimeout(this._timer);
+  }
+
+  render() {
+    return this._task.render({
+      pending: () => html`<jh-card header-title="Landings" padding="medium">${loading('landings')}</jh-card>`,
+      error: (e) => html`<jh-card header-title="Landings" padding="medium">${failed(e)}</jh-card>`,
+      complete: (page) => this._body(page ?? {}),
+    });
+  }
+
+  _body(page) {
+    const landings = page.landings ?? [];
+    const sinceBoot = perLandingCost(page.since_boot);
+    const windowFold = page.window ? perLandingCost(page.window) : null;
+    const rows = landings.map(landingRow);
+    const unknown = rows.filter((r) => !r.known).length;
+    return html`
+      <jh-card header-title="Landings" header-subtitle="Every settled item, newest first, with what it cost to land" padding="medium">
+        <p class="reading">
+          Since boot: ${sinceBoot.text}${page.since_boot?.count ? ` across ${page.since_boot.count} landing${page.since_boot.count === 1 ? '' : 's'}` : ''}${
+            page.since_boot?.unknown ? ` (${page.since_boot.unknown} unknown)` : ''}.
+          ${windowFold ? html`This window: ${windowFold.text}${page.window.unknown ? ` (${page.window.unknown} of ${page.window.count} unknown)` : ''}.` : nothing}
+        </p>
+      </jh-card>
+      ${landings.length === 0
+        ? html`<jh-card padding="medium"><p class="empty">Nothing has landed yet.</p></jh-card>`
+        : html`
+          <jh-card padding="medium">
+            <div class="wrap">
+              <table>
+                <caption>${landings.length} landing${landings.length === 1 ? '' : 's'}${unknown ? ` · ${unknown} unknown cost` : ''}</caption>
+                <thead>
+                  <tr>
+                    <th scope="col">Landed</th><th scope="col">Work</th><th scope="col">Commit</th>
+                    <th scope="col">Cost</th><th scope="col">Tokens</th><th scope="col">Attempt</th><th scope="col">Reviews</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  ${rows.map((r) => {
+                    const t = cardTitle(r.line || r.id);
+                    return html`
+                      <tr>
+                        <td><box-when .at=${r.at}></box-when></td>
+                        <th scope="row"><a href=${'/items/' + r.id} title=${t.full}>${t.label}</a></th>
+                        <td>${r.head ? html`<box-hash label="commit" .value=${r.head} href=${'/provenance/' + r.head}></box-hash>` : nothing}</td>
+                        <td class=${r.known ? '' : 'unknown'}>${r.money}</td>
+                        <td class=${r.known ? '' : 'unknown'}>${r.tokens}</td>
+                        <td>${r.attempt}</td>
+                        <td>${r.reviews}</td>
+                      </tr>`;
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </jh-card>`}
+    `;
+  }
+}
+customElements.define('box-landings', BoxLandings);
 
 /** One item: what it is, where it stands, what can be done, and its whole chain. */
 export class BoxItem extends LitElement {

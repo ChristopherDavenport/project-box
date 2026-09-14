@@ -168,6 +168,45 @@ export function tally(s) {
   };
 }
 
+/**
+ * perLandingCost turns a [control.PerLanding] fold (issue #183) into the
+ * average an operator reads at a glance: known cost divided by however many
+ * of the window's landings actually priced. Count can be zero, and every
+ * landing counted can be the unknown kind — both read as words, never as
+ * the $0.00 either would otherwise imply next to a real average. Callers
+ * only invoke this once they already know a fold exists; a missing fold
+ * (no meter configured) is the caller's own absence to render, not this
+ * function's problem to guess at.
+ */
+export function perLandingCost(pl) {
+  const count = pl?.count ?? 0;
+  const unknown = pl?.unknown ?? 0;
+  if (count === 0) return { text: 'no landings', partial: false };
+  const known = count - unknown;
+  if (known <= 0) return { text: 'unknown', partial: false };
+  return { text: fmtUSD(Math.round(pl.cost_micros / known)), partial: unknown > 0 };
+}
+
+/** landingRow projects one [control.Landing] into a listing row. Cost is
+ *  known only when the landing's own cost record says so — absent
+ *  (pre-#183 landings, or a chain the fold couldn't read) and present-but-
+ *  unpriced both render as 'unknown', never as a dollar figure or a 0. */
+export function landingRow(l) {
+  const cost = l?.cost;
+  const known = cost?.known === true;
+  return {
+    id: l.id,
+    line: l.line,
+    head: l.head,
+    at: l.at,
+    attempt: l.attempt ?? 0,
+    known,
+    money: known ? fmtUSD(cost.cost_micros) : 'unknown',
+    tokens: cost ? fmtTokens(cost.tokens) : 'unknown',
+    reviews: cost?.reviews ?? 0,
+  };
+}
+
 /** A tool tally as one line, busiest first — the runaway signature is a name
  *  with a big number next to it. */
 export function tools(t) {

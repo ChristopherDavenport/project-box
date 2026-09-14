@@ -65,6 +65,10 @@ export const getItems = (states, signal) =>
 export const getExceptions = (signal) => fetchJSON('/v1/exceptions', signal);
 export const getFlakes = (signal) => fetchJSON('/v1/flakes', signal);
 export const getSections = (signal) => fetchJSON('/v1/sections', signal);
+// The per-landing listing: every settled item, newest first, each with what
+// it cost — plus the same fold /v1/status's spend block carries, over the
+// meter's window, and again since this process booted.
+export const getLandings = (signal) => fetchJSON('/v1/landings', signal);
 export const getItem = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}`, signal);
 export const getItemEvidence = (id, signal) => fetchJSON(`/v1/items/${encodeURIComponent(id)}/evidence`, signal);
 // An origination's own facts and where its judgement stands — where a
