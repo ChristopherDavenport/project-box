@@ -50,6 +50,19 @@ type Builder struct {
 	// without this the effective ceiling is the window plus one whole
 	// session — see [ErrTokenCeiling].
 	MaxTokens int64
+	// BuildTimeout is the loop's own per-run deadline — the exact same
+	// number [loop.Loop.BuildTimeout] resolves to for this box, handed down
+	// so the harness layer and the adapter's Bash timeout can state it
+	// truthfully. Zero resolves to [loop.DefaultBuildTimeout], negative
+	// means the box configured no bound, matching [boxcfg.Config.BuildTimeout]
+	// exactly — see [Builder.harnessBudget].
+	//
+	// Read from this field rather than ctx.Deadline(): under production
+	// Suspend wiring the build context is WithCancel-based
+	// (loop.suspendAwareDeadline) and exposes no deadline at all, so reading
+	// the context would silently fall back to nothing in production even
+	// though a real deadline governs the run.
+	BuildTimeout time.Duration
 	// Composer resolves the bundle; Role defaults to builder.
 	Composer *agent.Composer
 	Role     agent.Role
@@ -128,6 +141,13 @@ func (b *Builder) Build(ctx context.Context, ws forge.Workspace, task string) (f
 		envelopeIn = declared
 	}
 	req := agent.Request{Tenant: b.Tenant, Role: role, Box: b.Box, Repo: ws.Repo, Run: ws.Run, Task: task, Envelope: envelopeIn}
+	// What is true of this harness, stated once and first: issue #195. Nine
+	// dogfood runs ended a turn waiting on a shell call Claude Code offered
+	// to move to the background — under ACP no notification ever follows,
+	// because the turn is the session's whole chance and the box reads
+	// whatever tree was left the moment the agent stops speaking. A layer
+	// says so in the agent's own words before anything else does.
+	req.Extra = append(req.Extra, harnessLayer(b.harnessBudget()))
 	item, hasItem, err := b.item(ctx, ws.Run)
 	if err != nil {
 		return "", fmt.Errorf("acp: loading the run's item: %w", err)
@@ -478,7 +498,21 @@ func (b *Builder) runOnce(ctx context.Context, rc attemptCtx, sent, resume, cont
 		AgentRef: bundle.Ref, Prompt: sent, Bundle: string(explained),
 	})
 
-	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: rc.ContextDir, Env: b.Env, EnvNames: b.EnvNames,
+	// The Bash tool's own timeout, set from the same number the harness
+	// layer just told the agent about — Claude Code's built-in default is
+	// the ~2 minutes the layer warns against, and an agent that never reads
+	// its own env still gets the generous bound on every unmarked call.
+	// Prepended, never appended: buildEnv applies Env in order with the last
+	// assignment for a name winning (acp.go:595-625), so a box that
+	// configures these names itself in b.Env still wins outright.
+	//
+	// Known limit, not solved here: a confined box (boxcfg confine) only
+	// forwards the env names its confine.env block lists into the
+	// container, so an env assignment injected here does not reach a
+	// confined agent — the harness layer's sentence still does, since it
+	// travels in the prompt rather than the environment.
+	env := append(b.bashTimeoutEnv(), b.Env...)
+	rt := &Runtime{Command: b.Command, Dir: ws.Dir, ContextDir: rc.ContextDir, Env: env, EnvNames: b.EnvNames,
 		MaxTokens: b.MaxTokens, Transcript: b.Transcript, Progress: b.progress(ctx, ws.Run, bundle.Ref),
 		SkillsDir: rc.SkillsDir, LoadedSkills: rc.Loaded, InheritSettings: b.InheritSettings, Resume: resume}
 	started := time.Now()
@@ -833,7 +867,7 @@ const (
 // session costs one turn, where the adapter's placeholder commit — the
 // fallback this asks for one chance to avoid — costs the change its own
 // voice.
-const nudgePrompt = "This turn ended with uncommitted changes in the workspace, and no escalation or handoff. Commit your change with a message in this repository's voice."
+const nudgePrompt = "This turn ended with uncommitted changes in the workspace, and no escalation or handoff. A check still running in the background is not a reason to leave the tree uncommitted — the gate runs the repository's full check anyway, so nothing is gained by waiting for it here. Commit your change now, with a message in this repository's voice."
 
 func commitMessage(task, trailer string) string {
 	line := task
@@ -1022,6 +1056,51 @@ func (b *Builder) item(ctx context.Context, run string) (queue.WorkItem, bool, e
 	return item, true, nil
 }
 
+// harnessBudget resolves b.BuildTimeout the same way loop.Loop resolves its
+// own field — zero to [loop.DefaultBuildTimeout], negative to no bound at
+// all — and, when bounded, shrinks it by a small margin: the deadline this
+// run actually gets is the loop's, and the commit plus any handoff still
+// need clock after the last foreground command returns.
+//
+// Deterministic in b.BuildTimeout alone, which is what keeps the harness
+// layer's digest stable across runs under the same configuration.
+func (b *Builder) harnessBudget() (budget time.Duration, unbounded bool) {
+	d := b.BuildTimeout
+	if d == 0 {
+		d = loop.DefaultBuildTimeout
+	}
+	if d < 0 {
+		return 0, true
+	}
+	margin := d / 10
+	if margin < time.Minute {
+		margin = time.Minute
+	}
+	if margin > 5*time.Minute {
+		margin = 5 * time.Minute
+	}
+	if margin >= d {
+		margin = d / 2
+	}
+	return d - margin, false
+}
+
+// bashTimeoutEnv is the harness's own Bash tool timeout, set from the exact
+// budget [Builder.harnessBudget] just told the agent about, in Claude Code's
+// BASH_DEFAULT_TIMEOUT_MS / BASH_MAX_TIMEOUT_MS spelling — nil for an
+// unbounded run, deliberately: the box asked for no per-run bound, and
+// injecting a fixed cap here would contradict that configuration. An
+// unbounded run's foreground discipline rests on the harness layer's prose
+// alone.
+func (b *Builder) bashTimeoutEnv() []string {
+	budget, unbounded := b.harnessBudget()
+	if unbounded {
+		return nil
+	}
+	ms := fmt.Sprintf("%d", budget.Milliseconds())
+	return []string{"BASH_DEFAULT_TIMEOUT_MS=" + ms, "BASH_MAX_TIMEOUT_MS=" + ms}
+}
+
 // section finds a declared region of a repository. An empty repo name means
 // the box's only repository, which is how single-repository boxes have
 // always named theirs.
@@ -1047,6 +1126,39 @@ func (b *Builder) repo(name string) (forge.Repo, bool) {
 		return r, true
 	}
 	return forge.Repo{}, false
+}
+
+// harnessLayer states, once and before anything else, the one fact about
+// this harness a turn cannot discover from inside itself: issue #195. Claude
+// Code's own tool offers a slow shell call as "moved to the background, you
+// will be notified when it finishes" — but under the ACP adapter a turn is
+// the whole session, ending the instant the agent stops speaking, and the
+// box then reads whatever tree was left. No notification of anything
+// follows a turn that has already ended, so a call moved to the background
+// is a call this run has lost.
+//
+// Content-addressed like every inline layer, over the rendered text, which
+// is itself a pure function of budget and unbounded — so the same
+// configuration always produces the same digest.
+func harnessLayer(budget time.Duration, unbounded bool) agent.Layer {
+	var w strings.Builder
+	w.WriteString("## The harness: a turn is the whole chance\n")
+	w.WriteString("This build runs under Claude Code through the ACP adapter. One fact about it is not visible from inside a turn: a turn is this session's entire chance to act. It ends the moment the agent stops speaking, and the box then reads whatever tree was left — no notification of anything ever arrives afterward, no matter what the harness's own tooling promises.\n")
+	w.WriteString("A shell call that runs past Claude Code's own default timeout (about two minutes) is offered as 'moved to the background, you will be notified when it finishes'. Under this adapter that notification never comes: a call moved to the background is lost to this run. Run the check in the foreground with an explicit timeout long enough for it to finish, or poll it yourself in the foreground. Never end a turn waiting on something backgrounded.\n")
+	if unbounded {
+		w.WriteString("This run has no per-run deadline configured — that is not license to wait. Still run every command in the foreground with a generous explicit timeout, and still end the turn with the change committed rather than left running.\n")
+	} else {
+		minutes := int(budget / time.Minute)
+		fmt.Fprintf(&w, "This run's own deadline leaves up to %d minutes for foreground work. Use an explicit timeout of up to %d minutes for a command that needs it, and never end a turn waiting past that — the loop reads the tree the instant this turn ends, whether or not the change is committed.\n", minutes, minutes)
+	}
+	text := w.String()
+	sum := sha256.Sum256([]byte(text))
+	return agent.Layer{
+		Name:         "harness",
+		Scope:        agent.ScopeRole,
+		Source:       agent.Source{Kind: agent.SourceInline, Digest: hex.EncodeToString(sum[:])},
+		Instructions: text,
+	}
 }
 
 // sectionLayer is a region of a repository as a layer: what the agent is

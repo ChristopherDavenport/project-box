@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -1094,5 +1095,130 @@ func TestASectionedAgentrefDiffersFromAnUnsectionedOne(t *testing.T) {
 	}
 	if sectionedRef == unsectionedRef {
 		t.Fatalf("a sectioned run and an unsectioned run of the same task shared an agentref: %q", sectionedRef)
+	}
+}
+
+// TestTheHarnessLayerStatesTheTurnTruthAndTheTimeout is issue #195's core
+// claim: every builder run is told, once, that a turn under this harness is
+// the whole chance a session gets — nothing arrives once it ends, and a
+// shell call moved to the background is lost to the run — and the layer
+// names the concrete minutes this run's own deadline allows rather than
+// leaving "a generous timeout" for the agent to guess at. b.BuildTimeout of
+// 20 minutes resolves to an 18 minute budget: harnessBudget's margin is 10%
+// of the configured timeout, clamped to [1m, 5m].
+func TestTheHarnessLayerStatesTheTurnTruthAndTheTimeout(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "worker")
+	b := lp.Builder.(*Builder)
+	b.BuildTimeout = 20 * time.Minute
+	ctx := context.Background()
+	item := submitSectioned(t, ctx, s, router, "issue-harness-layer", "add the widget package", nil)
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	if _, err := b.Build(ctx, ws, item.Task); err != nil {
+		t.Fatal(err)
+	}
+	var prompt, run string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/"+item.ID, 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch r.Kind {
+		case "agent-prompt":
+			var p struct{ Prompt string }
+			json.Unmarshal(r.Body, &p)
+			prompt = p.Prompt
+		case "agent-run":
+			run = string(r.Body)
+		}
+	}
+	for _, want := range []string{
+		"a turn is this session's entire chance",
+		"moved to the background",
+		"notification never comes",
+		"18 minutes",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the harness layer does not carry %q:\n%s", want, prompt)
+		}
+	}
+	if !strings.Contains(run, `"name":"harness"`) || !strings.Contains(run, `"scope":"role"`) {
+		t.Errorf("the harness layer is not on the run record:\n%s", run)
+	}
+}
+
+// TestTheBuildTimeoutSetsTheBashToolsOwnTimeout is issue #195's adapter
+// half: the same number the harness layer just told the agent about also
+// becomes Claude Code's own Bash tool timeout (BASH_DEFAULT_TIMEOUT_MS and
+// BASH_MAX_TIMEOUT_MS), so a call that states no timeout of its own still
+// gets the generous bound rather than the harness's ~2-minute default. The
+// envecho scenario reports the fake agent's OWN os.Environ() back over the
+// wire, so this is a subprocess-level check of what runOnce actually built
+// for the child's environment, not a mock.
+func TestTheBuildTimeoutSetsTheBashToolsOwnTimeout(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "envecho")
+	b := lp.Builder.(*Builder)
+	b.BuildTimeout = 20 * time.Minute
+	ctx := context.Background()
+	item := submitSectioned(t, ctx, s, router, "issue-harness-env", "add the widget package", nil)
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	// envecho changes nothing in the tree, so Build itself errors once the
+	// run completes ("finished without changing anything") — irrelevant
+	// here, since the records this test reads are written inside runOnce,
+	// before that final check runs.
+	b.Build(ctx, ws, item.Task)
+	var text string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/"+item.ID, 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if r.Kind == "agent-text" {
+			var rec struct{ Text string }
+			json.Unmarshal(r.Body, &rec)
+			text = rec.Text
+		}
+	}
+	wantMS := (18 * time.Minute).Milliseconds()
+	for _, name := range []string{"BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS"} {
+		line := fmt.Sprintf("%s=%d", name, wantMS)
+		if !strings.Contains(text, line) {
+			t.Errorf("the agent's own environment does not carry %q:\n%s", line, text)
+		}
+	}
+}
+
+// TestAnUnboundedRunGetsNoBashCapAndSaysSoInTheLayer: a negative BuildTimeout
+// is boxcfg's "no bound" spelling (Config.BuildTimeout doc), and an
+// unbounded run must not have a fixed Bash timeout injected back in — that
+// would contradict the very configuration that asked for no bound — while
+// the harness layer still tells the agent to run everything in the
+// foreground with a generous explicit timeout of its own choosing.
+func TestAnUnboundedRunGetsNoBashCapAndSaysSoInTheLayer(t *testing.T) {
+	s, lp, router, _, _ := rig(t, "envecho")
+	b := lp.Builder.(*Builder)
+	b.BuildTimeout = -1 * time.Second
+	ctx := context.Background()
+	item := submitSectioned(t, ctx, s, router, "issue-harness-unbounded", "add the widget package", nil)
+	ws := checkoutWorkspace(t, ctx, s, lp, item.ID)
+	b.Build(ctx, ws, item.Task)
+	var prompt, text string
+	for r, err := range s.Log().Since(ctx, btn, "workitem/"+item.ID, 1) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch r.Kind {
+		case "agent-prompt":
+			var p struct{ Prompt string }
+			json.Unmarshal(r.Body, &p)
+			prompt = p.Prompt
+		case "agent-text":
+			var rec struct{ Text string }
+			json.Unmarshal(r.Body, &rec)
+			text = rec.Text
+		}
+	}
+	if !strings.Contains(prompt, "no per-run deadline configured") {
+		t.Errorf("the harness layer does not say the run is unbounded:\n%s", prompt)
+	}
+	if strings.Contains(text, "BASH_DEFAULT_TIMEOUT_MS") || strings.Contains(text, "BASH_MAX_TIMEOUT_MS") {
+		t.Errorf("an unbounded run still had a fixed Bash timeout injected:\n%s", text)
 	}
 }

@@ -448,9 +448,10 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 		if len(bx.Agent) > 0 {
 			agentBuilder = &acp.Builder{
 				Store: d.store, Tenant: d.tenant, Box: bx.Name,
-				Command:   bx.Agent,
-				EnvNames:  forwardedEnv(bx),
-				MaxTokens: cfg.Budget.MaxTokensPerRun,
+				Command:      bx.Agent,
+				EnvNames:     forwardedEnv(bx),
+				MaxTokens:    cfg.Budget.MaxTokensPerRun,
+				BuildTimeout: cfg.BuildTimeoutDuration(),
 				Composer: &agent.Composer{Source: &harness.Source{
 					Base: []agent.Layer{{
 						Name: "builder", Scope: agent.ScopeRole,
