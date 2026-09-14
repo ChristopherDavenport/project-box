@@ -361,6 +361,8 @@ func authenticatorFromConfig(a boxcfg.Auth) api.Authenticator {
 			tokens[t.Name] = t.Secret
 		}
 		return api.TokenAuthenticator{Tokens: tokens}
+	case boxcfg.AuthMethodOIDC:
+		return &api.OIDCAuthenticator{Issuer: a.OIDC.Issuer, Audience: a.OIDC.Audience, JWKSURL: a.OIDC.JWKSURL}
 	case boxcfg.AuthMethodNone:
 		return api.NoneAuthenticator{}
 	default: // boxcfg.AuthMethodPeer

@@ -35,6 +35,16 @@ func TestAuthenticatorFromConfig(t *testing.T) {
 	if tok.Tokens["ci"] != "s3cret" {
 		t.Fatalf("tokens = %+v, want ci -> s3cret carried through from boxcfg's resolved secret", tok.Tokens)
 	}
+
+	oidcAuth := authenticatorFromConfig(boxcfg.Auth{Method: boxcfg.AuthMethodOIDC,
+		OIDC: boxcfg.OIDCAuth{Issuer: "https://issuer.example", Audience: "box-api"}})
+	oidc, ok := oidcAuth.(*api.OIDCAuthenticator)
+	if !ok {
+		t.Fatal("method: oidc did not resolve to an OIDCAuthenticator")
+	}
+	if oidc.Issuer != "https://issuer.example" || oidc.Audience != "box-api" {
+		t.Fatalf("oidc = %+v, want issuer and audience carried through from boxcfg", oidc)
+	}
 }
 
 // TestAssembleThreadsRouteRequireOntoTheIngressRoute: a repo's route.require

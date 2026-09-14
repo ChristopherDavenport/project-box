@@ -240,3 +240,74 @@ boxes:
 		t.Fatal("route.require under auth.method: none was accepted")
 	}
 }
+
+// TestAuthOIDCWithNoIssuerIsRefused: a bearer cannot be verified against no
+// issuer at all — the half-configured combination validate refuses at load,
+// the same doctrine TestAuthTokenWithNoTableIsRefused applies to token.
+func TestAuthOIDCWithNoIssuerIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+auth: {method: oidc}
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+`))
+	if err == nil {
+		t.Fatal("auth.method: oidc with no auth.oidc.issuer was accepted")
+	}
+}
+
+// TestAuthOIDCUnderAnotherMethodIsRefused: an auth.oidc block configured
+// under any other method is a typo an operator would otherwise never learn
+// about until the day they switched methods and the old block silently
+// applied — the same doctrine TestAuthTokensWithoutTokenMethodIsRefused
+// applies to auth.tokens.
+func TestAuthOIDCUnderAnotherMethodIsRefused(t *testing.T) {
+	_, err := Load(writeCfg(t, `
+tenant: acme
+auth:
+  method: peer
+  oidc: {issuer: https://issuer.example}
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: /tmp/app.git
+        build: "true"
+`))
+	if err == nil {
+		t.Fatal("auth.oidc under method: peer was accepted")
+	}
+}
+
+// TestAuthOIDCWithIssuerIsAccepted: an oidc method naming an issuer is
+// ordinary configuration, and a route requiring "oidc" against it is
+// satisfiable — the same shape TestRouteRequireMatchingTheBoxsAuthMethodIsAccepted
+// proves for token.
+func TestAuthOIDCWithIssuerIsAccepted(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+auth:
+  method: oidc
+  oidc: {issuer: https://issuer.example, audience: box-api}
+boxes:
+  - name: shop
+    repos:
+      - name: app
+        remote: https://github.com/acme/app.git
+        build: "true"
+        route: {name: issues, require: [oidc]}
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Auth.OIDC.Issuer != "https://issuer.example" || c.Auth.OIDC.Audience != "box-api" {
+		t.Fatalf("auth.oidc = %+v, want issuer and audience carried through", c.Auth.OIDC)
+	}
+	if got := c.Boxes[0].Repos[0].Route.Require; len(got) != 1 || got[0] != "oidc" {
+		t.Fatalf("route.require = %v, want [oidc]", got)
+	}
+}

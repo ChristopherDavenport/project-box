@@ -330,6 +330,7 @@ const (
 	AuthMethodPeer  = "peer"
 	AuthMethodToken = "token"
 	AuthMethodNone  = "none"
+	AuthMethodOIDC  = "oidc"
 )
 
 // Auth configures the daemon's own listener authentication.
@@ -340,17 +341,50 @@ const (
 // daemon's own concern. What issue #188 adds is that the socket's OWN
 // listener, which used to trust SO_PEERCRED unconditionally, is now
 // pluggable too: a box may still choose peer (the default) or may choose to
-// authenticate a caller some other way without a proxy in front.
+// authenticate a caller some other way without a proxy in front. Part 3
+// deliberately moves the seam ARCHITECTURE.md names ("OIDC/mTLS/IAP replace
+// the gate without the daemon changing") into the daemon's own pluggable
+// listener layer instead of a proxy in front of it — docs/PLAN.md §6's "OIDC
+// principals and traditional grants; no per-actor keys" row is what this
+// still honors: no signing key per actor, a bearer JWT verified against the
+// issuer's own published keys.
 type Auth struct {
 	// Method chooses the authenticator: "" or "peer" (SO_PEERCRED, the
-	// default), "token" (Tokens below), or "none" (every write refused).
-	// Refused at validate when it names anything else.
+	// default), "token" (Tokens below), "oidc" (OIDC below), or "none"
+	// (every write refused). Refused at validate when it names anything
+	// else.
 	Method string `yaml:"method"`
 	// Tokens is the static name-to-secret table the "token" method
 	// authenticates against. Required, and non-empty, whenever Method is
 	// "token" — a token method with no table would authenticate nobody,
 	// which is what "none" is for.
 	Tokens []AuthToken `yaml:"tokens"`
+	// OIDC configures the "oidc" method's issuer and, optionally, audience.
+	// Required, with a non-empty Issuer, whenever Method is "oidc".
+	OIDC OIDCAuth `yaml:"oidc"`
+}
+
+// OIDCAuth configures the "oidc" [Auth] method: verify an Authorization:
+// Bearer JWT against Issuer's own published keys. Nothing here is a secret —
+// unlike AuthToken there is no file or env source to resolve, because
+// verifying a bearer needs only the issuer's PUBLIC keys, fetched over the
+// network by the daemon itself (never here — see
+// [internal/daemon.authenticatorFromConfig] and the OIDCAuthenticator it
+// wires; this stays as network-free as the rest of Load).
+type OIDCAuth struct {
+	// Issuer is the token's expected iss claim, and — unless JWKSURL
+	// overrides it — where the daemon discovers the signing keys: GET
+	// Issuer + "/.well-known/openid-configuration" for its jwks_uri.
+	// Required whenever Method is "oidc".
+	Issuer string `yaml:"issuer"`
+	// Audience, when set, is the value the token's aud claim must contain.
+	// Empty leaves aud unchecked — some issuers mint tokens with no aud at
+	// all, and a box that wants that gap closed can now say so.
+	Audience string `yaml:"audience"`
+	// JWKSURL, when set, is fetched directly instead of discovering it from
+	// Issuer's /.well-known/openid-configuration — for an issuer that
+	// publishes keys somewhere discovery would not find, or a test double.
+	JWKSURL string `yaml:"jwks_url"`
 }
 
 // AuthToken is one named credential in a "token" [Auth]'s table. The secret
@@ -1126,15 +1160,21 @@ func (a *Auth) validate() error {
 	switch a.Method {
 	case "":
 		a.Method = AuthMethodPeer
-	case AuthMethodPeer, AuthMethodToken, AuthMethodNone:
+	case AuthMethodPeer, AuthMethodToken, AuthMethodOIDC, AuthMethodNone:
 	default:
-		return fmt.Errorf("boxcfg: auth.method %q — this box offers peer (SO_PEERCRED, the default), token, or none", a.Method)
+		return fmt.Errorf("boxcfg: auth.method %q — this box offers peer (SO_PEERCRED, the default), token, oidc, or none", a.Method)
 	}
 	if a.Method != AuthMethodToken && len(a.Tokens) > 0 {
 		return fmt.Errorf("boxcfg: auth.tokens is set with auth.method %q — tokens are only read for method: token", a.Method)
 	}
 	if a.Method == AuthMethodToken && len(a.Tokens) == 0 {
 		return fmt.Errorf("boxcfg: auth.method: token with no auth.tokens — a table with no entries authenticates nobody; name a table, or auth.method: none")
+	}
+	if a.Method != AuthMethodOIDC && (a.OIDC != OIDCAuth{}) {
+		return fmt.Errorf("boxcfg: auth.oidc is set with auth.method %q — auth.oidc is only read for method: oidc", a.Method)
+	}
+	if a.Method == AuthMethodOIDC && a.OIDC.Issuer == "" {
+		return fmt.Errorf("boxcfg: auth.method: oidc with no auth.oidc.issuer — a bearer cannot be verified against no issuer at all")
 	}
 	seen := map[string]bool{}
 	for i := range a.Tokens {
