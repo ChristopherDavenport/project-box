@@ -183,6 +183,23 @@ func (m *Mirror) ChangedPaths(ctx context.Context, repo forge.Repo, from, to for
 	return strings.Split(out, "\n"), nil
 }
 
+// Commits wraps the package-level [Commits] over this mirror's own directory
+// — mirror directories are unexported, so a caller outside this package has
+// no other way to list the range from..to against a mirror it holds. Same
+// newest-first, empty-range-is-empty, unknown-sha-is-an-error contract as
+// the package-level form. It does not fetch: it reads what the mirror
+// already has, and callers fetch first.
+func (m *Mirror) Commits(ctx context.Context, repo forge.Repo, from, to forge.Commit) ([]string, error) {
+	lk := m.fetchLock(repo.Name)
+	lk.RLock()
+	out, err := Commits(ctx, m.mirrorDir(repo.Name), from, to)
+	lk.RUnlock()
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // FileAt returns the bytes of one file at one commit, read from a repo's own
 // mirror — the one Fetch already keeps for landing, checkout and diffing.
 //

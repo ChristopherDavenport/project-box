@@ -749,6 +749,54 @@ func TestChangedPathsOfAnUnknownCommitErrors(t *testing.T) {
 	}
 }
 
+func TestMirrorCommitsListsTheRangeNewestFirst(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+	leaser := f.store.Leaser("runner-a")
+
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := m.Checkout(ctx, lease, f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	buildOn(t, ws, "first landing")
+	head := buildOn(t, ws, "second landing")
+	// The mirror only has what Fetch or a land's collection gave it; pull the
+	// new commits in the same way Land's push step does, without landing.
+	if _, err := run2(ctx, m.mirrorDir(f.repo.Name), "fetch", ws.Dir, string(head)); err != nil {
+		t.Fatalf("collect head into mirror: %v", err)
+	}
+
+	got, err := m.Commits(ctx, f.repo, f.base, head)
+	if err != nil {
+		t.Fatalf("commits: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("commits = %v, want 2 entries", got)
+	}
+	if !strings.Contains(got[0], "second landing") {
+		t.Fatalf("commits[0] = %q, want the newest commit first", got[0])
+	}
+	if !strings.Contains(got[1], "first landing") {
+		t.Fatalf("commits[1] = %q, want the oldest commit last", got[1])
+	}
+}
+
+func TestMirrorCommitsOfAnUnknownShaErrors(t *testing.T) {
+	f := fix(t)
+	ctx := context.Background()
+	m := f.mirror(t, "runner-a")
+
+	unknown := forge.Commit(strings.Repeat("a", 40))
+	if _, err := m.Commits(ctx, f.repo, f.base, unknown); err == nil {
+		t.Fatal("commits against an unknown sha: want error, got nil")
+	}
+}
+
 func TestChangedPathsListsTheFilesADiffTouches(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
