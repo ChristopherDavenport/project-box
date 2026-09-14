@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { tally } from './format.js';
+import { tally, cardTitle } from './format.js';
 
 const FULL = {
   backlog: { by_state: { done: 42, pending: 3 }, pending: 3, total: 45 },
@@ -74,4 +74,24 @@ test('an empty status renders landed and pending as zero, not unknown', () => {
   const t = tally({});
   assert.equal(t.landed, 0);
   assert.equal(t.pending, 0);
+});
+
+test('cardTitle clamps a 200-char unbroken summary and keeps the full text for a tooltip', () => {
+  const summary = 'x'.repeat(200);
+  const { label, full } = cardTitle(summary);
+  assert.equal(full, summary);
+  assert.ok(label.length < summary.length, 'label must be shorter than the source string');
+  assert.ok(label.endsWith('…'), 'a clamped label ends with the ellipsis clip() uses');
+});
+
+test('cardTitle leaves a title that already fits untouched', () => {
+  const { label, full } = cardTitle('Fix the parser');
+  assert.equal(label, 'Fix the parser');
+  assert.equal(full, 'Fix the parser');
+});
+
+test('cardTitle reads a missing title as empty, never the string "undefined"', () => {
+  const { label, full } = cardTitle(undefined);
+  assert.equal(label, '');
+  assert.equal(full, '');
 });

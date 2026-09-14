@@ -13,7 +13,7 @@ import {
 import { ActivityController } from './sse.js';
 import {
   age, title, taskURL, short, sameCommit, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, place, hold, why,
-  describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail,
+  describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail, cardTitle,
 } from './format.js';
 import { settled, orderList, planeOrder } from './order.js';
 import { base, toast, focusInto } from './ui.js';
@@ -217,17 +217,21 @@ export class BoxDashboard extends LitElement {
     if (live.length === 0) return html`<p class="empty">Nothing in flight.</p>`;
     return html`
       <jh-list-group accessible-label="In-flight work">
-        ${live.map((e) => html`
+        ${live.map((e) => {
+          const t = cardTitle(title(e) || e.id);
+          return html`
           <jh-list-item
-            primary-text=${title(e) || e.id}
+            primary-text=${t.label}
+            title=${t.full}
             secondary-text=${e.note ? firstLine(e.note) : origin(e) || place(e)}
             primary-metadata=${e.stage ?? ''}
             secondary-metadata=${e.stage ? `${age(e.in_state_sec)} in stage` : `${age(e.age_sec)} old`}
             show-divider>
             <span slot="jh-list-item-left">${stateTag(e.state)}</span>
             <jh-button slot="jh-list-item-right" appearance="tertiary" size="small"
-              label="Open" accessible-label=${`Open ${title(e) || e.id}`} href=${'/items/' + e.id}></jh-button>
-          </jh-list-item>`)}
+              label="Open" accessible-label=${`Open ${t.full}`} href=${'/items/' + e.id}></jh-button>
+          </jh-list-item>`;
+        })}
       </jh-list-group>`;
   }
 
@@ -560,9 +564,11 @@ function frameList(frames, emptyMessage, live) {
 export class BoxSessions extends LitElement {
   static styles = [base, css`
     :host { display: block; }
-    .grid { display: grid; gap: var(--jh-space-400); grid-template-columns: repeat(auto-fit, minmax(380px, 1fr)); align-items: start; }
+    .grid { display: grid; gap: var(--jh-space-400); grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); align-items: start; }
+    .grid > * { min-width: 0; }
     .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; font: var(--jh-font-helper-regular);
             color: var(--jh-color-content-secondary-enabled); margin-bottom: var(--jh-space-200); }
+    .meta > * { min-width: 0; overflow-wrap: anywhere; }
     .layers { display: flex; gap: var(--jh-space-100); flex-wrap: wrap; margin-bottom: var(--jh-space-200); }
     .layer { font: var(--jh-font-micro-medium); padding: 2px var(--jh-space-200); border-radius: var(--jh-border-radius-100);
              background: var(--jh-color-container-secondary-enabled); }
@@ -582,6 +588,7 @@ export class BoxSessions extends LitElement {
     details.session details.session { margin-left: var(--jh-space-400); }
     .session-meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: baseline;
                     font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .session-meta > * { min-width: 0; overflow-wrap: anywhere; }
     .session-meta b { color: var(--jh-color-content-primary-enabled); font-weight: 600; }
     .session-meta .running { color: var(--jh-color-content-positive-enabled); font-weight: 600; }
   `];
@@ -688,8 +695,9 @@ export class BoxSessions extends LitElement {
         <summary><span class="session-meta"><b>Earlier, unattributed</b></span></summary>
         ${frameList(orderList(live, unattributed), 'Nothing here.', live)}
       </details>` : nothing;
+    const t = cardTitle(title(s) || s.id);
     return html`
-      <jh-card header-title=${title(s) || s.id} header-subtitle=${origin(s) || place(s)} padding="medium">
+      <jh-card header-title=${t.label} title=${t.full} header-subtitle=${origin(s) || place(s)} padding="medium">
         <div class="meta">
           ${s.judgement ? html`<jh-tag size="small" label="judgement"></jh-tag>` : stateTag(s.state)}
           ${s.stage ? html`<jh-tag size="small" label=${s.stage}></jh-tag><span>${age(s.in_state_sec)} in stage</span>` : nothing}
@@ -748,6 +756,7 @@ export class BoxExceptions extends LitElement {
     :host { display: grid; gap: var(--jh-space-400); }
     .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; font: var(--jh-font-helper-regular);
             color: var(--jh-color-content-secondary-enabled); margin-bottom: var(--jh-space-300); }
+    .meta > * { min-width: 0; overflow-wrap: anywhere; }
     .overdue { color: var(--jh-color-content-negative-enabled); font-weight: 600; }
     .note { margin: 0 0 var(--jh-space-300); padding: var(--jh-space-300); border-radius: var(--jh-border-radius-200);
             background: var(--jh-color-container-secondary-enabled); white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -798,8 +807,9 @@ export class BoxExceptions extends LitElement {
   }
 
   _card(it) {
+    const t = cardTitle(title(it) || it.id);
     return html`
-      <jh-card header-title=${title(it) || it.id} header-subtitle=${origin(it) || place(it)} padding="medium">
+      <jh-card header-title=${t.label} title=${t.full} header-subtitle=${origin(it) || place(it)} padding="medium">
         <div class="meta">
           ${stateTag(it.state ?? 'parked')}
           <jh-tag size="small" class=${SEVERITY_APPEARANCE[it.severity ?? 'medium'] ?? 'neutral'} label=${`severity ${it.severity ?? 'medium'}`}></jh-tag>
@@ -833,6 +843,7 @@ export class BoxFlakes extends LitElement {
     :host { display: grid; gap: var(--jh-space-400); }
     .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; font: var(--jh-font-helper-regular);
             color: var(--jh-color-content-secondary-enabled); }
+    .meta > * { min-width: 0; overflow-wrap: anywhere; }
     .summary { display: flex; gap: var(--jh-space-400); flex-wrap: wrap; align-items: center; }
   `];
 
@@ -874,8 +885,9 @@ export class BoxFlakes extends LitElement {
   }
 
   _card(it) {
+    const t = cardTitle(it.test || it.subject);
     return html`
-      <jh-card header-title=${it.test || it.subject} header-subtitle=${[it.repo, it.package].filter(Boolean).join(' / ')} padding="medium">
+      <jh-card header-title=${t.label} title=${t.full} header-subtitle=${[it.repo, it.package].filter(Boolean).join(' / ')} padding="medium">
         <div class="meta">
           <jh-tag size="small" label=${`flaky ${it.count}×`}></jh-tag>
           <span>last proven <box-when .at=${it.last_seen}></box-when></span>
@@ -1008,6 +1020,7 @@ export class BoxItem extends LitElement {
   static styles = [base, facts, css`
     :host { display: grid; gap: var(--jh-space-400); }
     .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; margin-bottom: var(--jh-space-300); }
+    .meta > * { min-width: 0; overflow-wrap: anywhere; }
     .note { margin: var(--jh-space-300) 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
     details { margin-top: var(--jh-space-300); }
     summary { cursor: pointer; font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
@@ -1035,6 +1048,7 @@ export class BoxItem extends LitElement {
     details.session summary { color: var(--jh-color-content-primary-enabled); }
     .session-meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: baseline;
                     font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .session-meta > * { min-width: 0; overflow-wrap: anywhere; }
     .session-meta b { color: var(--jh-color-content-primary-enabled); font-weight: 600; }
     .session-meta .running { color: var(--jh-color-content-positive-enabled); font-weight: 600; }
   `];
@@ -1182,8 +1196,9 @@ export class BoxItem extends LitElement {
     const link = taskURL(item.task);
     const parkedOrFailed = item.state === 'parked' || item.state === 'failed';
     const tone = parkedOrFailed ? 'negative' : item.state === 'done' ? 'positive' : 'neutral';
+    const t = cardTitle(title(item) || item.id);
     return html`
-      <jh-card header-title=${title(item) || item.id} header-subtitle=${origin(item) || place(item)} padding="medium">
+      <jh-card header-title=${t.label} title=${t.full} header-subtitle=${origin(item) || place(item)} padding="medium">
         <div class="meta">
           ${stateTag(item.state)}
           ${item.stage && item.stage !== item.state ? html`<jh-tag size="small" label=${`at ${item.stage}`}></jh-tag>` : nothing}
@@ -1280,6 +1295,7 @@ export class BoxIngress extends LitElement {
   static styles = [base, facts, css`
     :host { display: grid; gap: var(--jh-space-400); }
     .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; margin-bottom: var(--jh-space-300); }
+    .meta > * { min-width: 0; overflow-wrap: anywhere; }
     details { margin-top: var(--jh-space-300); }
     summary { cursor: pointer; font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
     pre { white-space: pre-wrap; overflow-wrap: anywhere; font: var(--jh-font-code-regular-2); margin: var(--jh-space-200) 0 0;
@@ -1296,6 +1312,7 @@ export class BoxIngress extends LitElement {
                        background: var(--jh-color-container-secondary-enabled); }
     .session-meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: baseline;
                     font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .session-meta > * { min-width: 0; overflow-wrap: anywhere; }
     .session-meta b { color: var(--jh-color-content-primary-enabled); font-weight: 600; }
   `];
 
@@ -1386,8 +1403,9 @@ export class BoxIngress extends LitElement {
 
   _head(ing) {
     const running = !ing.standing;
+    const t = cardTitle(title(ing) || ing.id);
     return html`
-      <jh-card header-title=${title(ing) || ing.id} header-subtitle=${place(ing)} padding="medium">
+      <jh-card header-title=${t.label} title=${t.full} header-subtitle=${place(ing)} padding="medium">
         <div class="meta">
           <jh-tag size="small" class=${running ? 'brand' : (STANDING_APPEARANCE[ing.standing] ?? 'neutral')} label=${running ? 'judgement' : ing.standing}></jh-tag>
         </div>
@@ -1519,6 +1537,7 @@ export class BoxPlan extends LitElement {
     :host { display: grid; gap: var(--jh-space-400); }
     .fanout { font: var(--jh-font-heading-medium-4); margin: 0 0 var(--jh-space-300); }
     .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; margin-bottom: var(--jh-space-300); }
+    .meta > * { min-width: 0; overflow-wrap: anywhere; }
     .diagram { overflow-x: auto; margin: var(--jh-space-300) 0; color: var(--jh-color-content-primary-enabled); }
     table { border-collapse: collapse; width: 100%; margin-bottom: var(--jh-space-300); }
     caption { text-align: left; padding-bottom: var(--jh-space-200); font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }

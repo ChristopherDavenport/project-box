@@ -32,6 +32,20 @@ export function title(item) {
   return item?.summary || clip(firstLine(typeof item === 'string' ? item : item?.task));
 }
 
+/**
+ * cardTitle clamps a title string for a jh-card header or jh-list-item
+ * primary-text: that text renders inside jh-ui's own shadow DOM, which
+ * exposes no ::part for either, so outside CSS cannot reach in to ellipsize
+ * it — the clamp has to happen on the string itself, before it crosses the
+ * boundary. `full` travels alongside for a `title=` tooltip: jh-list-item
+ * has its own overflow-triggered tooltip, but that never fires once the
+ * string it receives already fits its box.
+ */
+export function cardTitle(s, n = 80) {
+  const full = String(s ?? '');
+  return { label: clip(full, n), full };
+}
+
 /** taskURL is the first link in a task's text — an issue, usually. */
 export function taskURL(task) {
   const m = String(task ?? '').match(/https?:\/\/[^\s)>\]]+/);

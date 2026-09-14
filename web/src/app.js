@@ -223,7 +223,7 @@ customElements.define('box-claims', BoxClaims);
 
 export class BoxApp extends LitElement {
   static styles = [base, css`
-    :host { display: block; max-width: 1080px; margin: 0 auto; padding: var(--jh-space-400); }
+    :host { display: block; max-width: 1080px; margin: 0 auto; padding: var(--jh-space-400); overflow-x: hidden; }
     .skip { position: absolute; left: -999px; top: var(--jh-space-200); padding: var(--jh-space-200) var(--jh-space-300);
             background: var(--jh-color-container-primary-enabled); border-radius: var(--jh-border-radius-200);
             box-shadow: var(--jh-shadow-300); z-index: 10; }
