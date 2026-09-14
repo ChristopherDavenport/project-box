@@ -196,6 +196,39 @@ type Daemon struct {
 	cfg   boxcfg.Config
 }
 
+// unboundedClaimTTL is the claim lease TTL when build_timeout declares no
+// bound. A lease has to be finite even when a build does not — Claim and
+// Retain (internal/queue) have no way to express "forever" — so this is a
+// generous static margin standing in until #211's renew-on-progress lets a
+// lease extend itself with the run instead of being sized up front.
+const unboundedClaimTTL = 24 * time.Hour
+
+// claimTTL derives the claim lease TTL from the same build_timeout the loop
+// itself is bounded by, so the queue's Claim grant (New, below) and the
+// assembled Loop's Retain renew (assemble, below) are always read off one
+// clock. Before this they were two independent 30m literals, equal only by
+// coincidence with the build timeout's own 30m default — a unit that spent
+// its whole build budget reached review holding an already-expired lease,
+// and queue.Recover reaped a live run out from under it (issue #267).
+func claimTTL(cfg boxcfg.Config) time.Duration {
+	switch d := cfg.BuildTimeoutDuration(); {
+	case d > 0:
+		// Headroom past the build itself for review and land, not just the
+		// build — 3x is the shape #267 names.
+		return 3 * d
+	case d == 0:
+		// Empty config: the loop falls back to loop.DefaultBuildTimeout, so
+		// the lease follows it there too. Never zero — that would expire
+		// the lease the instant it was granted.
+		return 3 * loop.DefaultBuildTimeout
+	default:
+		// Negative is boxcfg's spelling of "no bound" (see Config.BuildTimeout's
+		// doc). The lease still can't be infinite, so it gets the static
+		// margin above instead.
+		return unboundedClaimTTL
+	}
+}
+
 // New assembles a daemon from its config file.
 func New(path string) (*Daemon, error) {
 	cfg, err := boxcfg.Load(path)
@@ -215,7 +248,7 @@ func New(path string) (*Daemon, error) {
 	router := &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner}
 	d := &Daemon{
 		ConfigPath: path, store: s, tenant: t, mirror: m,
-		queue:      &queue.Queue{Store: s, Runner: cfg.Runner, TTL: 30 * time.Minute},
+		queue:      &queue.Queue{Store: s, Runner: cfg.Runner, TTL: claimTTL(cfg)},
 		meter:      &capacity.Meter{Store: s, Tenant: t, Actor: cfg.Runner},
 		live:       &control.Live{},
 		planners:   &acp.Planners{},
@@ -492,7 +525,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 					}
 					return gates
 				},
-				TTL:          30 * time.Minute,
+				TTL:          claimTTL(cfg),
 				BuildTimeout: cfg.BuildTimeoutDuration(),
 			}
 			// Repo wins over box; absent on both leaves lp.Attempts zero,
@@ -801,6 +834,16 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("daemon: reload refused, old config still running: %w", err)
 	}
+	// d.queue is deliberately left holding the TTL claimTTL(old) computed at
+	// New — not bumped to claimTTL(ncfg) here. Every assembled Loop above
+	// picks up the new TTL for its own Retain renews, but queue.Queue has no
+	// lock of its own around TTL (Claim and Retain, in internal/queue, read
+	// it unsynchronized), and this daemon's mu guards Daemon's own fields,
+	// not a package it does not own. Writing d.queue.TTL here would race
+	// against an in-flight Claim on another goroutine with nothing on the
+	// read side to order against it. A reload that changes build_timeout
+	// therefore keeps granting the old claim TTL until the next restart;
+	// bounded, and named here so it is a decision rather than a gap.
 
 	d.pump.SetLoops(loops)
 	d.pump.SetKinds(kinds)
