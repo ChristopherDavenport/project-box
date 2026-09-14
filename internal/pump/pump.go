@@ -404,6 +404,28 @@ func sectionsIntersect(a, b []string) bool {
 // and the rebase bound this answers only means what it says if the unit
 // already in line is not the one made to yield to newer work. The holder
 // exemption and the ordering below apply identically to both kinds of head.
+//
+// Issue #233: a land-ready unit needing two sections could acquire neither.
+// It names [loop, daemon], say, so it [sectionsIntersect]s with EVERY
+// section head this scheme ever names — a loop-only head or a daemon-only
+// head both contend with it — and is told to yield far more often than any
+// single-section unit is, while single-section units that do not intersect
+// today's head sail past it and keep taking the other section out from
+// under it. [loop.Loop.acquireSections] now answers half of this by keeping
+// a partial grant across a busy name instead of releasing it (so the unit
+// can hold one section while it waits out the other), but a partial holder
+// still needs to become a section head to ever get a turn at the second
+// one. So a land-ready candidate naming more than one section (or none,
+// which already intersects everything and has the same shape, worse) is
+// preferred for headship, at the same StarveAfter bound, over an ordinary
+// single-section starver: among such candidates this picks the one with the
+// most SectionWaits, and only when there is none does headship fall back to
+// today's scan. Once named head, the existing intersection-scoped YieldTo
+// already covers every section it names at once — that is "the head of all
+// its sections at once" — and the existing holder exemption and ordering
+// carry it the rest of the way once [loop.Loop.HoldsSection] reports it a
+// partial holder. A group with no multi-section land-ready starver behaves
+// exactly as it did before this issue.
 func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 	bound := p.StarveAfter
 	if bound <= 0 {
@@ -451,13 +473,34 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 			continue // a land head wins its group outright; no section head this tick
 		}
 
+		// Issue #233: a land-ready candidate naming more than one section (or
+		// none) is preferred for headship over an ordinary single-section
+		// starver, so it becomes the head of every section it names at once
+		// instead of losing the intersection race to whichever single-section
+		// head gets picked instead. Only when no such candidate has starved
+		// does headship fall back to the plain max-SectionWaits scan below,
+		// which is exactly what already ran here before this issue.
 		head := -1
 		for _, i := range idxs {
-			if cands[i].item.SectionWaits < bound {
+			it := cands[i].item
+			if !landReady(it) || len(it.Sections) == 1 {
 				continue
 			}
-			if head == -1 || cands[i].item.SectionWaits > cands[head].item.SectionWaits {
+			if it.SectionWaits < bound {
+				continue
+			}
+			if head == -1 || it.SectionWaits > cands[head].item.SectionWaits {
 				head = i
+			}
+		}
+		if head == -1 {
+			for _, i := range idxs {
+				if cands[i].item.SectionWaits < bound {
+					continue
+				}
+				if head == -1 || cands[i].item.SectionWaits > cands[head].item.SectionWaits {
+					head = i
+				}
 			}
 		}
 		if head == -1 {

@@ -2612,6 +2612,33 @@ func indexByte(s string, b byte) int {
 // SectionRef is the lease ref a section of a repository is held under.
 func SectionRef(name string) string { return "section/" + name }
 
+// landReady mirrors pump.landReady, restated here rather than imported: item
+// owes only a rebase, a re-gate, and a push, never a fresh build. It is what
+// [Loop.acquireSections] checks before keeping a partial grant across a busy
+// name (issue #233), and what [Loop.reapGhost] checks before mistaking that
+// kept grant for a ghost.
+func landReady(item queue.WorkItem) bool {
+	return item.Built != "" && !item.Unfinished
+}
+
+// holderNamesSectionRef reports whether ref is one of holder's own sections
+// — holder.Sections empty means every section, the same reading
+// [Loop.HoldsSection] and [sectionsIntersect] both give it. Used by
+// [Loop.reapGhost] to tell a live #233 reservation from a genuine ghost: a
+// ref outside holder's own sections was never holder's to reserve, however
+// it got here.
+func holderNamesSectionRef(holder queue.WorkItem, ref string) bool {
+	if len(holder.Sections) == 0 {
+		return true
+	}
+	for _, n := range holder.Sections {
+		if SectionRef(n) == ref {
+			return true
+		}
+	}
+	return false
+}
+
 // releaseTimeout bounds a detached release: long enough for a healthy store
 // to answer, short enough that a dead one does not hang a claim that is
 // already on its way out.
@@ -2689,6 +2716,19 @@ func (l *Loop) reapGhost(ctx context.Context, item queue.WorkItem, req forge.Lea
 			return forge.Lease{}, holder, "", false
 		}
 		if w.State == queue.StateClaimed {
+			return forge.Lease{}, holder, "", false
+		}
+		// Issue #233: a Waiting land-ready holder still naming the contested
+		// section is not a ghost — it is [Loop.acquireSections]'s partial
+		// acquisition, kept on purpose across the wait rather than released
+		// on a sibling section's busy name. Reaping it here would undo the
+		// very progress that scheme exists to preserve. The inference is
+		// convergent even for a genuine leak from a land-ready waiter: the
+		// owner is still in the queue and collects its own lease back on its
+		// next dispatch via the self-leak branch above, a parked or failed
+		// owner's reservation reaps below exactly as any other ghost's does,
+		// and the lease TTL bounds the rest.
+		if w.State == queue.StateWaiting && landReady(w) && holderNamesSectionRef(w, req.Ref) {
 			return forge.Lease{}, holder, "", false
 		}
 		state = string(w.State)
@@ -2799,7 +2839,11 @@ func (l *Loop) Claim(ctx context.Context, item queue.WorkItem) (queue.WorkItem, 
 // check, the sorted-order deadlock avoidance, and reapGhost's ghost-reaping
 // all keep their exact behavior — and wraps what it takes in a [SectionGrant]
 // for RunHolding to spend later. A non-empty busy or a non-nil err both mean
-// no grant was taken, matching leaseSections' own contract.
+// no grant comes back to the caller, matching leaseSections' own contract —
+// but since issue #233, that is no longer the same as "no lease is held": a
+// land-ready item naming more than one section (or none) may have already
+// taken some of what it asked for, and keeps it uncollected rather than
+// releasing it. See leaseSections and [Loop.acquireSections].
 func (l *Loop) TakeSections(ctx context.Context, item queue.WorkItem) (grant *SectionGrant, busy string, err error) {
 	release, leases, busy, err := l.leaseSections(ctx, item)
 	if release == nil {
@@ -2998,8 +3042,12 @@ func (l *Loop) recordLanding(ctx context.Context, item *queue.WorkItem, ws forge
 // taker so two units cannot deadlock over two sections. It returns a release
 // for what it holds and the leases themselves, keyed by section name, so a
 // resume notification can renew them (see [Loop.renewOnResume]); a non-empty
-// busy names the section somebody else holds, and who, and means nothing is
-// held. An error names a section the plan and the repository disagree about.
+// busy names the section somebody else holds, and who. Ordinarily that also
+// means nothing is held — but since issue #233 it does not, universally, for
+// a land-ready unit naming more than one section (or none): see
+// [Loop.acquireSections] for the partial grant it keeps instead of
+// releasing. An error names a section the plan and the repository disagree
+// about.
 func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release func(), leases map[string]forge.Lease, busy string, err error) {
 	// The pump's fairness rule, read before anything else here is touched: a
 	// unit reserved for an oldest waiter does not even try for a section this
@@ -3025,14 +3073,23 @@ func (l *Loop) leaseSections(ctx context.Context, item queue.WorkItem) (release 
 // acquireSections is leaseSections' core: it takes the leases for exactly
 // the names given, in one sorted order so two takers can never deadlock over
 // the same two sections, reaping a ghost the same way leaseSections always
-// has and releasing everything it took the moment one name is busy rather
-// than holding a partial set while it waits (it never waits at all — a busy
-// name is returned, not blocked on).
+// has. It never waits — a busy name is returned, not blocked on — and until
+// issue #233 it released everything it had taken the moment one name came
+// back busy. That is still what happens for most callers, but not all of
+// them: a land-ready item naming more than one section (or none) keeps
+// whatever it already took instead, because giving it back every tick is
+// exactly how such an item never gets two sections free at once under a
+// stream of newer, narrower work. See the keepPartial branch below and
+// [Loop.reapGhost]'s matching reservation check.
 //
 // Split out from leaseSections so a mid-claim widen (see [Loop.RunHolding]'s
 // escalation branch) can take only the sections an accepted escalation adds,
 // without re-acquiring — or re-validating YieldTo against — what the claim
-// already holds.
+// already holds. That escalation branch runs mid-build, before item.Built is
+// ever set on a fresh attempt, and with item.Unfinished still true on a
+// continued one — landReady is false either way, so keepPartial can never
+// fire there; the escalation's own acquireSections call always releases in
+// full on a busy name, exactly as before #233.
 func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names []string) (release func(), leases map[string]forge.Lease, busy string, err error) {
 	if len(names) == 0 {
 		return func() {}, nil, "", nil
@@ -3051,6 +3108,17 @@ func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names [
 			l.release(ctx, h, item.ID)
 		}
 	}
+	// Issue #233: a land-ready unit naming more than one section — or none,
+	// which [sectionsIntersect] already treats as every section, the same
+	// starvation shape only worse — keeps whatever it manages to take rather
+	// than handing it straight back the moment one more name is busy. A unit
+	// still building undoing its own progress every tick is merely slow; a
+	// unit that is DONE building and owes only a rebase and a push undoing
+	// its progress every tick never gets both sections free at once under a
+	// stream of fresh single-section builds, which is exactly the
+	// starvation this closes. What it keeps has no release handle: see the
+	// busy branch below.
+	keepPartial := landReady(item) && len(item.Sections) != 1
 	for _, n := range names {
 		req := forge.LeaseRequest{
 			Tenant: item.Tenant, Repo: l.Repo.Name, Ref: SectionRef(n), Run: item.ID, TTL: l.TTL,
@@ -3069,7 +3137,6 @@ func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names [
 				held[n] = fresh
 				continue
 			}
-			release()
 			reason := note
 			if reason == "" {
 				reason = "held"
@@ -3078,7 +3145,7 @@ func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names [
 				}
 			}
 			result := fmt.Sprintf("section %s of %s is %s", n, l.Repo.Name, reason)
-			if item.Built != "" && !item.Unfinished {
+			if landReady(item) {
 				// A land-ready wait owes a rebase and a push, never a build —
 				// losing that fact to the section-busy note makes a unit one
 				// step from landing read the same as one that has not started,
@@ -3088,6 +3155,25 @@ func (l *Loop) acquireSections(ctx context.Context, item queue.WorkItem, names [
 			if item.SectionWaits > 0 {
 				result += fmt.Sprintf("; waited %d turns", item.SectionWaits)
 			}
+			if keepPartial && len(held) > 0 {
+				// Not released: these sections stay leased under this run
+				// across the wait, with no handle returned for them to
+				// anyone. Named here because the busy note is the only
+				// operator-visible surface a queue card has for leases that
+				// otherwise show up nowhere. The owner's own next dispatch
+				// collects them via reapGhost's self-leak path; a parked or
+				// failed owner's reservation is reaped by the next contender
+				// exactly as any other ghost's is; the lease TTL backstops
+				// both.
+				got := make([]string, 0, len(held))
+				for hn := range held {
+					got = append(got, hn)
+				}
+				slices.Sort(got)
+				result += fmt.Sprintf("; %s already reserved for %s, held across this wait", strings.Join(got, ", "), item.ID)
+				return nil, nil, result, nil
+			}
+			release()
 			return nil, nil, result, nil
 		}
 		if err != nil {

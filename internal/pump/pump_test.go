@@ -1033,6 +1033,171 @@ func TestAStarvedHeadStillWinsOverALandReadyWaiter(t *testing.T) {
 	}
 }
 
+// TestATwoSectionLandReadyUnitAcquiresBothAndLandsRatherThanStarving is issue
+// #233 end to end: a land-ready unit naming two sections could acquire
+// neither, because it intersects every single-section head this scheme ever
+// names and so yielded far more than any single-section unit did, while
+// [loop.Loop.acquireSections] being all-or-nothing meant even winning
+// headship was not enough — one busy sibling name undid whatever it had
+// already taken. Here web is busy with something outside this tick's
+// candidate pool entirely (an in-flight build from before multi ever
+// starved, the shape headship alone cannot fix), and a fresh single-section
+// arrival for each of multi's sections shows up every tick, exactly the
+// stream the issue describes. multi keeps api across the wait instead of
+// releasing it, every fresh arrival yields to it rather than taking a
+// section out from under it, and once web frees, multi's own retry collects
+// api back (reapGhost's self-leak path, unchanged since #162) and lands.
+func TestATwoSectionLandReadyUnitAcquiresBothAndLandsRatherThanStarving(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	multi := w.submitItem(t, "multi-1", "fix module multi", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api", "web"}
+		wi.Built, wi.BuiltBase = "deadbeef", "cafebabe"
+		wi.PassedGates = []string{"post-land"}
+		wi.SectionWaits = 3
+	})
+	elsewhere := holdSection(t, w, "web", "wi-elsewhere")
+
+	freshAPI1 := w.submitItem(t, "fresh-api-1", "fix module fresh api 1", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+	})
+	freshWeb1 := w.submitItem(t, "fresh-web-1", "fix module fresh web 1", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"web"}
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
+	multi, err := w.q.Load(ctx, tn, multi.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multi.State != queue.StateWaiting {
+		t.Fatalf("blocked on web, multi should wait, got %s: %s", multi.State, multi.Note)
+	}
+	if !strings.Contains(multi.Note, "already reserved for "+multi.ID) {
+		t.Fatalf("multi's wait should name what it kept across the wait: %s", multi.Note)
+	}
+	freshAPI1, err = w.q.Load(ctx, tn, freshAPI1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshWeb1, err = w.q.Load(ctx, tn, freshWeb1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fresh := range []queue.WorkItem{freshAPI1, freshWeb1} {
+		if fresh.State != queue.StateWaiting || !strings.Contains(fresh.Note, "reserved for "+multi.ID) {
+			t.Fatalf("a fresh single-section arrival should yield to the two-section head, got %s: %s", fresh.State, fresh.Note)
+		}
+	}
+	if _, err := w.store.Leaser("pump-runner").Acquire(ctx, forge.LeaseRequest{
+		Tenant: tn, Repo: "app", Ref: loop.SectionRef("api"), Run: "probe", TTL: time.Hour,
+	}); err == nil {
+		t.Fatalf("api was released even though multi kept a partial grant")
+	}
+
+	freshAPI2 := w.submitItem(t, "fresh-api-2", "fix module fresh api 2", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+	})
+	freshWeb2 := w.submitItem(t, "fresh-web-2", "fix module fresh web 2", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"web"}
+	})
+	if err := w.store.Leaser("pump-runner").Release(ctx, elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
+	multi, err = w.q.Load(ctx, tn, multi.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multi.State != queue.StateDone {
+		t.Fatalf("multi should collect api back and land once web frees, got %s: %s", multi.State, multi.Note)
+	}
+	freshAPI2, err = w.q.Load(ctx, tn, freshAPI2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshWeb2, err = w.q.Load(ctx, tn, freshWeb2.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fresh := range []queue.WorkItem{freshAPI2, freshWeb2} {
+		if fresh.State != queue.StateWaiting {
+			t.Fatalf("a fresh single-section arrival must not take a section multi still needed this tick, got %s: %s", fresh.State, fresh.Note)
+		}
+	}
+}
+
+// TestATwoSectionLandReadyUnitBecomesHeadOfBothSectionsAtOnce is issue
+// #233's part (c), the #166 model extended: among candidates that have
+// already reached the starve bound, a land-ready unit naming more than one
+// section is preferred for headship over an ordinary single-section
+// starver — even one with a strictly HIGHER SectionWaits count, which the
+// old plain max-SectionWaits scan would have picked instead, leaving multi
+// (intersecting it on api) told to yield. Named head, multi covers both api
+// and web at once via the existing intersection-scoped YieldTo, so a fresh
+// single-section arrival for either of its sections yields to it in the very
+// tick it starves rather than taking a section out from under it first.
+func TestATwoSectionLandReadyUnitBecomesHeadOfBothSectionsAtOnce(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	multi := w.submitItem(t, "multi-2", "fix module multi", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api", "web"}
+		wi.Built, wi.BuiltBase = "deadbeef", "cafebabe"
+		wi.PassedGates = []string{"post-land"}
+		wi.SectionWaits = 3
+	})
+	singleAPI := w.submitItem(t, "single-api", "fix module single api", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.SectionWaits = 5
+	})
+	freshWeb := w.submitItem(t, "fresh-web", "fix module fresh web", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"web"}
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
+	multi, err := w.q.Load(ctx, tn, multi.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multi.State != queue.StateDone {
+		t.Fatalf("the two-section land-ready starver should be preferred for headship and land, got %s: %s", multi.State, multi.Note)
+	}
+	singleAPI, err = w.q.Load(ctx, tn, singleAPI.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshWeb, err = w.q.Load(ctx, tn, freshWeb.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []queue.WorkItem{singleAPI, freshWeb} {
+		if want.State != queue.StateWaiting || !strings.Contains(want.Note, "reserved for "+multi.ID) {
+			t.Fatalf("a single-section candidate naming one of multi's sections should yield to it, got %s: %s", want.State, want.Note)
+		}
+	}
+}
+
 // TestAHolderIsNeverOutrankedByALandReadyNonHolder extends the #143 holder
 // exemption to the new class: a holder is the only thing that can free its
 // own section, so it dispatches ahead of a land-ready non-holder contending

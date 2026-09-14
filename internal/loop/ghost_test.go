@@ -224,6 +224,83 @@ func TestASelfGhostSectionIsReapedWithAFreshToken(t *testing.T) {
 	}
 }
 
+// TestAWaitingLandReadyReservationIsNotAGhost is issue #233's part (b): a
+// Waiting land-ready holder still naming the contested section is
+// [Loop.acquireSections]'s partial grant, kept on purpose across the wait —
+// not a ghost, however identical the shape looks to reapGhost from the
+// outside. A contender waits behind it exactly as it would behind a
+// genuinely claimed run, and the section survives untouched.
+func TestAWaitingLandReadyReservationIsNotAGhost(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+
+	owner := e.submit(t, "reservation-owner", func(w *queue.WorkItem) { w.Sections = []string{"api", "web"} })
+	claimed, lease, err := q.Claim(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed.KeepCandidate("deadbeefdeadbeef", "base", nil)
+	owner, err = q.Wait(ctx, claimed, lease, "web is busy; api kept")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold(t, e, "api", owner.ID) // the partial grant acquireSections would have left behind
+
+	contender := e.submit(t, "waits-on-the-reservation", func(w *queue.WorkItem) { w.Sections = []string{"api"} })
+	contender, err = e.loop.Run(ctx, contender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contender.State != queue.StateWaiting {
+		t.Fatalf("a contender should wait behind a live reservation, got %s: %s", contender.State, contender.Note)
+	}
+	if !strings.Contains(contender.Note, "held by "+owner.ID) {
+		t.Fatalf("the wait should name the reservation's owner: %s", contender.Note)
+	}
+	if strings.Contains(contender.Note, "not running") {
+		t.Fatalf("a live reservation must not be described as a ghost: %s", contender.Note)
+	}
+	if _, ok, err := e.store.Leaser("runner-1").Inspect(ctx, tn, e.repo.Name, SectionRef("api")); err != nil {
+		t.Fatal(err)
+	} else if !ok {
+		t.Fatal("a live reservation must survive untouched, not be reaped out from under its Waiting owner")
+	}
+}
+
+// TestAParkedOwnersReservationStillReaps is issue #233's part (b), the other
+// side: the exemption above is narrow. Parked, an owner is never coming back
+// to collect its own lease, so its held section reaps exactly as any other
+// ghost's does — the convergent case the issue's design calls out: even a
+// genuine leak from a land-ready waiter is bounded by the next contender's
+// reap, or by the lease TTL, never left held forever.
+func TestAParkedOwnersReservationStillReaps(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	q := &queue.Queue{Store: e.store, Runner: "runner-1", TTL: time.Hour}
+
+	owner := e.submit(t, "parked-owner", func(w *queue.WorkItem) { w.Sections = []string{"api", "web"} })
+	claimed, lease, err := q.Claim(ctx, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed.KeepCandidate("deadbeefdeadbeef", "base", nil)
+	owner, err = q.Park(ctx, claimed, lease, queue.SeverityMedium, "gate could not answer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold(t, e, "api", owner.ID)
+
+	contender := e.submit(t, "reaps-a-parked-reservation", func(w *queue.WorkItem) { w.Sections = []string{"api"} })
+	contender, err = e.loop.Run(ctx, contender)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if contender.State != queue.StateDone {
+		t.Fatalf("a parked owner's reservation should reap like any other ghost, got %s: %s", contender.State, contender.Note)
+	}
+}
+
 // TestAnUnclassifiableHolderIsNeverReaped is issue #162's "unknown never
 // reads as zero" rule: a section held by a run this store has never heard
 // of — queue.Load fails rather than answering with a state — must be left

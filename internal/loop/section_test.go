@@ -115,6 +115,63 @@ func TestALandReadyUnitDeferredByAHeldSectionNamesTheOwedRebase(t *testing.T) {
 	}
 }
 
+// TestALandReadyMultiSectionUnitKeepsWhatItAlreadyTook is issue #233's part
+// (a): a land-ready unit naming more than one section no longer gives back
+// what it managed to take the moment a sibling name comes back busy. It
+// waits with api still held under its own run — the busy note names both
+// what blocked it and what it kept — and once web frees, its own retry
+// collects api back through reapGhost's self-leak path (issue #162's
+// mechanism, unchanged) rather than re-losing the race, and finishes with
+// both sections.
+func TestALandReadyMultiSectionUnitKeepsWhatItAlreadyTook(t *testing.T) {
+	e := sectioned(t)
+	ctx := context.Background()
+	holder := hold(t, e, "web", "wi-elsewhere")
+
+	multi := e.submit(t, "multi-1", func(w *queue.WorkItem) {
+		w.Sections = []string{"api", "web"}
+		w.Built = "deadbeefdeadbeef"
+		w.BuiltBase = "base"
+	})
+	multi, err := e.loop.Run(ctx, multi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multi.State != queue.StateWaiting {
+		t.Fatalf("blocked on one of two sections should wait, got %s: %s", multi.State, multi.Note)
+	}
+	for _, want := range []string{"section web", "held by wi-elsewhere", "already reserved for " + multi.ID} {
+		if !strings.Contains(multi.Note, want) {
+			t.Errorf("the wait does not say %q: %s", want, multi.Note)
+		}
+	}
+	// api is kept, not given back: a probe cannot take it out from under the
+	// waiting unit the way it could a whole-repository unit's (see
+	// TestAnUnsectionedUnitIsTheWholeRepository, unaffected by this since it
+	// is never land-ready).
+	if _, err := e.store.Leaser("runner-1").Acquire(ctx, forge.LeaseRequest{
+		Tenant: tn, Repo: e.repo.Name, Ref: SectionRef("api"), Run: "probe", TTL: time.Hour,
+	}); err == nil {
+		t.Fatalf("api was released even though the unit kept a partial grant")
+	}
+
+	if err := e.store.Leaser("runner-1").Release(ctx, holder); err != nil {
+		t.Fatal(err)
+	}
+	multi, err = e.loop.Run(ctx, multi)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if multi.State != queue.StateDone {
+		t.Fatalf("want done once web frees and api is collected back, got %s: %s", multi.State, multi.Note)
+	}
+	if _, err := e.store.Leaser("runner-1").Acquire(ctx, forge.LeaseRequest{
+		Tenant: tn, Repo: e.repo.Name, Ref: SectionRef("api"), Run: "probe", TTL: time.Hour,
+	}); err != nil {
+		t.Fatalf("api still held after the unit settled: %v", err)
+	}
+}
+
 // TestAnUnsectionedUnitIsTheWholeRepository. A unit that names no section
 // leases every declared one, so it can never run beside a sectioned unit —
 // in either order.
