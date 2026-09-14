@@ -282,12 +282,18 @@ type drainCandidate struct {
 
 // settledFilter reports whether err is one the queue has already recorded
 // the reason for — "not now" (stopped, blocked, held) or "not ever"
-// (a dependency failed) — so neither Drain's own dispatch-time errors nor a
-// run goroutine's outcome treat it as a failure worth surfacing.
+// (a dependency failed, or a stale claim a successor already superseded) —
+// so neither Drain's own dispatch-time errors nor a run goroutine's outcome
+// treat it as a failure worth surfacing. queue.ErrSuperseded is the same
+// shape as the rest: [loop.Loop.dropped] already narrated it on the item's
+// own chain (issue #266), so surfacing it again here as a pump-level error
+// would draw an operator's eye to a build that was never going to resurrect
+// anything.
 func settledFilter(err error) bool {
 	return err == nil || errors.Is(err, queue.ErrStopped) ||
 		errors.Is(err, queue.ErrBlocked) ||
 		errors.Is(err, queue.ErrDependencyFailed) ||
+		errors.Is(err, queue.ErrSuperseded) ||
 		errors.Is(err, forge.ErrHeld)
 }
 

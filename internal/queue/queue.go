@@ -526,6 +526,18 @@ var ErrDependencyFailed = errors.New("queue: dependency parked or failed")
 // how one unreadable chain became a new queued record on every tick.
 var ErrNoItem = errors.New("queue: no such item")
 
+// ErrSuperseded reports that the lease presented to a settle transition
+// (Wait, Park, ParkKeeping, Done, Fail, HandOff) no longer names the
+// outstanding grant over this item's claim: a successor — [Queue.Recover]'s
+// re-Claim, or another Resolve/Retry off the exception queue — has already
+// taken the item's fate out of this caller's hands. Writing this caller's
+// outcome anyway is how a resolved item became "waiting" again for hours on
+// the dogfood (issue #266): a stale builder's abort-retry outlived the
+// operator's Resolve and overwrote it the moment it finally returned. A
+// superseded holder's outcome is not evidence about the item, so the
+// transition writes nothing and releases nothing.
+var ErrSuperseded = errors.New("queue: claim superseded — outcome is not evidence about the item")
+
 // stateKinds are the record kinds whose body is the WHOLE work item.
 //
 // An item's chain carries two sorts of record and always has. The state
@@ -762,6 +774,46 @@ func (q *Queue) Claim(ctx context.Context, w WorkItem) (WorkItem, forge.Lease, e
 	return w, lease, nil
 }
 
+// fence refuses a settle transition whose lease no longer names the
+// outstanding grant over w's claim — the same doctrine [docs/PLAN.md] §6
+// states for landing ("landing is fenced by the lease token and an
+// expected-old-value push"), extended here to every settle transition: the
+// lease token, not the clock, decides whose outcome counts.
+//
+// It fences by token rather than by calling Renew, deliberately: the sqlite
+// store's Renew reports [forge.ErrExpired] for a claim that is merely past
+// its nominal TTL and unsuperseded, nothing renews a lease while a build
+// runs, and the claim TTL commonly equals the build timeout — so a
+// Renew-based fence would refuse a build that is still legitimately running,
+// not just one a successor has actually taken. Inspect instead reports an
+// expired-but-unsuperseded grant as outstanding by design (see
+// [forge.Leaser.Inspect]), which is exactly the "still mine, just slow" case
+// this fence must let settle. ok=false — the row was never leased, or a
+// successor already claimed AND released it (Resolve and Retry both leave
+// the row released) — is refused exactly as a token mismatch is: either way,
+// somebody else's Acquire came after this caller's.
+//
+// A zero-value lease is never fenced. Production claims always carry a
+// nonzero token — sqlite's Acquire starts the counter at 1 and only ever
+// increments it, and every settle call in [loop.Loop.RunHolding] is handed
+// the lease [Queue.Claim] returned — so Token 0 only reaches here from a
+// caller that never held a claim to begin with (tests that settle directly,
+// or [Loop.Run]'s placeholder lease before RunHolding claims for real).
+// Fencing that case would refuse a legitimate settle, not a superseded one.
+func (q *Queue) fence(ctx context.Context, w WorkItem, lease forge.Lease) error {
+	if lease.Token == 0 {
+		return nil
+	}
+	outstanding, ok, err := q.Store.Leaser(q.Runner).Inspect(ctx, w.Tenant, ClaimRepo, ClaimRef(w.ID))
+	if err != nil {
+		return err
+	}
+	if !ok || outstanding.Token != lease.Token {
+		return ErrSuperseded
+	}
+	return nil
+}
+
 // Park moves the item to the exception queue and frees its claim. The
 // exception index is what the control room lists; an unparked exception queue
 // is a factory nobody can triage.
@@ -789,6 +841,9 @@ func (q *Queue) ParkKeeping(ctx context.Context, w WorkItem, lease forge.Lease, 
 }
 
 func (q *Queue) park(ctx context.Context, w WorkItem, lease forge.Lease, sev Severity, reason string, dropResume bool) (WorkItem, error) {
+	if err := q.fence(ctx, w, lease); err != nil {
+		return w, err
+	}
 	w.State, w.Note, w.Severity = StateParked, reason, sev.OrDefault()
 	if dropResume {
 		w.dropResume()
@@ -834,6 +889,9 @@ func (w *WorkItem) KeepUnfinished(head, base forge.Commit) {
 // gate answers. It keeps any resume point the caller set on the item — see
 // [WorkItem.Built].
 func (q *Queue) Wait(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
+	if err := q.fence(ctx, w, lease); err != nil {
+		return w, err
+	}
 	w.State, w.Note = StateWaiting, reason
 	err := q.record(ctx, w, "waiting", w.ID, reason)
 	q.Store.Leaser(q.Runner).Release(ctx, lease)
@@ -889,6 +947,9 @@ func (q *Queue) AnswerReplan(ctx context.Context, w WorkItem, note string) (Work
 // and a bound a stage has to remember to increment is a bound that stops
 // binding the first time somebody adds a second call site.
 func (q *Queue) HandOff(ctx context.Context, w WorkItem, lease forge.Lease, reason string) (WorkItem, error) {
+	if err := q.fence(ctx, w, lease); err != nil {
+		return w, err
+	}
 	w.State, w.Note = StateHandedOff, reason
 	w.Hops++
 	err := q.record(ctx, w, "handedoff", w.ID, reason)
@@ -927,6 +988,9 @@ func (q *Queue) Retain(ctx context.Context, w WorkItem, lease forge.Lease, prior
 // Done settles the item, keyed by the commit it produced — the record an
 // auditor sampling that sha will pull first.
 func (q *Queue) Done(ctx context.Context, w WorkItem, lease forge.Lease, head forge.Commit) (WorkItem, error) {
+	if err := q.fence(ctx, w, lease); err != nil {
+		return w, err
+	}
 	w.State, w.Head = StateDone, string(head)
 	w.dropResume()
 	err := q.record(ctx, w, "done", string(head), "")
@@ -975,6 +1039,9 @@ func (q *Queue) releaseDependents(ctx context.Context, t tenant.ID, id string) e
 // reason. An infrastructure failure throws away nothing a reviewer already
 // looked at; only the change itself does.
 func (q *Queue) Fail(ctx context.Context, w WorkItem, lease forge.Lease, cause Cause, reason string) (WorkItem, error) {
+	if err := q.fence(ctx, w, lease); err != nil {
+		return w, err
+	}
 	w.State, w.Note, w.FailCause = StateFailed, reason, cause.OrDefault()
 	if w.FailCause == CauseChange {
 		w.dropResume()

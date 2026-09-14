@@ -902,8 +902,8 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 							if busy != "" {
 								item.Sections = widened
 								note := fmt.Sprintf("widening for %s needs a section that is busy: %s", esc.Error(), busy)
-								item, _ = q.Wait(ctx, item, claim, note)
-								return l.settle(ctx, item), nil
+								item, werr := q.Wait(ctx, item, claim, note)
+								return l.settleOrDrop(ctx, item, werr)
 							}
 							defer releaseExtra()
 							held.setSections(extraLeases)
@@ -949,6 +949,9 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 							})
 							l.record(ctx, item, "replan-requested", item.ID, string(replanBody))
 							item, werr := q.AwaitReplan(ctx, item, claim, esc.Error())
+							if errors.Is(werr, queue.ErrSuperseded) {
+								return l.dropped(ctx, item, werr)
+							}
 							if werr != nil {
 								return item, fmt.Errorf("loop: awaiting replan: %w", werr)
 							}
@@ -957,8 +960,8 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 					}
 					// An agent declining is a considered act, not an emergency:
 					// somebody has to read it, and it can wait for the morning.
-					item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, esc.Error())
-					return l.settle(ctx, item), nil
+					item, perr := q.Park(ctx, item, claim, queue.SeverityMedium, esc.Error())
+					return l.settleOrDrop(ctx, item, perr)
 				}
 				var ab *Aborted
 				if errors.As(serr, &ab) {
@@ -983,21 +986,21 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 							item.SuspendResume = true
 							note := fmt.Sprintf("build aborted by a machine suspend of %s mid-turn: resuming the same session next attempt: %s",
 								gap, ab.Reason)
-							item, _ = q.Wait(ctx, item, claim, note)
-							return l.settle(ctx, item), nil
+							item, werr := q.Wait(ctx, item, claim, note)
+							return l.settleOrDrop(ctx, item, werr)
 						}
 					}
 					if item.AbortedTries < MaxAbortedRetries {
 						item.AbortedTries++
 						note := fmt.Sprintf("build aborted (retry %d of %d): %s",
 							item.AbortedTries, MaxAbortedRetries, ab.Reason)
-						item, _ = q.Wait(ctx, item, claim, note)
-						return l.settle(ctx, item), nil
+						item, werr := q.Wait(ctx, item, claim, note)
+						return l.settleOrDrop(ctx, item, werr)
 					}
-					item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+					item, perr := q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
 						"build aborted %d times without finishing, and the limit is %d retries — parking rather than trying again: %s",
 						item.AbortedTries+1, MaxAbortedRetries, ab.Reason))
-					return l.settle(ctx, item), nil
+					return l.settleOrDrop(ctx, item, perr)
 				}
 				var ws *WindowSpent
 				if errors.As(serr, &ws) {
@@ -1010,20 +1013,20 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 						if item.DeferredTries < MaxWindowDefers {
 							item.DeferredTries++
 							note := fmt.Sprintf("waiting for the account window, resumes at %s", resetsAt.Format(time.RFC3339))
-							item, _ = q.Wait(ctx, item, claim, note)
-							return l.settle(ctx, item), nil
+							item, werr := q.Wait(ctx, item, claim, note)
+							return l.settleOrDrop(ctx, item, werr)
 						}
-						item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+						item, perr := q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
 							"deferred for the account window %d times without finishing, and the limit is %d — parking rather than waiting again: %s",
 							item.DeferredTries+1, MaxWindowDefers, ws.Error()))
-						return l.settle(ctx, item), nil
+						return l.settleOrDrop(ctx, item, perr)
 					}
 					// Unknown never reads as zero: no reset named and no
 					// account window on record either, so this takes the
 					// same park path any other build error would.
 				}
-				item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, "build: "+serr.Error())
-				return l.settle(ctx, item), nil
+				item, perr := q.Park(ctx, item, claim, queue.SeverityMedium, "build: "+serr.Error())
+				return l.settleOrDrop(ctx, item, perr)
 			}
 		}
 
@@ -1404,6 +1407,9 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	l.recordLanding(ctx, &item, ws, base, head)
 	item.Cost = l.landingCost(ctx, item, ws)
 	item, err = q.Done(ctx, item, claim, head)
+	if errors.Is(err, queue.ErrSuperseded) {
+		return l.dropped(ctx, item, err)
+	}
 	l.recordIssueClosed(ctx, item, cs, landing)
 	return l.settle(ctx, item), err
 }
@@ -1740,6 +1746,9 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 			item.Note = "landed green on re-run; flaky check recorded: " + reason
 			item.Cost = l.landingCost(ctx, item, ws)
 			item, derr := q.Done(ctx, item, claim, head)
+			if errors.Is(derr, queue.ErrSuperseded) {
+				return l.dropped(ctx, item, derr)
+			}
 			return l.settle(ctx, item), derr
 		}
 		note := "landed red: " + reason
@@ -1779,6 +1788,9 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		item.Note = note
 		item.Cost = l.landingCost(ctx, item, ws)
 		item, derr := q.Done(ctx, item, claim, head)
+		if errors.Is(derr, queue.ErrSuperseded) {
+			return l.dropped(ctx, item, derr)
+		}
 		return l.settle(ctx, item), derr
 	}
 
@@ -1786,6 +1798,9 @@ func (l *Loop) runOptimistic(ctx context.Context, q *queue.Queue, item queue.Wor
 		checks.Status{Green: true, Lane: string(forge.LaneOptimistic)}, l.Runner)
 	item.Cost = l.landingCost(ctx, item, ws)
 	item, derr := q.Done(ctx, item, claim, head)
+	if errors.Is(derr, queue.ErrSuperseded) {
+		return l.dropped(ctx, item, derr)
+	}
 	return l.settle(ctx, item), derr
 }
 
@@ -2008,10 +2023,10 @@ func (l *Loop) handOff(ctx context.Context, q *queue.Queue, item queue.WorkItem,
 		// is a judgement — and judgements are what the exception queue is for.
 		// The reason is named rather than summarised: "handed off too often"
 		// tells nobody what the sessions were trying to do.
-		item, _ = q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
+		item, perr := q.Park(ctx, item, claim, queue.SeverityMedium, fmt.Sprintf(
 			"handed off %d times without finishing, and the limit is %d — parking rather than opening another session: %s",
 			item.Hops, limit, h.Reason))
-		return l.settle(ctx, item), nil
+		return l.settleOrDrop(ctx, item, perr)
 	}
 	if h.Commit != "" && h.Commit != base {
 		// What the session got to, kept for its successor. Nothing landed and
@@ -2564,6 +2579,44 @@ func (l *Loop) settle(ctx context.Context, item queue.WorkItem) queue.WorkItem {
 		l.record(ctx, item, "handoff-failed", item.ID, err.Error())
 	}
 	return item
+}
+
+// settleOrDrop finishes a settle attempt whose error every call site here
+// used to discard outright — item, _ = q.Wait(...), then straight into
+// l.settle and a nil return, whatever the queue actually decided. Before
+// issue #266's fence in [queue.Queue.Wait] and its siblings, that error was
+// always nil anyway, so the shortcut cost nothing; the fence changed that; a
+// stale build's Wait now legitimately refuses with [queue.ErrSuperseded]
+// once a successor — Resolve, Retry, or Recover's own re-Claim — has
+// already decided the item's fate, and running the handoff hook over it
+// (and reporting success) is the very resurrection this issue is about.
+//
+// item is whatever the settle call handed back: on [queue.ErrSuperseded]
+// that is the fence's unmutated input, still the claim's state from before
+// this attempt (never Waiting, Parked, Handed-off, or Failed), so
+// RunHolding's deferred Hold/Discard switch discards the workspace rather
+// than holding a tree for an item that will never resume. Any other error
+// is left to the existing, unchanged behaviour: proceed to settle, report
+// success — narrower than reworking nine call sites' error handling for a
+// failure mode this issue was never about.
+func (l *Loop) settleOrDrop(ctx context.Context, item queue.WorkItem, err error) (queue.WorkItem, error) {
+	if errors.Is(err, queue.ErrSuperseded) {
+		return l.dropped(ctx, item, err)
+	}
+	return l.settle(ctx, item), nil
+}
+
+// dropped narrates a settle this run lost the right to make: one record on
+// the item's own chain, kind "superseded", not a state-fold kind (see
+// [queue.StateRecord]) so it changes nothing about what the item folds to —
+// only what a reader asks "what happened to this attempt" can find. A paid
+// build whose outcome vanished with no trace would be worse than the extra
+// record. Wrapped in the returned error so [errors.Is] still finds
+// [queue.ErrSuperseded] through it — the same check pump.runTally uses to
+// keep this off its surfaced-error path.
+func (l *Loop) dropped(ctx context.Context, item queue.WorkItem, cause error) (queue.WorkItem, error) {
+	l.record(ctx, item, "superseded", item.ID, cause.Error())
+	return item, fmt.Errorf("loop: item %s: %w", item.ID, cause)
 }
 
 func (l *Loop) record(ctx context.Context, item queue.WorkItem, kind, subject, body string) {
