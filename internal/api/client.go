@@ -193,6 +193,28 @@ func (c *Client) PlanDiff(ctx context.Context, ref, other string) (plan.Delta, e
 	return out, c.do(ctx, "GET", "/v1/plans/"+ref+"/diff/"+other, nil, &out)
 }
 
+// Origins is the audit's door: every origination whose delivery key equals
+// key or extends it with a '-suffix', newest first, each with its whole
+// story.
+func (c *Client) Origins(ctx context.Context, key string) ([]control.OriginStory, error) {
+	var out []control.OriginStory
+	return out, c.do(ctx, "GET", "/v1/origins/"+key, nil, &out)
+}
+
+// OriginsByIssue is [Client.Origins] keyed by the GitHub issue number the
+// route admitted it under.
+func (c *Client) OriginsByIssue(ctx context.Context, n string) ([]control.OriginStory, error) {
+	var out []control.OriginStory
+	return out, c.do(ctx, "GET", "/v1/issues/"+n, nil, &out)
+}
+
+// OriginsByPR is the derived reverse lookup: every origination whose story
+// contains a landing that opened this PR number.
+func (c *Client) OriginsByPR(ctx context.Context, n string) ([]control.OriginStory, error) {
+	var out []control.OriginStory
+	return out, c.do(ctx, "GET", "/v1/prs/"+n, nil, &out)
+}
+
 // OpenIngress is the delegation verb.
 func (c *Client) OpenIngress(ctx context.Context, route, key, payload, summary string) (OpenIngressResponse, error) {
 	var out OpenIngressResponse
