@@ -474,7 +474,7 @@ const plannerContract = `
 ## Your answer
 You are planning, not building: read what you need to decide how this origination becomes units of work, and edit nothing. Reply with ONE JSON object as the last thing in your message:
 
-{"units":[{"id":"api-endpoint","task":"...","summary":"...","sections":["api"],"depends_on":[{"on":"schema","for":"db.UsersTable"}],"model":"","attempts":0}],"why":"one paragraph"}
+{"units":[{"id":"api-endpoint","task":"...","summary":"...","sections":["api"],"depends_on":[{"on":"schema","for":"db.UsersTable"}],"model":"","attempts":0,"priority":""}],"why":"one paragraph"}
 
 - Prefer one unit. Split only where two units can be built and verified independently, or where one must land before another can start.
 - id: a plain token, unique in this plan. task: the complete instruction a builder needs, self-contained — the builder will not see this conversation.
@@ -483,6 +483,7 @@ You are planning, not building: read what you need to decide how this originatio
 - depends_on: a unit depends on another ONLY when it compiles or tests against code that unit lands — ideas, names and conventions are not dependencies, the task text carries them. Prefer units in disjoint sections with no edges between them, so they run side by side rather than in a chain. Each edge is {"on": the id it waits for, "for": the symbol or file it waits for} — never a bare id; a dependency with nothing to name in "for" is not a dependency.
 - model: leave empty unless the unit is trivial enough for a cheaper tier or hard enough to need a stronger one; a value the harness lists.
 - attempts: leave at 0 to inherit the box's default budget; set a small integer only when the unit's difficulty warrants more or fewer tries than that default.
+- priority: one of low, normal, high, urgent. Leave empty to inherit the origination's priority — the default posture, and right for nearly every unit. Set it only when this unit's own urgency genuinely differs from its origination's (a hotfix split out of a routine chore, or a speculative follow-up split out of an urgent one), and say why in "why".
 - If the origination is a question, a decision, or already satisfied by the code as it stands, do not plan: reply with a single line starting with ESCALATE: and the reason.
 `
 
@@ -560,6 +561,7 @@ type planAnswer struct {
 		DependsOn []dependsOnEdge `json:"depends_on"`
 		Model     string          `json:"model"`
 		Attempts  int             `json:"attempts"`
+		Priority  string          `json:"priority"`
 	} `json:"units"`
 	Why string `json:"why"`
 }
@@ -632,6 +634,11 @@ func parsePlan(text string, repo forge.Repo) ([]plan.Node, error) {
 				return nil, fmt.Errorf("unit %s names section %q, which repository %s does not declare (declared: %v)", u.ID, s, repo.Name, repo.SectionNames())
 			}
 		}
+		switch queue.Priority(u.Priority) {
+		case "", queue.PriorityLow, queue.PriorityNormal, queue.PriorityHigh, queue.PriorityUrgent:
+		default:
+			return nil, fmt.Errorf("unit %s names priority %q — the levels are low, normal, high, urgent", u.ID, u.Priority)
+		}
 		deps := make([]string, 0, len(u.DependsOn))
 		var reasons map[string]string
 		for _, d := range u.DependsOn {
@@ -647,7 +654,7 @@ func parsePlan(text string, repo forge.Repo) ([]plan.Node, error) {
 			}
 			reasons[d.On] = strings.TrimSpace(d.For)
 		}
-		nodes = append(nodes, plan.Node{ID: u.ID, Task: strings.TrimSpace(u.Task), Summary: strings.TrimSpace(u.Summary), Sections: u.Sections, DependsOn: deps, EdgeReasons: reasons, Model: strings.TrimSpace(u.Model), Attempts: u.Attempts})
+		nodes = append(nodes, plan.Node{ID: u.ID, Task: strings.TrimSpace(u.Task), Summary: strings.TrimSpace(u.Summary), Sections: u.Sections, DependsOn: deps, EdgeReasons: reasons, Model: strings.TrimSpace(u.Model), Attempts: u.Attempts, Priority: queue.Priority(u.Priority)})
 	}
 	return nodes, nil
 }

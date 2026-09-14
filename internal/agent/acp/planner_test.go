@@ -17,6 +17,7 @@ import (
 	"github.com/ChristopherDavenport/project-box/internal/knowledge"
 	"github.com/ChristopherDavenport/project-box/internal/loop"
 	"github.com/ChristopherDavenport/project-box/internal/plan"
+	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/seat"
 )
 
@@ -380,6 +381,66 @@ func TestAPlanCarriesPerUnitAttempts(t *testing.T) {
 	}
 	if nodes[1].Attempts != 0 {
 		t.Fatalf("a unit that names no attempts must inherit, not carry a stray budget: %+v", nodes[1])
+	}
+}
+
+// TestAPlanCarriesPerUnitPriority: issue #115 part 3 — a unit that names its
+// own priority parses into [plan.Node.Priority], and a unit that names none
+// parses to empty rather than a stray default, so it inherits the
+// origination's priority downstream via [plan.Items].
+func TestAPlanCarriesPerUnitPriority(t *testing.T) {
+	repo := forge.Repo{Name: "app", Sections: []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
+	}}
+	text := "```json\n" +
+		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","summary":"Widgets endpoint","sections":["api"],"depends_on":[],"priority":"urgent"},` +
+		`{"id":"room-view","task":"Render widgets","summary":"Widgets view","sections":["api"],"depends_on":[{"on":"api-endpoint","for":"the widget response type"}]}],"why":"two units"}` +
+		"\n```"
+	nodes, err := parsePlan(text, repo)
+	if err != nil {
+		t.Fatalf("parsePlan: %v", err)
+	}
+	if len(nodes) != 2 || nodes[0].Priority != queue.PriorityUrgent {
+		t.Fatalf("the unit's priority was lost: %+v", nodes)
+	}
+	if nodes[1].Priority != "" {
+		t.Fatalf("a unit that names no priority must inherit, not carry a stray default: %+v", nodes[1])
+	}
+}
+
+// TestAnUnrecognisedPriorityIsRefused: an unrecognised priority is refused in
+// the planner's own terms, naming the unit and the four allowed levels — the
+// same wording [plan.Node]'s own validation in the plan package uses for the
+// same mistake made by a stored node instead of a fresh answer.
+func TestAnUnrecognisedPriorityIsRefused(t *testing.T) {
+	repo := forge.Repo{Name: "app", Sections: []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
+	}}
+	text := "```json\n" +
+		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","summary":"Widgets endpoint","sections":["api"],"depends_on":[],"priority":"banana"}],"why":"one unit"}` +
+		"\n```"
+	_, err := parsePlan(text, repo)
+	if err == nil || !strings.Contains(err.Error(), "api-endpoint") || !strings.Contains(err.Error(), "low, normal, high, urgent") {
+		t.Fatalf("an unrecognised priority was not refused: %v", err)
+	}
+}
+
+// TestAPlanWithNoPriorityKeyStillParses: an old planner's answer that
+// predates this field carries no "priority" key at all, not even an empty
+// one — the schema change is additive, so that answer must still parse.
+func TestAPlanWithNoPriorityKeyStillParses(t *testing.T) {
+	repo := forge.Repo{Name: "app", Sections: []forge.Section{
+		{Name: "api", Purpose: "the HTTP surface", Paths: []string{"internal/api"}},
+	}}
+	text := "```json\n" +
+		`{"units":[{"id":"api-endpoint","task":"Add GET /v1/widgets","summary":"Widgets endpoint","sections":["api"],"depends_on":[]}],"why":"one unit"}` +
+		"\n```"
+	nodes, err := parsePlan(text, repo)
+	if err != nil {
+		t.Fatalf("parsePlan: %v", err)
+	}
+	if len(nodes) != 1 || nodes[0].Priority != "" {
+		t.Fatalf("a pre-priority answer must still parse, inheriting downstream: %+v", nodes)
 	}
 }
 
