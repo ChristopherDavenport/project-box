@@ -169,6 +169,45 @@ boxes:
 	}
 }
 
+// TestMaxJudgementsLoads: the judgement seat pool is configurable separately
+// from max_concurrent's build seats, and staying silent about it is not the
+// same as setting it to zero.
+func TestMaxJudgementsLoads(t *testing.T) {
+	c, err := Load(writeCfg(t, `
+tenant: acme
+budget:
+  max_judgements: 2
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Budget.MaxJudgements != 2 {
+		t.Fatalf("max judgements = %d, want 2", c.Budget.MaxJudgements)
+	}
+
+	c, err = Load(writeCfg(t, `
+tenant: acme
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Budget.MaxJudgements != 0 {
+		t.Fatalf("max judgements with the key absent = %d, want 0", c.Budget.MaxJudgements)
+	}
+}
+
 // TestCredentialRefusesUnknownSpellings: budget.credential offers exactly
 // plan or key, absent included; anything else is refused naming what it
 // offers.

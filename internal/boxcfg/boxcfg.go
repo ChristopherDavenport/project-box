@@ -150,6 +150,12 @@ func (r Retention) KeepForDuration() time.Duration {
 // Budget mirrors capacity.Budget in config form.
 type Budget struct {
 	MaxConcurrent int `yaml:"max_concurrent"`
+	// MaxJudgements bounds simultaneous judgement (planner) runs, separate
+	// from MaxConcurrent's build seats: planning and building are different
+	// work with different costs. Zero means one, so a judgement can always
+	// run without spending a build seat — today's behaviour is the floor;
+	// see issue #202.
+	MaxJudgements int `yaml:"max_judgements"`
 	MaxPerWindow  int `yaml:"max_per_window"`
 	// MaxTokensPerWindow is the VOLUME brake — how many tokens an hour the
 	// factory may push through a provider; zero means unbounded.

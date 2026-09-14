@@ -242,6 +242,7 @@ func New(path string) (*Daemon, error) {
 		return nil, err
 	}
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: cfg.Budget.MaxConcurrent,
+		MaxJudgements:      cfg.Budget.MaxJudgements,
 		MaxPerWindow:       cfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: cfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   cfg.MaxCostMicros(),
@@ -779,6 +780,7 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 	d.API.SetRoutes(routes)
 	d.API.SetActorClaims(ncfg.ActorClaims)
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
+		MaxJudgements:      ncfg.Budget.MaxJudgements,
 		MaxPerWindow:       ncfg.Budget.MaxPerWindow,
 		MaxTokensPerWindow: ncfg.Budget.MaxTokensPerWindow,
 		MaxCostPerWindow:   ncfg.MaxCostMicros(),
