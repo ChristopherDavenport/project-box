@@ -149,8 +149,16 @@ type ChangeSet struct {
 	// rather than merely comment on it. This package has no notion of a plan
 	// or a sibling unit — it only carries what the loop already worked out.
 	CompletesPlan bool
-	Members       []Member
-	Created       time.Time
+	// CIRerunsLeft is the rerun budget a Lander that waits on independent CI
+	// (git.PRLander) may spend on this ChangeSet's head before a red
+	// conclusion is final, asserted by the LOOP and never derived here — the
+	// same treatment CompletesPlan gets, and for the same reason: this
+	// package has no notion of how many reruns a flake is worth. Zero means
+	// no rerun may be requested; a Lander that spends one decrements it for
+	// the next tick's ChangeSet, not this one.
+	CIRerunsLeft int
+	Members      []Member
+	Created      time.Time
 	// Verdicts is the gate decision that cleared this ChangeSet to land,
 	// carried from the loop's gate resolution into Land so a Lander that
 	// talks to a code host (git.PRLander) can publish it there — a reader on

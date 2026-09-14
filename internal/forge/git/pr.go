@@ -137,6 +137,21 @@ func (p *PRLander) Land(ctx context.Context, cs forge.ChangeSet) (forge.Landing,
 				}
 			}
 		}
+
+		// The commit now exists on GitHub (the run-branch push above), which
+		// is what independent CI triggers off — but the fenced push that
+		// would put it on the base branch has not happened yet, so a red or
+		// still-running independent CI can still stop it here rather than
+		// only after the fact. This is deliberately not a gate: a gate runs
+		// before landing even begins, and the commit this asks GitHub about
+		// is not on GitHub until PRLander's own run-branch push, the same
+		// ordering box/check already lives inside Land for. It is a
+		// precondition of the fence, keyed to mem.Head the same way every
+		// check and record in this function already is (docs/PLAN.md §6
+		// "Approvals bind to a commit").
+		if err := p.awaitIndependentCI(ctx, cs, mem, tok, owner, name); err != nil {
+			return forge.Landing{}, err
+		}
 	}
 
 	landing, err := p.inner.Land(ctx, cs)
@@ -533,6 +548,169 @@ func (p *PRLander) EnsureRequest(ctx context.Context, cs forge.ChangeSet, mem fo
 		return "", fmt.Errorf("git: ensure request: %w", err)
 	}
 	return prURL, nil
+}
+
+// CIPending reports that GitHub's independently-triggered CI for Sha has not
+// answered yet — either nothing has run at all (URL empty: unknown never
+// reads as zero, so zero workflow runs is pending, never a pass) or a run is
+// still queued or in progress (URL names it). [PRLander.Land] returns this
+// without calling the wrapped Lander: nothing is pushed to base, and Land is
+// already re-enterable — pushRunBranch is skipped by runBranchAtHead when
+// the branch is already at head, and ensurePR reuses the open PR — so a
+// later call re-checks rather than re-pushing. RerunSpent is true when this
+// Pending is itself the result of a rerun this call just requested against a
+// red run, so a caller reading the error can tell "still waiting on the
+// first answer" from "still waiting after asking GitHub to try again."
+type CIPending struct {
+	Sha        string
+	URL        string
+	RerunSpent bool
+}
+
+func (e *CIPending) Error() string {
+	if e.URL == "" {
+		return fmt.Sprintf("git: pr: independent ci for %s has not reported", e.Sha)
+	}
+	return fmt.Sprintf("git: pr: independent ci for %s still running: %s", e.Sha, e.URL)
+}
+
+// CIFailed reports that GitHub's independently-triggered CI for Sha
+// concluded failure with no rerun budget left (forge.ChangeSet.CIRerunsLeft
+// was zero) — the real-failure signal, distinct from [CIPending]'s "ask
+// again later." [PRLander.Land] returns this without calling the wrapped
+// Lander.
+type CIFailed struct {
+	Sha   string
+	RunID int64
+	URL   string
+}
+
+func (e *CIFailed) Error() string {
+	return fmt.Sprintf("git: pr: independent ci for %s failed (run %d): %s", e.Sha, e.RunID, e.URL)
+}
+
+// ciWorkflowRun is the subset of a GitHub Actions workflow run [PRLander]
+// needs from the list-runs-by-head-sha endpoint.
+type ciWorkflowRun struct {
+	ID         int64  `json:"id"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	HTMLURL    string `json:"html_url"`
+}
+
+// workflowRuns lists every GitHub Actions workflow run GitHub has recorded
+// for sha. This is the Actions API's own runs, never box's own box/check or
+// box/review — those ride the Checks or commit-status API depending on
+// [PRLander.StatusesOnly], neither of which this endpoint reports — so no
+// name filtering is needed the way a check-runs listing would require.
+func (p *PRLander) workflowRuns(ctx context.Context, token, owner, repo, sha string) ([]ciWorkflowRun, error) {
+	q := url.Values{}
+	q.Set("head_sha", sha)
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/actions/runs?%s", p.apiBase, owner, repo, q.Encode())
+	var out struct {
+		WorkflowRuns []ciWorkflowRun `json:"workflow_runs"`
+	}
+	if err := p.call(ctx, http.MethodGet, endpoint, token, nil, &out); err != nil {
+		return nil, fmt.Errorf("list workflow runs: %w", err)
+	}
+	return out.WorkflowRuns, nil
+}
+
+// rerunFailedJobs asks GitHub to rerun only the failed jobs of runID — a red
+// is not blocked on sight while the rerun budget allows another look.
+func (p *PRLander) rerunFailedJobs(ctx context.Context, token, owner, repo string, runID int64) error {
+	endpoint := fmt.Sprintf("%s/repos/%s/%s/actions/runs/%d/rerun-failed-jobs", p.apiBase, owner, repo, runID)
+	return p.call(ctx, http.MethodPost, endpoint, token, nil, nil)
+}
+
+// ciAttemptBody is the shape [PRLander.awaitIndependentCI] writes as a
+// "ci-attempt" record's body, and reads back to recognize a red this
+// ChangeSet's head sha already carried — see [PRLander.priorFailedRun].
+type ciAttemptBody struct {
+	RunID      int64  `json:"run_id"`
+	Conclusion string `json:"conclusion"`
+	Rerun      bool   `json:"rerun"`
+}
+
+// priorFailedRun asks the evidence chain — not GitHub, which only ever
+// reports the current conclusion — whether sha already carries a recorded
+// red. A later green for the same sha after that is the flake fingerprint
+// (in-loop check green, independent CI red then green) the companion
+// flaky-quarantine flow consumes; recording it is [PRLander.awaitIndependentCI]'s
+// whole obligation to that flow. Any read failure answers "no prior red
+// found" rather than block the landing this evidence is secondary to.
+func (p *PRLander) priorFailedRun(ctx context.Context, cs forge.ChangeSet, sha string) (int64, bool) {
+	for r, err := range p.inner.log.BySubject(ctx, cs.Tenant, sha) {
+		if err != nil {
+			return 0, false
+		}
+		if r.Kind != "ci-attempt" {
+			continue
+		}
+		var b ciAttemptBody
+		if err := json.Unmarshal(r.Body, &b); err != nil {
+			continue
+		}
+		if b.Conclusion == "failure" {
+			return b.RunID, true
+		}
+	}
+	return 0, false
+}
+
+// awaitIndependentCI resolves mem.Head's independently-triggered GitHub CI
+// and refuses to let [PRLander.Land] proceed to the fenced push until it has
+// concluded green. It reads GitHub exactly once per call — the long wait
+// across ticks belongs to the loop that calls Land again, not a blocking
+// poll held here while a lease's claim is live.
+func (p *PRLander) awaitIndependentCI(ctx context.Context, cs forge.ChangeSet, mem forge.Member, tok, owner, name string) error {
+	sha := string(mem.Head)
+	runs, err := p.workflowRuns(ctx, tok, owner, name, sha)
+	if err != nil {
+		return fmt.Errorf("git: pr: independent ci for %s: %w", mem.Repo, err)
+	}
+	if len(runs) == 0 {
+		// No workflow run has been recorded for this sha at all — GitHub has
+		// not answered, which is not the same fact as GitHub having answered
+		// green. Unknown never reads as zero.
+		return &CIPending{Sha: sha}
+	}
+	for _, r := range runs {
+		if r.Status != "completed" {
+			return &CIPending{Sha: sha, URL: r.HTMLURL}
+		}
+	}
+	for _, r := range runs {
+		if r.Conclusion == "success" {
+			continue
+		}
+		if cs.CIRerunsLeft > 0 {
+			if err := p.rerunFailedJobs(ctx, tok, owner, name, r.ID); err != nil {
+				return fmt.Errorf("git: pr: rerun ci for %s: %w", mem.Repo, err)
+			}
+			p.inner.record(ctx, cs, "ci-attempt", sha,
+				fmt.Sprintf(`{"run_id":%d,"conclusion":%q,"rerun":true}`, r.ID, r.Conclusion))
+			return &CIPending{Sha: sha, URL: r.HTMLURL, RerunSpent: true}
+		}
+		p.inner.record(ctx, cs, "ci-attempt", sha,
+			fmt.Sprintf(`{"run_id":%d,"conclusion":%q,"rerun":false}`, r.ID, r.Conclusion))
+		return &CIFailed{Sha: sha, RunID: r.ID, URL: r.HTMLURL}
+	}
+
+	// Every run for this sha concluded success: this is the landing's
+	// authorization, recorded before inner.Land so the chain shows
+	// certification preceding the push.
+	if redID, ok := p.priorFailedRun(ctx, cs, sha); ok {
+		p.inner.record(ctx, cs, "ci-flake", sha,
+			fmt.Sprintf(`{"sha":%q,"red_run_id":%d,"green_run_id":%d}`, sha, redID, runs[0].ID))
+	}
+	ids := make([]string, len(runs))
+	for i, r := range runs {
+		ids[i] = fmt.Sprintf("%d", r.ID)
+	}
+	p.inner.record(ctx, cs, "ci-verdict", sha,
+		fmt.Sprintf(`{"run_ids":[%s],"sha":%q,"conclusion":"success","url":%q}`, strings.Join(ids, ","), sha, runs[0].HTMLURL))
+	return nil
 }
 
 // Review is one reviewer's decision on the pull request an [EnsureRequest]

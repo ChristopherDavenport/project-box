@@ -91,6 +91,43 @@ type fakeGitHub struct {
 	// the ack lost, not the write. It resets itself after firing once, so a
 	// retried create behaves normally.
 	postPRLoseAckOnce bool
+	// ciRunsSeq, keyed by head sha, is the ordered sequence of answers GET
+	// .../actions/runs?head_sha=<sha> gives across repeated calls for that
+	// sha: call N (0-indexed) reads entry N, and once the sequence is
+	// exhausted the last entry repeats. A sha with no entry at all — the
+	// common case, since most tests never mention CI — answers the fixture
+	// default: one already-successful run, so a Land test that says nothing
+	// about independent CI still lands, matching a repo whose Actions has
+	// already gone green by the time PRLander asks. A sha explicitly given
+	// an empty sequence (setCIRuns(sha) with no runs) answers zero runs on
+	// every call — CI has not reported at all.
+	ciRunsSeq map[string][][]ghWorkflowRun
+	ciCalls   map[string]int
+	// reruns logs every run id POSTed to .../rerun-failed-jobs, in order.
+	reruns []int64
+}
+
+// ghWorkflowRun is one GitHub Actions workflow run as the actions/runs
+// listing reports it — enough for PRLander.awaitIndependentCI to decode:
+// id, whether it has finished (status), what it concluded, and where a
+// human can look at it.
+type ghWorkflowRun struct {
+	ID         int64  `json:"id"`
+	Status     string `json:"status"`
+	Conclusion string `json:"conclusion"`
+	HTMLURL    string `json:"html_url"`
+}
+
+// setCIRuns configures sha's answer sequence for GET .../actions/runs — see
+// ciRunsSeq's doc comment. Called with no seq at all, it configures zero
+// runs for every call.
+func (g *fakeGitHub) setCIRuns(sha string, seq ...[]ghWorkflowRun) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.ciRunsSeq == nil {
+		g.ciRunsSeq = map[string][][]ghWorkflowRun{}
+	}
+	g.ciRunsSeq[sha] = seq
 }
 
 // ghIssueState is one issue's mutable state, as [PRLander.closeDrivingIssue]
@@ -266,6 +303,36 @@ func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 4 && parts[3] == "check-runs" && r.Method == http.MethodPost && g.appOnly:
 		// What api.github.com says to an OAuth token.
 		http.Error(w, `{"message":"You must authenticate via a GitHub App."}`, http.StatusForbidden)
+	case len(parts) == 5 && parts[3] == "actions" && parts[4] == "runs" && r.Method == http.MethodGet:
+		sha := r.URL.Query().Get("head_sha")
+		seq, configured := g.ciRunsSeq[sha]
+		var runs []ghWorkflowRun
+		if !configured {
+			runs = []ghWorkflowRun{{
+				ID: 1, Status: "completed", Conclusion: "success",
+				HTMLURL: fmt.Sprintf("https://github.com/%s/%s/actions/runs/1", owner, repo),
+			}}
+		} else if len(seq) > 0 {
+			if g.ciCalls == nil {
+				g.ciCalls = map[string]int{}
+			}
+			idx := g.ciCalls[sha]
+			g.ciCalls[sha]++
+			if idx >= len(seq) {
+				idx = len(seq) - 1
+			}
+			runs = seq[idx]
+		}
+		var out struct {
+			WorkflowRuns []ghWorkflowRun `json:"workflow_runs"`
+		}
+		out.WorkflowRuns = runs
+		json.NewEncoder(w).Encode(out)
+	case len(parts) == 7 && parts[3] == "actions" && parts[4] == "runs" && parts[6] == "rerun-failed-jobs" && r.Method == http.MethodPost:
+		id, _ := strconv.ParseInt(parts[5], 10, 64)
+		g.reruns = append(g.reruns, id)
+		w.WriteHeader(http.StatusCreated)
+		json.NewEncoder(w).Encode(map[string]string{})
 	case len(parts) == 6 && parts[3] == "pulls" && parts[5] == "reviews" && r.Method == http.MethodGet:
 		number, _ := strconv.Atoi(parts[4])
 		out := g.reviewsByNumber[number]
@@ -1889,5 +1956,288 @@ func TestPRLandRetriesAfterLostCreateAck(t *testing.T) {
 	}
 	if posts != 1 {
 		t.Fatalf("POST .../pulls seen %d times across both attempts, want exactly 1", posts)
+	}
+}
+
+// buildForLand acquires a lease and builds a fresh commit onto x's base,
+// returning a one-member ChangeSet ready for x.pr.Land — without landing it
+// — so a test can configure the fake GitHub server's independent-CI answer
+// for this exact head sha first.
+func buildForLand(t *testing.T, x *prFix, ciRerunsLeft int) (forge.ChangeSet, forge.Commit) {
+	t.Helper()
+	ctx := context.Background()
+	leaser := x.f.store.Leaser("runner-a")
+	lease, err := leaser.Acquire(ctx, forge.LeaseRequest{Tenant: tn, Repo: "app", Ref: "refs/heads/main", Run: "run-1", TTL: time.Hour})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	ws, err := x.m.Checkout(ctx, lease, x.f.base)
+	if err != nil {
+		t.Fatalf("checkout: %v", err)
+	}
+	head := buildOn(t, ws, "feature")
+	cs := forge.ChangeSet{
+		ID: "cs-1", Tenant: tn, Run: "run-1", Intent: "land through a pr",
+		CIRerunsLeft: ciRerunsLeft,
+		Members:      []forge.Member{{Repo: "app", Branch: "main", Base: x.f.base, Head: head, Lease: lease}},
+	}
+	return cs, head
+}
+
+// TestPRLandPendingOnZeroWorkflowRuns is issue #273's rule 2: a repo whose
+// Actions has not answered at all is pending, never a fabricated pass —
+// unknown never reads as zero.
+func TestPRLandPendingOnZeroWorkflowRuns(t *testing.T) {
+	x := fixPR(t)
+	cs, head := buildForLand(t, x, 0)
+	x.gh.setCIRuns(string(head)) // no seq at all: zero runs, every call
+
+	_, err := x.pr.Land(context.Background(), cs)
+	var pending *CIPending
+	if !errors.As(err, &pending) {
+		t.Fatalf("errors.As did not find *CIPending in: %v", err)
+	}
+	if pending.Sha != string(head) {
+		t.Fatalf("CIPending.Sha = %q, want %q", pending.Sha, head)
+	}
+	if pending.URL != "" {
+		t.Fatalf("CIPending.URL = %q, want empty: zero runs names nothing to point at", pending.URL)
+	}
+	if pending.RerunSpent {
+		t.Fatal("CIPending.RerunSpent = true, want false: nothing failed, so nothing was rerun")
+	}
+
+	got := strings.TrimSpace(mustGit(t, x.f.remote, "rev-parse", "refs/heads/main"))
+	if forge.Commit(got) == head {
+		t.Fatal("remote main moved to the built head despite CI never having reported")
+	}
+}
+
+// TestPRLandPendingWhileWorkflowRunInProgress is issue #273's rule 3: a run
+// still queued or in progress must stop Land before the fenced push, and
+// Land must be re-enterable once the run concludes.
+func TestPRLandPendingWhileWorkflowRunInProgress(t *testing.T) {
+	x := fixPR(t)
+	cs, head := buildForLand(t, x, 0)
+	x.gh.setCIRuns(string(head), []ghWorkflowRun{
+		{ID: 5, Status: "in_progress", HTMLURL: "https://github.com/acme/app/actions/runs/5"},
+	})
+
+	_, err := x.pr.Land(context.Background(), cs)
+	var pending *CIPending
+	if !errors.As(err, &pending) {
+		t.Fatalf("errors.As did not find *CIPending in: %v", err)
+	}
+	if pending.URL != "https://github.com/acme/app/actions/runs/5" {
+		t.Fatalf("CIPending.URL = %q, want the in-progress run's URL", pending.URL)
+	}
+	if pending.RerunSpent {
+		t.Fatal("CIPending.RerunSpent = true, want false: nothing has failed yet")
+	}
+	got := strings.TrimSpace(mustGit(t, x.f.remote, "rev-parse", "refs/heads/main"))
+	if forge.Commit(got) == head {
+		t.Fatal("remote main moved to the built head despite CI still running")
+	}
+
+	// Re-enterable: green arrives on a later tick and the same ChangeSet
+	// lands without any special handling.
+	x.gh.setCIRuns(string(head), []ghWorkflowRun{
+		{ID: 5, Status: "completed", Conclusion: "success", HTMLURL: "https://github.com/acme/app/actions/runs/5"},
+	})
+	landing, err := x.pr.Land(context.Background(), cs)
+	if err != nil {
+		t.Fatalf("retried land: %v", err)
+	}
+	if !landing.Complete() {
+		t.Fatalf("retried landing incomplete: %+v", landing)
+	}
+}
+
+// TestPRLandRerunsFailedRunWhenBudgetAllows is issue #273's rule 4: a red
+// independent CI is not blocked on sight while the loop-asserted rerun
+// budget allows another look — Land requests the rerun, records the attempt,
+// and still refuses to call the wrapped Lander this tick.
+func TestPRLandRerunsFailedRunWhenBudgetAllows(t *testing.T) {
+	x := fixPR(t)
+	cs, head := buildForLand(t, x, 1)
+	x.gh.setCIRuns(string(head), []ghWorkflowRun{
+		{ID: 7, Status: "completed", Conclusion: "failure", HTMLURL: "https://github.com/acme/app/actions/runs/7"},
+	})
+
+	_, err := x.pr.Land(context.Background(), cs)
+	var pending *CIPending
+	if !errors.As(err, &pending) {
+		t.Fatalf("errors.As did not find *CIPending in: %v", err)
+	}
+	if !pending.RerunSpent {
+		t.Fatal("CIPending.RerunSpent = false, want true: a red with budget left must trigger a rerun")
+	}
+	if len(x.gh.reruns) != 1 || x.gh.reruns[0] != 7 {
+		t.Fatalf("reruns = %v, want exactly [7]", x.gh.reruns)
+	}
+
+	found := false
+	for r, err := range x.f.store.Log().Since(context.Background(), tn, "changeset/cs-1", 1) {
+		if err != nil {
+			t.Fatalf("since: %v", err)
+		}
+		if r.Kind == "ci-attempt" && r.Subject == string(head) {
+			body := string(r.Body)
+			if !strings.Contains(body, `"run_id":7`) || !strings.Contains(body, `"failure"`) || !strings.Contains(body, `"rerun":true`) {
+				t.Fatalf("ci-attempt body = %s, want run id 7, conclusion failure, rerun true", body)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no ci-attempt evidence recorded for the failed run")
+	}
+
+	got := strings.TrimSpace(mustGit(t, x.f.remote, "rev-parse", "refs/heads/main"))
+	if forge.Commit(got) == head {
+		t.Fatal("remote main moved to the built head despite a red independent CI")
+	}
+}
+
+// TestPRLandFailsWhenCIBudgetExhausted is issue #273's rule 5: a red
+// independent CI with no rerun budget left is the real-failure signal —
+// *CIFailed, not *CIPending — and requests no rerun.
+func TestPRLandFailsWhenCIBudgetExhausted(t *testing.T) {
+	x := fixPR(t)
+	cs, head := buildForLand(t, x, 0)
+	x.gh.setCIRuns(string(head), []ghWorkflowRun{
+		{ID: 9, Status: "completed", Conclusion: "failure", HTMLURL: "https://github.com/acme/app/actions/runs/9"},
+	})
+
+	_, err := x.pr.Land(context.Background(), cs)
+	var failed *CIFailed
+	if !errors.As(err, &failed) {
+		t.Fatalf("errors.As did not find *CIFailed in: %v", err)
+	}
+	if failed.Sha != string(head) || failed.RunID != 9 {
+		t.Fatalf("CIFailed = %+v, want Sha=%s RunID=9", failed, head)
+	}
+	if len(x.gh.reruns) != 0 {
+		t.Fatalf("reruns = %v, want none: no budget left to spend", x.gh.reruns)
+	}
+
+	found := false
+	for r, err := range x.f.store.Log().Since(context.Background(), tn, "changeset/cs-1", 1) {
+		if err != nil {
+			t.Fatalf("since: %v", err)
+		}
+		if r.Kind == "ci-attempt" && r.Subject == string(head) && strings.Contains(string(r.Body), `"rerun":false`) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no ci-attempt evidence recorded for the exhausted-budget failure")
+	}
+}
+
+// TestPRLandRecordsCIVerdictBeforeInnerLand is issue #273's rule 1: an
+// all-green independent CI is the landing's authorization, recorded before
+// the wrapped Lander's own push so the evidence chain shows certification
+// preceding the push it authorizes.
+func TestPRLandRecordsCIVerdictBeforeInnerLand(t *testing.T) {
+	x := fixPR(t)
+	cs, head := buildForLand(t, x, 0)
+	x.gh.setCIRuns(string(head), []ghWorkflowRun{
+		{ID: 3, Status: "completed", Conclusion: "success", HTMLURL: "https://github.com/acme/app/actions/runs/3"},
+	})
+
+	landing, err := x.pr.Land(context.Background(), cs)
+	if err != nil {
+		t.Fatalf("land: %v", err)
+	}
+	if !landing.Complete() {
+		t.Fatalf("landing incomplete: %+v", landing)
+	}
+
+	var ciVerdictSeq, landSeq uint64
+	for r, err := range x.f.store.Log().Since(context.Background(), tn, "changeset/cs-1", 1) {
+		if err != nil {
+			t.Fatalf("since: %v", err)
+		}
+		switch {
+		case r.Kind == "ci-verdict" && r.Subject == string(head):
+			body := string(r.Body)
+			if !strings.Contains(body, `"run_ids":[3]`) || !strings.Contains(body, string(head)) ||
+				!strings.Contains(body, `"conclusion":"success"`) || !strings.Contains(body, "runs/3") {
+				t.Fatalf("ci-verdict body = %s, want run ids, sha, conclusion and url", body)
+			}
+			ciVerdictSeq = r.Seq
+		case r.Kind == "land" && r.Subject == string(head):
+			landSeq = r.Seq
+		}
+	}
+	if ciVerdictSeq == 0 {
+		t.Fatal("no ci-verdict evidence recorded")
+	}
+	if landSeq == 0 {
+		t.Fatal("no land evidence recorded")
+	}
+	if ciVerdictSeq >= landSeq {
+		t.Fatalf("ci-verdict (seq %d) did not precede land (seq %d): certification must come before the push it authorizes", ciVerdictSeq, landSeq)
+	}
+}
+
+// TestPRLandRecordsFlakeAfterRerunSucceeds is issue #273's rule 6: the
+// fingerprint of an in-loop check that already passed but an independent CI
+// that failed, then went green after a rerun — the companion
+// flaky-quarantine flow's whole input from this unit.
+func TestPRLandRecordsFlakeAfterRerunSucceeds(t *testing.T) {
+	x := fixPR(t)
+	cs, head := buildForLand(t, x, 1)
+	x.gh.setCIRuns(string(head),
+		[]ghWorkflowRun{{ID: 7, Status: "completed", Conclusion: "failure", HTMLURL: "https://github.com/acme/app/actions/runs/7"}},
+		[]ghWorkflowRun{{ID: 7, Status: "completed", Conclusion: "success", HTMLURL: "https://github.com/acme/app/actions/runs/7"}},
+	)
+
+	if _, err := x.pr.Land(context.Background(), cs); err == nil {
+		t.Fatal("want a pending/rerun error from the first, red, attempt")
+	}
+
+	landing, err := x.pr.Land(context.Background(), cs)
+	if err != nil {
+		t.Fatalf("retried land: %v", err)
+	}
+	if !landing.Complete() {
+		t.Fatalf("retried landing incomplete: %+v", landing)
+	}
+
+	found := false
+	for r, err := range x.f.store.Log().Since(context.Background(), tn, "changeset/cs-1", 1) {
+		if err != nil {
+			t.Fatalf("since: %v", err)
+		}
+		if r.Kind == "ci-flake" && r.Subject == string(head) {
+			body := string(r.Body)
+			if !strings.Contains(body, `"red_run_id":7`) || !strings.Contains(body, `"green_run_id":7`) {
+				t.Fatalf("ci-flake body = %s, want it to name the red and green run ids", body)
+			}
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no ci-flake evidence recorded after green arrived following a rerun")
+	}
+}
+
+// TestCIPendingIsNotTransient and TestCIFailedIsNotTransient are issue
+// #273's Transient requirement: a pending or red independent CI is a fact
+// about the change, never the forge's own trouble reaching GitHub, so it
+// must never burn a land retry the way a 5xx does.
+func TestCIPendingIsNotTransient(t *testing.T) {
+	err := &CIPending{Sha: "abc123"}
+	if Transient(err) {
+		t.Fatal("Transient(*CIPending) = true, want false")
+	}
+}
+
+func TestCIFailedIsNotTransient(t *testing.T) {
+	err := &CIFailed{Sha: "abc123", RunID: 1}
+	if Transient(err) {
+		t.Fatal("Transient(*CIFailed) = true, want false")
 	}
 }
