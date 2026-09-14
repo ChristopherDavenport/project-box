@@ -123,8 +123,17 @@ type Server struct {
 	// path, refuses every claim: the peer still becomes Actor, but no header
 	// ever reaches OnBehalfOf. Swappable on reload, same as Routes.
 	ActorClaims []string
+	// Auth resolves who a MUTATING request acts as — see [Authenticator]. A
+	// NIL-SAFE seam exactly like loop.PRLander: nil resolves to
+	// [PeerAuthenticator], which is byte-for-byte what mustActor did before
+	// this seam existed, so every suite that drives a write over a real unix
+	// socket keeps passing unchanged. Production wiring always sets one,
+	// even to name peer explicitly, so a box's choice is legible in its own
+	// configuration rather than in this field's absence. Swappable on
+	// reload, same as Routes and ActorClaims.
+	Auth Authenticator
 
-	mu sync.RWMutex // guards Routes, ActorClaims and Token swaps
+	mu sync.RWMutex // guards Routes, ActorClaims, Auth and Token swaps
 }
 
 // SetRoutes swaps the route table on reload.
@@ -144,10 +153,29 @@ func (s *Server) SetActorClaims(claims []string) {
 	s.mu.Unlock()
 }
 
+// SetAuth swaps the authenticator on reload — a box that rotates a token
+// table or switches methods should not need a restart to mean it.
+func (s *Server) SetAuth(a Authenticator) {
+	s.mu.Lock()
+	s.Auth = a
+	s.mu.Unlock()
+}
+
 func (s *Server) claimAllowed(claim string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return slices.Contains(s.ActorClaims, claim)
+}
+
+// authenticator answers the configured [Authenticator], or [PeerAuthenticator]
+// when none was set — the nil-safe seam [Server.Auth] documents.
+func (s *Server) authenticator() Authenticator {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.Auth != nil {
+		return s.Auth
+	}
+	return PeerAuthenticator{}
 }
 
 func (s *Server) route(name string) (ingress.Route, bool) {
@@ -225,24 +253,30 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
-// mustActor resolves who a MUTATING request acts as: the peer the socket
-// itself asserted, kernel credentials rather than anything the caller wrote.
-// A connection with no resolvable peer — a TCP test server, non-linux, no
-// ucred available — is refused outright rather than defaulted to any name;
-// "local-operator" does not exist here for the same reason. An X-Box-Actor
+// mustActor resolves who a MUTATING request acts as: the subject the
+// configured [Authenticator] vouched for — kernel credentials by default,
+// never anything the caller wrote unauthenticated. A subject the
+// authenticator cannot vouch for is refused outright rather than defaulted
+// to any name; "local-operator" does not exist here for the same reason.
+// Pid is filled in whenever the connection itself carries a kernel-asserted
+// peer, regardless of which method actually authenticated it — the pid is a
+// fact about the transport, not about the auth decision. An X-Box-Actor
 // header is a claim, never an identity: honored only when it appears in this
 // box's own allowlist, in which case it lands in Identity.OnBehalfOf while
-// the peer stays Identity.Name — delegation intersects and a claim only ever
-// narrows who authority was exercised for, never replaces who exercised it.
-// An unlisted claim refuses the whole request, not just the claim, so a
-// caller cannot silently fall back to acting as the peer when the
-// on-behalf-of it asked for was refused.
+// the authenticated subject stays Identity.Name — delegation intersects and
+// a claim only ever narrows who authority was exercised for, never replaces
+// who exercised it. An unlisted claim refuses the whole request, not just
+// the claim, so a caller cannot silently fall back to acting as the subject
+// when the on-behalf-of it asked for was refused.
 func (s *Server) mustActor(r *http.Request) (queue.Identity, error) {
-	cred := peerFromContext(r.Context())
-	if !cred.ok {
-		return queue.Identity{}, fmt.Errorf("no unix-socket peer was asserted for this connection — mutating calls require one")
+	subj, err := s.authenticator().Authenticate(r)
+	if err != nil {
+		return queue.Identity{}, err
 	}
-	id := queue.Identity{Name: accountName(cred.uid), Pid: cred.pid}
+	id := queue.Identity{Name: subj.Name}
+	if cred := peerFromContext(r.Context()); cred.ok {
+		id.Pid = cred.pid
+	}
 	if claim := r.Header.Get("X-Box-Actor"); claim != "" {
 		if !s.claimAllowed(claim) {
 			return queue.Identity{}, fmt.Errorf("actor claim %q is not in this box's allowlist", claim)
@@ -250,6 +284,21 @@ func (s *Server) mustActor(r *http.Request) (queue.Identity, error) {
 		id.OnBehalfOf = claim
 	}
 	return id, nil
+}
+
+// bestEffortSubject resolves this request's Subject through the configured
+// authenticator WITHOUT refusing — used only to annotate a delivery's
+// Source (openIngress), where an absent subject is a legitimate case (an
+// unauthenticated caller hitting a route that requires nothing) rather than
+// a reason to refuse the write. [ingress.Route.Require] is the actual gate;
+// see openIngress. Matches peerName's existing doctrine: an empty Subject is
+// the honest "unknown", never a guess.
+func (s *Server) bestEffortSubject(r *http.Request) Subject {
+	subj, err := s.authenticator().Authenticate(r)
+	if err != nil {
+		return Subject{}
+	}
+	return subj
 }
 
 // refuseActor writes mustActor's refusal in the api package's error
@@ -558,6 +607,12 @@ type OpenIngressRequest struct {
 	Key     string `json:"key"`
 	Payload string `json:"payload,omitempty"`
 	Summary string `json:"summary,omitempty"`
+	// Channel optionally declares how this delivery arrived: "hand" for an
+	// operator-run submit, "script" for an unattended caller. It is the
+	// caller's own claim, recorded as such on [ingress.Source.Channel] —
+	// absent stays absent, never defaulted to "hand", because a channel
+	// nobody declared is not known to be a hand-run one.
+	Channel string `json:"channel,omitempty"`
 }
 
 // OpenIngressResponse reports what the delivery named.
@@ -568,10 +623,20 @@ type OpenIngressResponse struct {
 	Item string `json:"item"`
 }
 
+// declaredChannels is the vocabulary an [OpenIngressRequest.Channel] claim
+// may name — the two ways a caller external to this package hands work in.
+// "route:<name>" and "factory" are stamped by producers inside the box
+// (poll.go, loop.OpenRepair) about themselves, never a caller's claim.
+var declaredChannels = map[string]bool{"hand": true, "script": true}
+
 func (s *Server) openIngress(w http.ResponseWriter, r *http.Request) {
 	var req OpenIngressRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		httpErr(w, 400, "bad body: "+err.Error())
+		return
+	}
+	if req.Channel != "" && !declaredChannels[req.Channel] {
+		httpErr(w, 400, fmt.Sprintf("channel %q — only \"hand\" or \"script\" may be declared", req.Channel))
 		return
 	}
 	route, ok := s.route(req.Route)
@@ -579,14 +644,42 @@ func (s *Server) openIngress(w http.ResponseWriter, r *http.Request) {
 		httpErrCode(w, 404, "route_not_found", fmt.Sprintf("no route %q — routes are operator configuration, not caller request", req.Route))
 		return
 	}
+	subj := s.bestEffortSubject(r)
+	if len(route.Require) > 0 && !slices.Contains(route.Require, subj.Method) {
+		reason := fmt.Sprintf("route %q requires one of %v; this delivery authenticated as %q", route.Name, route.Require, subj.Method)
+		s.refuseIngress(w, r, route.Name, subj, reason)
+		return
+	}
 	ing, opened, err := s.Router.Open(r.Context(), route, ingress.Delivery{
 		Key: req.Key, Payload: []byte(req.Payload), Title: req.Summary, Received: time.Now().UTC(),
+		Source: ingress.Source{Subject: subj.Name, Method: subj.Method, Channel: req.Channel},
 	})
 	if err != nil {
 		httpErr(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, OpenIngressResponse{Ingress: ing, Opened: opened, Item: "wi-" + ing.ID})
+}
+
+// refuseIngress writes a route.Require refusal AND records it on the
+// route's own standing chain — the pollScope precedent
+// (internal/ingress/poll.go), applied to a wire-side refusal rather than a
+// listing failure: "refused at the wire with the reason" (issue #188) must
+// itself be provable, not just returned to the one caller who saw it. The
+// record is appended before the response is written, same as poll.go's
+// recordFailure: a refusal that could not even be recorded is a louder
+// problem than the refusal itself, so that failure escalates to a 500
+// rather than being swallowed behind the 403.
+func (s *Server) refuseIngress(w http.ResponseWriter, r *http.Request, route string, subj Subject, reason string) {
+	body, _ := json.Marshal(map[string]string{"subject": subj.Name, "method": subj.Method, "reason": reason})
+	if _, err := s.Store.Log().Append(r.Context(), evidence.Record{
+		Tenant: s.Tenant, Scope: "route/" + route, Kind: "ingress-refused",
+		Subject: route, Actor: subj.Name, Body: body,
+	}); err != nil {
+		httpErr(w, 500, fmt.Sprintf("refused (%s) and the refusal could not be recorded: %v", reason, err))
+		return
+	}
+	httpErrCode(w, http.StatusForbidden, "auth_required", reason)
 }
 
 // ControlRequest carries a reason; stop and resume are records, and a

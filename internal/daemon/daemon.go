@@ -297,6 +297,7 @@ func New(path string) (*Daemon, error) {
 		Started:     time.Now(),
 		Reload:      d.reloadForAPI,
 		ActorClaims: cfg.ActorClaims,
+		Auth:        authenticatorFromConfig(cfg.Auth),
 		// A closure rather than d.build directly: the latter would capture
 		// today's function value, so a later swap of d.build (only ever done
 		// by a test) would leave the API reporting the production seam
@@ -336,6 +337,27 @@ func declaredSections(cfg boxcfg.Config) map[string][]string {
 		}
 	}
 	return out
+}
+
+// authenticatorFromConfig builds the API's [api.Authenticator] from a box's
+// auth config — used at New and again at every Reload, the same shape as
+// declaredSections above. cfg.Auth has already been through
+// [boxcfg.Auth.validate] by the time Load returns it, which normalizes an
+// absent method to "peer" and resolves every token's secret, so the switch
+// below only ever sees one of the three known methods.
+func authenticatorFromConfig(a boxcfg.Auth) api.Authenticator {
+	switch a.Method {
+	case boxcfg.AuthMethodToken:
+		tokens := make(map[string]string, len(a.Tokens))
+		for _, t := range a.Tokens {
+			tokens[t.Name] = t.Secret
+		}
+		return api.TokenAuthenticator{Tokens: tokens}
+	case boxcfg.AuthMethodNone:
+		return api.NoneAuthenticator{}
+	default: // boxcfg.AuthMethodPeer
+		return api.PeerAuthenticator{}
+	}
 }
 
 // assemble builds the executor, route and declaration tables from a config —
@@ -569,6 +591,7 @@ func (d *Daemon) assemble(ctx context.Context, cfg boxcfg.Config) (map[string]*l
 				Name: r.Route.Name, Kind: ingress.RouteIssue, Opens: kind.SeedIssue,
 				Box: bx.Name, Repo: r.Name, Requester: cfg.Runner,
 				Poll: r.Route.PollDuration(), Label: r.Route.Label, Contract: r.Route.Contract,
+				Require: r.Route.Require,
 			}
 			remotes[r.Route.Name] = r.Remote
 		}
@@ -779,6 +802,7 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 	d.escalator.Kinds = kinds
 	d.API.SetRoutes(routes)
 	d.API.SetActorClaims(ncfg.ActorClaims)
+	d.API.SetAuth(authenticatorFromConfig(ncfg.Auth))
 	d.meter.SetBudget(capacity.Budget{MaxConcurrent: ncfg.Budget.MaxConcurrent,
 		MaxJudgements:      ncfg.Budget.MaxJudgements,
 		MaxPerWindow:       ncfg.Budget.MaxPerWindow,

@@ -79,7 +79,14 @@ type Config struct {
 	// unclaimed daemon is not a laxer one, because delegation intersects and
 	// an empty allowlist is the empty intersection.
 	ActorClaims []string `yaml:"actor_claims"`
-	Boxes       []Box    `yaml:"boxes"`
+	// Auth chooses the daemon's own listener authentication — see
+	// [api.Authenticator]. Absent means peer (SO_PEERCRED), the local-first
+	// default: this is the daemon's own socket layer choosing to be
+	// pluggable, not a departure from the posture that network auth (OIDC,
+	// a gate's bearer token) is a LAYER IN FRONT of the socket — see
+	// docs/ARCHITECTURE.md's ingress section.
+	Auth  Auth  `yaml:"auth"`
+	Boxes []Box `yaml:"boxes"`
 }
 
 // Runs is the retention of the run log — every tool call and its title, what
@@ -274,6 +281,12 @@ type Route struct {
 	// holding it, read once at Load relative to the process's working
 	// directory — see [loadContract].
 	Contract string `yaml:"contract"`
+	// Require names the authentication methods a delivery to this route
+	// must arrive under — see [ingress.Route.Require]. Every entry must be
+	// one this box's own Auth config can actually produce; validate refuses
+	// otherwise, the same half-configured doctrine as a brake with no
+	// credential named.
+	Require []string `yaml:"require"`
 }
 
 // UnmarshalYAML accepts a scalar (a bare route name, polling off — today's
@@ -307,6 +320,58 @@ func (r Route) PollDuration() time.Duration {
 	}
 	d, _ := time.ParseDuration(r.Poll)
 	return d
+}
+
+// Auth method names — the only values [Auth.Method] may take. Kept as plain
+// strings, matching api.MethodPeer/MethodToken/MethodNone's own vocabulary,
+// rather than a shared type: boxcfg is configuration and internal/api is
+// the wire, and neither package imports the other's types across that seam.
+const (
+	AuthMethodPeer  = "peer"
+	AuthMethodToken = "token"
+	AuthMethodNone  = "none"
+)
+
+// Auth configures the daemon's own listener authentication.
+//
+// This is deliberately a departure in scope, not in posture: the standing
+// decision (docs/ARCHITECTURE.md, ingress) is that network auth — OIDC, a
+// gate's bearer token — is a LAYER IN FRONT of the unix socket, never the
+// daemon's own concern. What issue #188 adds is that the socket's OWN
+// listener, which used to trust SO_PEERCRED unconditionally, is now
+// pluggable too: a box may still choose peer (the default) or may choose to
+// authenticate a caller some other way without a proxy in front.
+type Auth struct {
+	// Method chooses the authenticator: "" or "peer" (SO_PEERCRED, the
+	// default), "token" (Tokens below), or "none" (every write refused).
+	// Refused at validate when it names anything else.
+	Method string `yaml:"method"`
+	// Tokens is the static name-to-secret table the "token" method
+	// authenticates against. Required, and non-empty, whenever Method is
+	// "token" — a token method with no table would authenticate nobody,
+	// which is what "none" is for.
+	Tokens []AuthToken `yaml:"tokens"`
+}
+
+// AuthToken is one named credential in a "token" [Auth]'s table. The secret
+// itself is never written inline in box.yaml — a checkout, a backup, or a
+// `git blame` would then hold it — so it is resolved from exactly one of
+// SecretFile or SecretEnv at Load, into Secret, which nothing marshals back
+// out.
+type AuthToken struct {
+	Name string `yaml:"name"`
+	// SecretFile is a path read once at Load, relative to the process's
+	// working directory, the same convention [loadContract] uses for a
+	// route's contract.
+	SecretFile string `yaml:"secret_file"`
+	// SecretEnv is an environment variable name read once at Load. Refused
+	// if unset: an env var a deployment forgot to wire must not silently
+	// resolve to an empty secret that then matches an empty bearer value.
+	SecretEnv string `yaml:"secret_env"`
+	// Secret is the resolved value, set by validate. Never round-tripped
+	// through YAML (SecretFile and SecretEnv are the config; this is the
+	// fact Load derived from it), and never logged.
+	Secret string `yaml:"-"`
 }
 
 // Box is one system: many repos, one optional agent identity.
@@ -874,6 +939,9 @@ func (c *Config) validate() error {
 		}
 		seenClaims[claim] = true
 	}
+	if err := c.Auth.validate(); err != nil {
+		return err
+	}
 	if len(c.Boxes) == 0 {
 		return fmt.Errorf("boxcfg: no boxes configured")
 	}
@@ -986,6 +1054,14 @@ func (c *Config) validate() error {
 				}
 				r.Route.Contract = resolved
 			}
+			for _, m := range r.Route.Require {
+				if m == "" {
+					return fmt.Errorf("boxcfg: box %s repo %s: route.require has an empty entry", bx.Name, r.Name)
+				}
+				if m != c.Auth.Method {
+					return fmt.Errorf("boxcfg: box %s repo %s: route.require %q — this box's auth.method is %q, which can never produce it; the half-configured combination refuses at load rather than at the first delivery", bx.Name, r.Name, m, c.Auth.Method)
+				}
+			}
 			if len(bx.Agent) == 0 && r.Build == "" {
 				return fmt.Errorf("boxcfg: box %s repo %s: no agent and no build command — nothing would ever do the work", bx.Name, r.Name)
 			}
@@ -1037,6 +1113,58 @@ func (c *Config) validate() error {
 		}
 		if err := validateSelfDeploy(bx, explicitCheck); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// validate defaults and checks an Auth block, and resolves every token's
+// secret from its file or env source into Secret — the one place this
+// config's Load reads a token's actual value, so nothing downstream ever
+// re-reads the source itself.
+func (a *Auth) validate() error {
+	switch a.Method {
+	case "":
+		a.Method = AuthMethodPeer
+	case AuthMethodPeer, AuthMethodToken, AuthMethodNone:
+	default:
+		return fmt.Errorf("boxcfg: auth.method %q — this box offers peer (SO_PEERCRED, the default), token, or none", a.Method)
+	}
+	if a.Method != AuthMethodToken && len(a.Tokens) > 0 {
+		return fmt.Errorf("boxcfg: auth.tokens is set with auth.method %q — tokens are only read for method: token", a.Method)
+	}
+	if a.Method == AuthMethodToken && len(a.Tokens) == 0 {
+		return fmt.Errorf("boxcfg: auth.method: token with no auth.tokens — a table with no entries authenticates nobody; name a table, or auth.method: none")
+	}
+	seen := map[string]bool{}
+	for i := range a.Tokens {
+		t := &a.Tokens[i]
+		if t.Name == "" {
+			return fmt.Errorf("boxcfg: auth.tokens has an entry with no name")
+		}
+		if seen[t.Name] {
+			return fmt.Errorf("boxcfg: auth.tokens: %q is listed twice", t.Name)
+		}
+		seen[t.Name] = true
+		if (t.SecretFile == "") == (t.SecretEnv == "") {
+			return fmt.Errorf("boxcfg: auth.tokens %q needs EXACTLY ONE of secret_file or secret_env — neither leaves it with no secret, and both leaves it ambiguous which one wins", t.Name)
+		}
+		switch {
+		case t.SecretFile != "":
+			b, err := os.ReadFile(t.SecretFile)
+			if err != nil {
+				return fmt.Errorf("boxcfg: auth.tokens %q: secret_file: %w", t.Name, err)
+			}
+			t.Secret = strings.TrimSpace(string(b))
+		case t.SecretEnv != "":
+			v, ok := os.LookupEnv(t.SecretEnv)
+			if !ok {
+				return fmt.Errorf("boxcfg: auth.tokens %q: secret_env %q is not set — an unset env var is not an empty secret, it is no secret at all", t.Name, t.SecretEnv)
+			}
+			t.Secret = v
+		}
+		if t.Secret == "" {
+			return fmt.Errorf("boxcfg: auth.tokens %q resolved to an empty secret", t.Name)
 		}
 	}
 	return nil
