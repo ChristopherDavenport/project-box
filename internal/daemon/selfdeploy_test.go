@@ -506,7 +506,12 @@ func TestSelfDeploySettlesBeforeCheckingAndSucceeds(t *testing.T) {
 	tickDone := make(chan struct{})
 	var buildSettledAt time.Time
 	go func() {
+		// Tick itself only dispatches and returns (issue #196); it is
+		// [pump.Pump.Quiesce] — the same barrier selfDeployChore's own
+		// settle step below uses — that marks when the slow build this tick
+		// started has actually finished.
 		d.Tick(ctx)
+		d.pump.Quiesce(ctx)
 		buildSettledAt = time.Now()
 		close(tickDone)
 	}()
@@ -623,8 +628,12 @@ boxes:
 		t.Fatal(err)
 	}
 
+	// Tick only dispatches and returns (issue #196), so tickDone is closed
+	// only once [pump.Pump.Quiesce] confirms the slow build actually
+	// finished — otherwise "let the in-flight run finish before the test
+	// tears down" below would wait on nothing and race d.Close().
 	tickDone := make(chan struct{})
-	go func() { d.Tick(ctx); close(tickDone) }()
+	go func() { d.Tick(ctx); d.pump.Quiesce(ctx); close(tickDone) }()
 	waitForFile(t, started, 3*time.Second) // the build is now mid-sleep, well past the 50ms drain
 
 	if err := d.selfDeployChore(ctx); err != nil {

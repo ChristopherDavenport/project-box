@@ -39,6 +39,9 @@ func TestProvenanceChainAndExport(t *testing.T) {
 	if _, err := w.pump.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the tick's dispatched run")
+	}
 	item, err := c.Item(ctx, res.Item)
 	if err != nil || item.State != queue.StateDone || item.Head == "" {
 		t.Fatalf("item: %+v %v%s", item, err, queueDump(t, c))

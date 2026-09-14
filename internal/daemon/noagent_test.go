@@ -145,6 +145,9 @@ func TestTheFactoryRunsWithNoAgentInIt(t *testing.T) {
 	if _, err := d.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !d.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the tick's dispatched run")
+	}
 	item, err := c.Item(ctx, res.Item)
 	if err != nil || item.State != queue.StateDone {
 		t.Fatalf("work did not land without an agent: %+v %v", item, err)
@@ -162,8 +165,20 @@ func TestTheFactoryRunsWithNoAgentInIt(t *testing.T) {
 	if _, err := d.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !d.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the tick's dispatched run")
+	}
 	if it, err := c.Item(ctx, sour.Item); err != nil || it.State != queue.StateParked {
 		t.Fatalf("a failed gate should park: %+v %v", it, err)
+	}
+	// One more tick, its count discarded: [pump.Pump.Drain]'s returned int is
+	// a projection over runs that finished since the LAST Drain (issue
+	// #196), so without flushing it here, the park above would still be
+	// sitting in the accumulator and show up as "settled" in section 4's
+	// count below — a stale reading of old news, not evidence the budget
+	// refusal dispatched nothing new.
+	if _, err := d.Tick(ctx); err != nil {
+		t.Fatal(err)
 	}
 
 	var told []control.Notice

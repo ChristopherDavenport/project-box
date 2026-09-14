@@ -218,9 +218,19 @@ func TestBudgetPacesWithoutLosingWork(t *testing.T) {
 	w.open(t, "issue-2", "fix module two")
 	w.open(t, "issue-3", "fix module three")
 
+	// Quiesced after every tick: with MaxConcurrent 1 and dispatch no longer
+	// blocking Drain's return, a tick that raced ahead of the previous one's
+	// still-running dispatch would find the one concurrency slot occupied and
+	// claim nothing — a timing accident, not the pacing this test is about.
+	// Settling between ticks is what makes "two starts per window" a property
+	// of the budget rather than of how fast six back-to-back ticks happen to
+	// race a single build.
 	for range 6 { // several ticks inside one window
 		if _, err := w.pump.Tick(ctx); err != nil {
 			t.Fatal(err)
+		}
+		if !w.pump.Quiesce(ctx) {
+			t.Fatal("quiesce did not settle the tick's dispatched run")
 		}
 	}
 	states := map[queue.State]int{}
@@ -254,6 +264,9 @@ func TestBudgetPacesWithoutLosingWork(t *testing.T) {
 	w.advance(2 * time.Hour)
 	if _, err := w.pump.Tick(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the dispatched run")
 	}
 	states = map[queue.State]int{}
 	for rec, _ := range w.store.Log().Since(ctx, tn, "index/pending", 1) {
@@ -291,6 +304,9 @@ func TestStopHaltsTheDaemonsClaims(t *testing.T) {
 	}
 	if _, err := w.pump.Tick(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the resumed pump's dispatched run")
 	}
 	for rec, _ := range w.store.Log().Since(ctx, tn, "index/pending", 1) {
 		item, _ := w.q.Load(ctx, tn, rec.Subject)
@@ -393,6 +409,9 @@ func TestTwoReposOneTenantSideBySide(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if !p.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the dispatched runs")
+	}
 	for name, remote := range map[string]string{"api": apiRem, "web": webRem} {
 		n := strings.TrimSpace(mustSh(t, remote, "git", "rev-list", "--count", "refs/heads/main"))
 		if n != "2" {
@@ -467,6 +486,9 @@ func TestAHandedOffItemIsRedispatched(t *testing.T) {
 	if _, err := w.pump.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the first tick's dispatched run")
+	}
 	var id string
 	for rec, err := range w.store.Log().Since(ctx, tn, "index/pending", 1) {
 		if err != nil {
@@ -485,6 +507,9 @@ func TestAHandedOffItemIsRedispatched(t *testing.T) {
 	// The next tick is the re-dispatch. Nobody asked for it.
 	if _, err := w.pump.Tick(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the redispatch's dispatched run")
 	}
 	if item, err = w.q.Load(ctx, tn, id); err != nil {
 		t.Fatal(err)
@@ -573,6 +598,9 @@ func TestAWholeRepositoryUnitStopsStarving(t *testing.T) {
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
 	whole, err = w.q.Load(ctx, tn, whole.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -610,6 +638,9 @@ func TestDisjointSectionCandidateIsNotYielded(t *testing.T) {
 
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
 	}
 	head, err := w.q.Load(ctx, tn, head.ID)
 	if err != nil {
@@ -665,6 +696,9 @@ func TestAHolderIsNeverYieldedToItsOwnWaiter(t *testing.T) {
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
 	holder, err = w.q.Load(ctx, tn, holder.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -693,6 +727,9 @@ func TestAHolderIsNeverYieldedToItsOwnWaiter(t *testing.T) {
 
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
 	}
 	head, err = w.q.Load(ctx, tn, head.ID)
 	if err != nil {
@@ -727,6 +764,9 @@ func TestLandWindowHeadIsFrontedAndContendersYield(t *testing.T) {
 
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
 	}
 	head, err := w.q.Load(ctx, tn, head.ID)
 	if err != nil {
@@ -786,6 +826,9 @@ func TestAHolderIsNeverYieldedToTheLandHead(t *testing.T) {
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
 	holder, err = w.q.Load(ctx, tn, holder.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -812,6 +855,9 @@ func TestAHolderIsNeverYieldedToTheLandHead(t *testing.T) {
 
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
 	}
 	head, err = w.q.Load(ctx, tn, head.ID)
 	if err != nil {
@@ -849,6 +895,9 @@ func TestALandReadyCandidateGoesBeforeAFreshBuild(t *testing.T) {
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
 	unbuilt, err := w.q.Load(ctx, tn, unbuilt.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -873,6 +922,9 @@ func TestALandReadyCandidateGoesBeforeAFreshBuild(t *testing.T) {
 
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
 	}
 	unbuilt, err = w.q.Load(ctx, tn, unbuilt.ID)
 	if err != nil {
@@ -906,6 +958,9 @@ func TestAStarvedHeadStillWinsOverALandReadyWaiter(t *testing.T) {
 
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
 	}
 	head, err := w.q.Load(ctx, tn, head.ID)
 	if err != nil {
@@ -961,6 +1016,9 @@ func TestAHolderIsNeverOutrankedByALandReadyNonHolder(t *testing.T) {
 
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
 	}
 	holder, err = w.q.Load(ctx, tn, holder.ID)
 	if err != nil {

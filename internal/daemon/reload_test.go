@@ -140,6 +140,9 @@ func TestReloadAddsARepoWithoutRestart(t *testing.T) {
 	if _, err := d.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !d.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the tick's dispatched run")
+	}
 	item, err := c.Item(ctx, res.Item)
 	if err != nil || item.State != queue.StateDone {
 		t.Fatalf("work on the reloaded repo: %+v %v", item, err)

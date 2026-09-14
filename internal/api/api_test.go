@@ -217,6 +217,9 @@ func TestDelegateOverTheWire(t *testing.T) {
 	if _, err := w.pump.Tick(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the tick's dispatched run")
+	}
 	item, err := c.Item(ctx, res.Item)
 	if err != nil || item.State != queue.StateDone {
 		t.Fatalf("item over the wire: %+v %v", item, err)
@@ -270,6 +273,9 @@ func TestDelegateOverTheWire(t *testing.T) {
 	}
 	if _, err := w.pump.Tick(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the resumed tick's dispatched run")
 	}
 	got, _ = c.Item(ctx, item10)
 	if got.State != queue.StateDone {
@@ -474,9 +480,17 @@ func TestQueueOverTheWire(t *testing.T) {
 
 	// Drain until they settle — one branch lease admits one run at a time,
 	// so two units take two passes (issue #18) — and the filter follows them.
+	// Each pass is quiesced before the next: Drain only dispatches and
+	// returns (issue #196), and without settling first, a second pass could
+	// dispatch the other unit while the first was still mid-land, racing both
+	// for the same branch lease instead of taking the two clean passes this
+	// test is about.
 	for range 3 {
 		if _, err := w.pump.Drain(ctx); err != nil {
 			t.Fatal(err)
+		}
+		if !w.pump.Quiesce(ctx) {
+			t.Fatal("quiesce did not settle the pass's dispatched run")
 		}
 	}
 	if still, err := c.Items(ctx, "pending"); err != nil || len(still) != 0 {
@@ -577,15 +591,29 @@ func TestTheCountAndTheListingAreOneFold(t *testing.T) {
 
 	// Mid-flight, where the two accounts had the most room to come apart: one
 	// branch lease admits one run at a time (issue #18), so a drain leaves a
-	// mixture rather than a clean sweep.
+	// mixture rather than a clean sweep. Drain itself only dispatches and
+	// returns (issue #196) rather than waiting for the run it just started, so
+	// the pass is quiesced before agrees reads anything — agrees is not one
+	// read, it is a status call compared against several Items calls, and
+	// without settling first those calls would be watching a queue still
+	// moving underneath them.
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
 	agrees("mid-drain")
 
+	// Quiesced between passes for the same reason as above: an un-settled
+	// pass here would race the next pass's own dispatch for the same branch
+	// lease instead of taking the clean, one-run-per-pass sweep to done.
 	for range 4 {
 		if _, err := w.pump.Drain(ctx); err != nil {
 			t.Fatal(err)
+		}
+		if !w.pump.Quiesce(ctx) {
+			t.Fatal("quiesce did not settle the pass's dispatched run")
 		}
 	}
 	st = agrees("settled")

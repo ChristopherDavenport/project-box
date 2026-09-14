@@ -36,6 +36,9 @@ func TestASectionBusyCandidateNeverSpendsASeat(t *testing.T) {
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
 	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
 	a, err := w.q.Load(ctx, tn, a.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -86,6 +89,9 @@ func TestTwoCandidatesInTheSameFreeSectionSerialize(t *testing.T) {
 
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
 	}
 	a, err := w.q.Load(ctx, tn, a.ID)
 	if err != nil {
@@ -224,6 +230,9 @@ func TestASectionBusyCandidateNeverCountsAStart(t *testing.T) {
 	}
 	if _, err := w.pump.Drain(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
 	}
 	if got := w.meter.Report().Started; got != 1 {
 		t.Fatalf("once the section frees and the item actually runs, it should count exactly one start, got %d", got)

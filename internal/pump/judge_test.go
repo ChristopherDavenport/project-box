@@ -246,13 +246,11 @@ func TestAJudgementNeverCountsAgainstTheBuildBound(t *testing.T) {
 	}
 	waitEntered(t, judge, 1)
 
-	got, err := w.q.Load(ctx, tn, item.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.State != queue.StateDone {
-		t.Fatalf("the unit should have claimed and run under MaxConcurrent 1 while the judgement — a separate seat pool — was still in flight: %+v", got)
-	}
+	// waitState, not Quiesce: the judgement is deliberately still blocked on
+	// judge.release below, and Quiesce waits on every in-flight run,
+	// judgement included — the property under test is that the build settles
+	// without that release, so a Quiesce here would be the wrong barrier.
+	waitState(t, w, item.ID, queue.StateDone, "the unit should have claimed and run under MaxConcurrent 1 while the judgement — a separate seat pool — was still in flight")
 
 	close(judge.release)
 	if !w.pump.Quiesce(ctx) {

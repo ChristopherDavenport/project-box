@@ -84,6 +84,13 @@ type Pump struct {
 	// agent run mid-item is safe under fencing, but it is waste, and waste
 	// with a half-written story.
 	inflight sync.WaitGroup
+	// runs accumulates the outcome of every dispatched run goroutine that
+	// finishes after the Drain call that started it has already returned —
+	// see [Pump.Drain] and issue #196. Its own mutex, never p.mu: p.mu
+	// guards Loops swaps against a drain in flight, and a run goroutine
+	// posting its outcome is unrelated traffic that must never contend with
+	// that swap.
+	runs runTally
 }
 
 // Quiesce blocks until every in-flight run settles or the context ends,
@@ -273,6 +280,53 @@ type drainCandidate struct {
 	holder bool
 }
 
+// settledFilter reports whether err is one the queue has already recorded
+// the reason for — "not now" (stopped, blocked, held) or "not ever"
+// (a dependency failed) — so neither Drain's own dispatch-time errors nor a
+// run goroutine's outcome treat it as a failure worth surfacing.
+func settledFilter(err error) bool {
+	return err == nil || errors.Is(err, queue.ErrStopped) ||
+		errors.Is(err, queue.ErrBlocked) ||
+		errors.Is(err, queue.ErrDependencyFailed) ||
+		errors.Is(err, forge.ErrHeld)
+}
+
+// runTally accumulates what dispatched run goroutines settle between one
+// Drain call and the next: a count of items that reached a terminal,
+// non-claimable state, and the first error worth surfacing. It outlives any
+// single Drain call — goroutines it was handed keep writing to it long
+// after Drain returned — so every access is under its own mutex.
+type runTally struct {
+	mu    sync.Mutex
+	count int
+	err   error
+}
+
+// record folds one run's outcome in, exactly as Drain's own recordErr did
+// before the outcome moved off Drain's stack and onto this shared tally.
+func (t *runTally) record(item queue.WorkItem, out queue.WorkItem, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if err == nil && !queue.Claimable(out.State) {
+		t.count++
+	}
+	if !settledFilter(err) && t.err == nil {
+		t.err = fmt.Errorf("pump: item %s: %w", item.ID, err)
+	}
+}
+
+// swap atomically takes ownership of t's accumulated count and error,
+// resetting t to zero — "a count read from the runs that finished since the
+// last tick", a projection over completions, never a second reading of
+// them: whatever it hands back here, it will never hand back again.
+func (t *runTally) swap() (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	count, err := t.count, t.err
+	t.count, t.err = 0, nil
+	return count, err
+}
+
 // sectionsIntersect reports whether two units could contend for the same
 // section: [queue.WorkItem.Sections] names are plan-declared, compared as
 // plain strings, and empty means every section, so it alone is enough to
@@ -452,12 +506,24 @@ func landReady(item queue.WorkItem) bool {
 	return item.Built != "" && !item.Unfinished
 }
 
-// Drain runs every claimable item, within budget. It returns how many items
-// it settled this pass; blocked, stopped, section-busy and over-budget items
-// simply remain for the next tick. A section-busy item never spends a seat
-// to learn it must wait (issue #120): its section is taken, and checked,
-// before the meter is ever asked.
+// Drain claims every claimable item within budget and dispatches each into
+// its own goroutine, then returns without waiting for any of them to
+// finish — a tick feeds the box; it does not wait for the meal it served
+// (issue #196). The int it returns is not this pass's own work: it is a
+// count of runs dispatched by an EARLIER Drain that have finished settling
+// since, drained from [Pump.runs] as a single projection over completions,
+// never a second reading of them. A run this pass dispatches is counted by
+// some later Drain instead, once it finishes — its error, if any, surfaces
+// then too, through that later call's return.
+//
+// Blocked, stopped, section-busy and over-budget items simply remain for
+// the next tick. A section-busy item never spends a seat to learn it must
+// wait (issue #120): its section is taken, and checked, before the meter is
+// ever asked. [Pump.Quiesce] is the barrier for anyone who needs every
+// dispatched run to have actually finished, not just been started.
 func (p *Pump) Drain(ctx context.Context) (int, error) {
+	settled, tallyErr := p.runs.swap()
+
 	var candidates []queue.WorkItem
 	// One unreadable item must not cost every other item its tick. Aborting
 	// the pass here meant a single corrupt chain stopped the whole factory
@@ -468,7 +534,7 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 	seen := map[string]bool{}
 	for rec, err := range p.Store.Log().Since(ctx, p.Tenant, "index/pending", 1) {
 		if err != nil {
-			return 0, err
+			return settled, errors.Join(tallyErr, err)
 		}
 		if seen[rec.Subject] {
 			continue
@@ -530,22 +596,14 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 	}
 	dcs = p.fairSectionOrder(dcs)
 
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	settled := 0
+	// firstErr accumulates only this pass's own dispatch-time errors — the
+	// section wait and claim failures below, both resolved synchronously
+	// before any goroutine is ever started. Nothing else writes here, so
+	// unlike [Pump.runs] it needs no mutex of its own.
 	var firstErr error
 	recordErr := func(item queue.WorkItem, err error) {
-		switch {
-		case err == nil, errors.Is(err, queue.ErrStopped),
-			errors.Is(err, queue.ErrBlocked),
-			errors.Is(err, queue.ErrDependencyFailed),
-			errors.Is(err, forge.ErrHeld):
-			// The queue said "not now" or "not ever" and has already
-			// recorded why; the pump moves on.
-		default:
-			if firstErr == nil {
-				firstErr = fmt.Errorf("pump: item %s: %w", item.ID, err)
-			}
+		if !settledFilter(err) && firstErr == nil {
+			firstErr = fmt.Errorf("pump: item %s: %w", item.ID, err)
 		}
 	}
 	for _, dc := range dcs {
@@ -561,9 +619,7 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		grant, busy, terr := lp.TakeSections(ctx, item)
 		if terr == nil && busy != "" {
 			_, err := lp.WaitOnSection(ctx, item, busy)
-			mu.Lock()
 			recordErr(item, err)
-			mu.Unlock()
 			continue
 		}
 		// A hard error (an undeclared section) is rare and belongs to Run's
@@ -586,7 +642,7 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		}
 		if err != nil {
 			grant.Release()
-			return settled, err
+			return settled, errors.Join(tallyErr, err)
 		}
 
 		// Claimed here, synchronously, before the goroutine below is even
@@ -606,31 +662,21 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			if cerr != nil {
 				grant.Release()
 				release()
-				mu.Lock()
 				recordErr(item, cerr)
-				mu.Unlock()
 				continue
 			}
 			item = claimed
 		}
 
-		wg.Add(1)
 		p.inflight.Add(1)
 		go func(item queue.WorkItem, claim forge.Lease, grant *loop.SectionGrant) {
-			defer wg.Done()
 			defer p.inflight.Done()
 			defer release()
 			out, err := lp.RunHolding(ctx, item, claim, grant)
-			mu.Lock()
-			defer mu.Unlock()
-			if err == nil && !queue.Claimable(out.State) {
-				settled++
-			}
-			recordErr(item, err)
+			p.runs.record(item, out, err)
 		}(item, claim, grant)
 	}
-	wg.Wait()
-	return settled, errors.Join(unreadable, firstErr)
+	return settled, errors.Join(unreadable, firstErr, tallyErr)
 }
 
 // Tick is one heartbeat: feed, answer replans, then drain.
