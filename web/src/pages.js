@@ -6,7 +6,7 @@ import { LitElement, html, css, nothing } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { Task } from '@lit/task';
 import {
-  getStatus, getItems, getExceptions, getFlakes, getItem, getItemEvidence, getIngress, getProvenance, getProvenanceChain, provenanceExportURL,
+  getStatus, getItems, getExceptions, getFlakes, getSections, getItem, getItemEvidence, getIngress, getProvenance, getProvenanceChain, provenanceExportURL,
   getSessions, getSession, openIngress,getRunFrames, reload, retryItem, resolveItem,
   getPlan, getIngressPlans, getPlanDiff,
 } from './api.js';
@@ -893,6 +893,114 @@ export class BoxFlakes extends LitElement {
   }
 }
 customElements.define('box-flakes', BoxFlakes);
+
+/**
+ * Sections: the per-repository census GET /v1/sections folds from the
+ * landed chain (issue #200) — what has landed in each declared section, how
+ * long units waited to get one, and which sections tend to land together.
+ * Declared sections a repo has never touched still appear, at zero; the
+ * whole-repository and unsectioned buckets appear too, when the chain
+ * actually produced them, because the cost of "no section" is as real as
+ * any section's own tally. Any graph here would be a client-side diagram of
+ * the co-change pairs, which docs/PLAN.md §6 settles server-side in Go — a
+ * plain table is the record.
+ */
+export class BoxSections extends LitElement {
+  static styles = [base, css`
+    :host { display: grid; gap: var(--jh-space-400); }
+    .reading { margin: 0; font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .wrap { overflow-x: auto; }
+    .wrap + .wrap { margin-top: var(--jh-space-300); }
+    table { border-collapse: collapse; width: 100%; min-width: 420px; }
+    caption { text-align: left; padding-bottom: var(--jh-space-200); font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    th, td { text-align: left; vertical-align: top; padding: var(--jh-space-200) var(--jh-space-300) var(--jh-space-200) 0;
+             border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    thead th { white-space: nowrap; font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+    tbody th { font-weight: 500; }
+  `];
+
+  _task = new Task(this, { task: async (_, { signal }) => getSections(signal), args: () => [] });
+
+  constructor() {
+    super();
+    this._activity = new ActivityController(this, {
+      limit: 1,
+      onEvent: (a) => { if (/index\/landings/.test(a.scope)) this._refresh(); },
+    });
+  }
+
+  _refresh() {
+    clearTimeout(this._timer);
+    this._timer = setTimeout(() => this._task.run(), 400);
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    clearTimeout(this._timer);
+  }
+
+  render() {
+    return this._task.render({
+      pending: () => html`<jh-card header-title="Sections" padding="medium">${loading('sections')}</jh-card>`,
+      error: (e) => html`<jh-card header-title="Sections" padding="medium">${failed(e)}</jh-card>`,
+      complete: (byRepo) => this._body(byRepo ?? {}),
+    });
+  }
+
+  _body(byRepo) {
+    const repos = Object.keys(byRepo).sort();
+    return html`
+      <jh-card header-title="Sections" header-subtitle="What has landed where, what waited, and what changes together" padding="medium">
+        <p class="reading">A section that is always waited on and never co-changes with its neighbours is a lease to
+          split; two sections that always change together are a lease to merge.</p>
+      </jh-card>
+      ${repos.length === 0
+        ? html`<jh-card padding="medium"><p class="empty">No repository has a section census yet.</p></jh-card>`
+        : repos.map((repo) => this._repo(repo, byRepo[repo]))}`;
+  }
+
+  _repo(repo, census) {
+    const sections = census?.sections ?? [];
+    const coChanges = census?.co_changes ?? [];
+    return html`
+      <jh-card header-title=${repo} padding="medium">
+        ${sections.length === 0
+          ? html`<p class="empty">Nothing has landed or waited here yet.</p>`
+          : html`
+            <div class="wrap">
+              <table>
+                <caption>${sections.length} section${sections.length === 1 ? '' : 's'}</caption>
+                <thead>
+                  <tr><th scope="col">Section</th><th scope="col">Landed</th><th scope="col">Waits</th><th scope="col">Wait time</th></tr>
+                </thead>
+                <tbody>
+                  ${sections.map((s) => html`
+                    <tr>
+                      <th scope="row">${s.name}</th>
+                      <td>${s.landed}</td>
+                      <td>${s.waits}</td>
+                      <td>${s.waits === 0
+                        ? html`<span class="muted">—</span>`
+                        : s.wait_seconds != null ? age(s.wait_seconds) : 'unknown'}</td>
+                    </tr>`)}
+                </tbody>
+              </table>
+            </div>`}
+        ${coChanges.length > 0 ? html`
+          <div class="wrap">
+            <table>
+              <caption>${coChanges.length} co-change pair${coChanges.length === 1 ? '' : 's'}</caption>
+              <thead><tr><th scope="col">Sections</th><th scope="col">Times</th></tr></thead>
+              <tbody>
+                ${coChanges.map((c) => html`
+                  <tr><th scope="row">${c.sections.join(' + ')}</th><td>${c.count}</td></tr>`)}
+              </tbody>
+            </table>
+          </div>` : nothing}
+      </jh-card>`;
+  }
+}
+customElements.define('box-sections', BoxSections);
 
 /** One item: what it is, where it stands, what can be done, and its whole chain. */
 export class BoxItem extends LitElement {
