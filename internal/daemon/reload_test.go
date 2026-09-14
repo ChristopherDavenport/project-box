@@ -203,11 +203,18 @@ func TestReloadRefusesIdentityChangesAndBadConfigs(t *testing.T) {
 	ts := httptest.NewServer(d.API.Handler())
 	t.Cleanup(ts.Close)
 	c, _ := api.Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
-	if _, err := c.OpenIngress(ctx, "shop-api", "still-alive", "prove it", "", ""); err != nil {
+	res, err := c.OpenIngress(ctx, "shop-api", "still-alive", "prove it", "", "")
+	if err != nil {
 		t.Fatalf("old config not running after refused reloads: %v", err)
 	}
 	if _, err := d.Tick(ctx); err != nil {
 		t.Fatal(err)
+	}
+	if !d.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the tick's dispatched run")
+	}
+	if item, err := c.Item(ctx, res.Item); err != nil || item.State != queue.StateDone {
+		t.Fatalf("work on the still-running old config: %+v %v", item, err)
 	}
 }
 
