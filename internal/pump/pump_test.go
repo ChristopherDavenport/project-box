@@ -985,13 +985,16 @@ func TestALandReadyCandidateGoesBeforeAFreshBuild(t *testing.T) {
 	}
 }
 
-// TestAStarvedHeadStillWinsOverALandReadyWaiter: a land-ready candidate is
-// still just a waiter next to a head that has already reached the starve
-// bound — the head is by definition the older of the two waits — so it goes
-// first, and the land-ready candidate yields to it exactly like any other
-// contender whose sections intersect the head's.
-func TestAStarvedHeadStillWinsOverALandReadyWaiter(t *testing.T) {
-	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+// TestALandReadyWaiterPreemptsAStarvedHead is issue #207 by name: a
+// land-ready candidate a land-step from freeing its section no longer
+// yields to a starved head that shares it — it goes first, lands, and frees
+// the section, while the head learns the section is held and waits with its
+// SectionWaits intact and its SectionPreemptions grown by one. Once the
+// section is actually free, the head dispatches on a later tick and its
+// counters settle back to zero — the bound never engaged because the head
+// was only preempted once.
+func TestALandReadyWaiterPreemptsAStarvedHead(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 1})
 	ctx := context.Background()
 	w.sectionedRepo()
 	w.pump.StarveAfter = 3
@@ -1020,16 +1023,137 @@ func TestAStarvedHeadStillWinsOverALandReadyWaiter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if ready.State != queue.StateDone {
+		t.Fatalf("the land-ready candidate should go ahead of the head and land, got %s: %s", ready.State, ready.Note)
+	}
+	if head.State != queue.StateWaiting {
+		t.Fatalf("the head should learn the section is held by the land-ready candidate and wait, got %s: %s", head.State, head.Note)
+	}
+	if !strings.Contains(head.Note, "held by "+ready.ID) {
+		t.Fatalf("the head's wait note should name the land-ready holder: %s", head.Note)
+	}
+	if head.SectionWaits != 4 {
+		t.Errorf("the head's SectionWaits should keep counting through the preemption, got %d", head.SectionWaits)
+	}
+	if head.SectionPreemptions != 1 {
+		t.Errorf("the head's SectionPreemptions should grow by one, got %d", head.SectionPreemptions)
+	}
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
+	head, err = w.q.Load(ctx, tn, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if head.State != queue.StateDone {
-		t.Fatalf("the starved head should dispatch and land, got %s: %s", head.State, head.Note)
+		t.Fatalf("the head should claim the section once it frees and land, got %s: %s", head.State, head.Note)
+	}
+	if head.SectionWaits != 0 || head.SectionPreemptions != 0 {
+		t.Errorf("the head's SectionWaits and SectionPreemptions should reset once its sections are granted, got %d and %d",
+			head.SectionWaits, head.SectionPreemptions)
+	}
+}
+
+// TestAStarvedHeadAtTheBoundStillWinsOverALandReadyWaiter: once a head's
+// SectionPreemptions has already reached [Pump.LandPreemptions], the bound
+// closes — a land-ready candidate sharing its section is no longer exempted
+// and yields exactly as any other contender would, and the head goes and
+// lands, its counter settling back to zero once it does.
+func TestAStarvedHeadAtTheBoundStillWinsOverALandReadyWaiter(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 4})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	head := w.submitItem(t, "head-1", "fix module head", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.SectionWaits = 3
+		wi.SectionPreemptions = DefaultLandPreemptions
+	})
+	ready := w.submitItem(t, "ready-1", "fix module ready", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.Built, wi.BuiltBase = "deadbeef", "cafebabe"
+		wi.PassedGates = []string{"post-land"}
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
+	head, err := w.q.Load(ctx, tn, head.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ready, err = w.q.Load(ctx, tn, ready.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head.State != queue.StateDone {
+		t.Fatalf("the head at the bound should dispatch and land, got %s: %s", head.State, head.Note)
+	}
+	if head.SectionPreemptions != 0 {
+		t.Errorf("the head's SectionPreemptions should reset once its sections are granted, got %d", head.SectionPreemptions)
 	}
 	if ready.State != queue.StateWaiting {
-		t.Fatalf("the land-ready candidate should yield to the starved head, got %s: %s", ready.State, ready.Note)
+		t.Fatalf("the land-ready candidate should yield to the head at the bound, got %s: %s", ready.State, ready.Note)
 	}
 	for _, want := range []string{"reserved for " + head.ID, "next in line"} {
 		if !strings.Contains(ready.Note, want) {
 			t.Errorf("the land-ready candidate's wait does not say %q: %s", want, ready.Note)
 		}
+	}
+}
+
+// TestALandReadyWaiterAndADisjointCandidateBothDispatch: the #207 change
+// only reshuffles candidates that actually intersect a head's sections —
+// nothing about disjoint work changes. A land-ready waiter and a fresh
+// candidate in unrelated sections both dispatch in the same tick, exactly
+// as before this issue.
+func TestALandReadyWaiterAndADisjointCandidateBothDispatch(t *testing.T) {
+	w := setup(t, capacity.Budget{MaxConcurrent: 2})
+	ctx := context.Background()
+	w.sectionedRepo()
+	w.pump.StarveAfter = 3
+
+	ready := w.submitItem(t, "ready-1", "fix module ready", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"api"}
+		wi.Built, wi.BuiltBase = "deadbeef", "cafebabe"
+		wi.PassedGates = []string{"post-land"}
+	})
+	fresh := w.submitItem(t, "fresh-1", "fix module fresh", func(wi *queue.WorkItem) {
+		wi.Sections = []string{"web"}
+	})
+
+	if _, err := w.pump.Drain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !w.pump.Quiesce(ctx) {
+		t.Fatal("quiesce did not settle the pass's dispatched run")
+	}
+	ready, err := w.q.Load(ctx, tn, ready.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err = w.q.Load(ctx, tn, fresh.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.State != queue.StateDone {
+		t.Fatalf("the land-ready candidate should dispatch and land, got %s: %s", ready.State, ready.Note)
+	}
+	// The two land on the same branch, so the second to reach the land
+	// window is serialized behind the first rather than stranded — same as
+	// [TestThreeDisjointSectionsDispatchInOneTick]: dispatched, with a
+	// kept Built commit to retry, is "ran" even without reaching Done.
+	ran := fresh.State == queue.StateDone || (fresh.State == queue.StateWaiting && fresh.Built != "")
+	if !ran {
+		t.Fatalf("the disjoint fresh candidate should dispatch too, got %s: %s", fresh.State, fresh.Note)
 	}
 }
 

@@ -467,12 +467,30 @@ type WorkItem struct {
 	// line ([WorkItem.dropResume], which also covers a successful landing
 	// via [Queue.Done]).
 	LandWaits int `json:"land_waits,omitempty"`
+	// SectionPreemptions counts how many claims in a row this unit was a
+	// starved section head that a land-ready candidate sharing its section
+	// went ahead of instead of yielding — the bound [pump.Pump.fairSectionOrder]
+	// reads, via [pump.Pump.LandPreemptions], to make the head go regardless
+	// once it has paid this too many times (issue #207). Meaningful only for
+	// a section head; an ordinary candidate never carries this. Reset to
+	// zero the moment the sections this unit needs are actually acquired,
+	// the same reset sites as SectionWaits.
+	SectionPreemptions int `json:"section_preemptions,omitempty"`
 	// YieldTo is the ID of a starved unit this claim should step aside for on
 	// this tick, set by the pump on the candidate copy it hands to
 	// [loop.Loop.Run]. It is a dispatch hint, not a fact about the item — the
 	// json:"-" tag keeps it off every record, since a hint that survived into
 	// the chain could be replayed onto a fold that never made the decision.
 	YieldTo string `json:"-"`
+	// Preempted marks a starved section head's candidate copy when at least
+	// one land-ready candidate sharing its section went ahead of it this
+	// tick instead of yielding (issue #207) — the fact
+	// [loop.Loop.WaitOnSection] and [loop.Loop.RunHolding]'s busy path read
+	// to grow SectionPreemptions, so an ordinary busy section (nobody
+	// preempted this tick) never inflates the count. A dispatch hint, not a
+	// fact about the item — see YieldTo for why it carries the same
+	// json:"-" tag.
+	Preempted bool `json:"-"`
 	// AwaitingReplan marks a unit whose builder escalated for a need
 	// [loop.WidenTests] could not grant in place, waiting on
 	// [plan.Replanner] rather than a person (issue #182). State is

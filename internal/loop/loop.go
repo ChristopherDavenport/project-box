@@ -620,8 +620,10 @@ func (l *Loop) Poll(ctx context.Context, item queue.WorkItem) bool {
 // reports busy, before Meter.Acquire is ever reached, so a unit that cannot
 // take its section yet never spends a seat to learn that. It claims the item
 // exactly as Run does — queue.Wait needs the claim lease, and Loop is what
-// holds Store, Runner and TTL to take one — increments SectionWaits exactly
-// as leaseSections' busy path does inside Run, and waits on the same busy
+// holds Store, Runner and TTL to take one — increments SectionWaits, and
+// SectionPreemptions too when item.Preempted names this as a head a
+// land-ready candidate went ahead of this tick (issue #207), exactly as
+// leaseSections' busy path does inside Run, and waits on the same busy
 // note. Built is untouched, same as every other wait path here, so a resume
 // point already kept survives this wait too.
 func (l *Loop) WaitOnSection(ctx context.Context, item queue.WorkItem, busy string) (queue.WorkItem, error) {
@@ -631,6 +633,9 @@ func (l *Loop) WaitOnSection(ctx context.Context, item queue.WorkItem, busy stri
 		return item, fmt.Errorf("loop: claim: %w", err)
 	}
 	item.SectionWaits++
+	if item.Preempted {
+		item.SectionPreemptions++
+	}
 	return q.Wait(ctx, item, claim, busy)
 }
 
@@ -745,8 +750,11 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		// The pump already took these sections in Drain, before it spent a
 		// meter seat on this item — this call is the one place that grant is
 		// ever spent. item.SectionWaits = 0 for the same reason the direct
-		// path below zeroes it: this run of the item is not waiting.
+		// path below zeroes it: this run of the item is not waiting. Its
+		// SectionPreemptions resets alongside it (issue #207): the sections
+		// are granted, so whatever it paid waiting for them is settled.
 		item.SectionWaits = 0
+		item.SectionPreemptions = 0
 		held.setSections(grant.leases)
 	} else {
 		releaseSections, sectionLeases, busy, err := l.leaseSections(ctx, item)
@@ -755,9 +763,13 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		}
 		if busy != "" {
 			item.SectionWaits++
+			if item.Preempted {
+				item.SectionPreemptions++
+			}
 			return q.Wait(ctx, item, claim, busy)
 		}
 		item.SectionWaits = 0
+		item.SectionPreemptions = 0
 		defer releaseSections()
 		held.setSections(sectionLeases)
 	}

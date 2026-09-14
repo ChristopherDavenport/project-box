@@ -37,6 +37,15 @@ import (
 // wait long enough for an operator to have to notice it — see issue #109.
 const DefaultStarveAfter = 3
 
+// DefaultLandPreemptions is how many times in a row a land-ready candidate
+// may go ahead of a starved section head it shares a section with, when
+// [Pump.LandPreemptions] is unset. Small on purpose: a land-ready unit a
+// land-step from freeing its section should not make a starved head wait
+// out a whole fresh build-and-review cycle to learn that, but a head that
+// keeps losing its turn to a stream of newer land-ready arrivals still has
+// to win eventually — see issue #207.
+const DefaultLandPreemptions = 2
+
 // Pump feeds and drains one tenant's queue.
 type Pump struct {
 	Store  store.Store
@@ -58,6 +67,11 @@ type Pump struct {
 	// the starved head of its (Box, Repo) group — see [DefaultStarveAfter].
 	// Zero uses the default.
 	StarveAfter int
+	// LandPreemptions bounds how many times in a row a land-ready candidate
+	// may go ahead of a starved section head it shares a section with
+	// instead of yielding — see [DefaultLandPreemptions] and issue #207.
+	// Zero uses the default.
+	LandPreemptions int
 	// Kinds is the declaration set intake resolves an origination's kind
 	// against, and Decomposers the producers those declarations name. Plans
 	// records what each decomposition decided.
@@ -502,11 +516,22 @@ func sectionsIntersect(a, b []string) bool {
 // is moved ahead of every non-head, non-holder candidate that would start a
 // fresh build, even when nobody in its group has starved: finishing a
 // landing frees its section sooner than any build does, and every build
-// that lands first is a rebase the waiter pays for. It still yields to a
-// starved head whose sections it shares, the same as any other candidate —
-// a starved head and a land-ready waiter are both already waiting, and the
-// head is by definition the older of the two — but among the rest it goes
-// first.
+// that lands first is a rebase the waiter pays for.
+//
+// Issue #207: a land-ready candidate that shares a section with the group's
+// starved head no longer yields to it — it goes ahead of the head instead.
+// A minute of landing is not a build: the old rule made a candidate one
+// land-step from freeing its section wait out a head that could spend
+// twenty minutes on a fresh build and review, holding that section the
+// whole time — when letting the almost-done candidate through first would
+// have cost both sides nothing. This is bounded, so the head still wins
+// eventually: each time it is preempted this way — at least one land-ready
+// candidate sharing its section went ahead of it — [queue.WorkItem.SectionPreemptions]
+// on the head's own item increments, and once that reaches
+// [Pump.LandPreemptions] (default [DefaultLandPreemptions]) the head goes
+// regardless, exactly as before this issue, until its sections are finally
+// granted and the counter resets alongside SectionWaits. The holder
+// exemption above is unaffected — a holder is never yielded to anything.
 //
 // Issue #166: the same shape applies to the land window. A group's land
 // window is one branch (Branch is repo-level config, so the (box, repo)
@@ -551,6 +576,10 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 	if bound <= 0 {
 		bound = DefaultStarveAfter
 	}
+	landBound := p.LandPreemptions
+	if landBound <= 0 {
+		landBound = DefaultLandPreemptions
+	}
 	type groupKey struct{ box, repo string }
 	groups := map[groupKey][]int{}
 	var groupOrder []groupKey
@@ -566,6 +595,7 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 	}
 
 	heads := map[int]bool{}
+	preempting := map[int]bool{}
 	for _, k := range groupOrder {
 		idxs := groups[k] // priority-then-age — the sort Drain applies before calling this
 
@@ -627,18 +657,46 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 			continue // nobody in this group has starved yet
 		}
 		heads[head] = true
+		// Issue #207: a land-ready candidate sharing a section with the head
+		// goes ahead of it instead of yielding, unless the head has already
+		// been preempted this way landBound times — see the doc comment
+		// above. Every other candidate that intersects the head's sections
+		// still yields exactly as before.
+		exempt := cands[head].item.SectionPreemptions < landBound
+		preempted := false
 		for _, i := range idxs {
 			if i == head || cands[i].holder {
 				continue
 			}
-			if sectionsIntersect(cands[head].item.Sections, cands[i].item.Sections) {
-				cands[i].item.YieldTo = cands[head].item.ID
+			if !sectionsIntersect(cands[head].item.Sections, cands[i].item.Sections) {
+				continue
 			}
+			if exempt && landReady(cands[i].item) {
+				preempting[i] = true
+				preempted = true
+				continue
+			}
+			cands[i].item.YieldTo = cands[head].item.ID
+		}
+		if preempted {
+			cands[head].item.Preempted = true
 		}
 	}
 	ordered := make([]drainCandidate, 0, len(cands))
 	for i, c := range cands {
 		if c.holder && !heads[i] {
+			ordered = append(ordered, c)
+		}
+	}
+	// Issue #207: a land-ready candidate exempted from yielding to a head
+	// must actually dispatch before that head — otherwise exempting it from
+	// YieldTo would do nothing, since the head still sits earlier in this
+	// order and Drain's dispatch loop claims sections in order. It goes
+	// ahead of every head, not just the one it preempted: it is, by
+	// definition, closer to done than any candidate still contending for a
+	// section to even start building.
+	for i, c := range cands {
+		if preempting[i] && !c.holder {
 			ordered = append(ordered, c)
 		}
 	}
@@ -648,12 +706,12 @@ func (p *Pump) fairSectionOrder(cands []drainCandidate) []drainCandidate {
 		}
 	}
 	for i, c := range cands {
-		if !heads[i] && !c.holder && landReady(c.item) {
+		if !heads[i] && !preempting[i] && !c.holder && landReady(c.item) {
 			ordered = append(ordered, c)
 		}
 	}
 	for i, c := range cands {
-		if !heads[i] && !c.holder && !landReady(c.item) {
+		if !heads[i] && !preempting[i] && !c.holder && !landReady(c.item) {
 			ordered = append(ordered, c)
 		}
 	}
