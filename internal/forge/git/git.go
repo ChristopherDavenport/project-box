@@ -551,8 +551,8 @@ func run(ctx context.Context, dir string, args ...string) (string, error) {
 	}
 	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_AUTHOR_NAME=project-box", "GIT_AUTHOR_EMAIL=box@invalid",
-		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=box@invalid",
+		"GIT_AUTHOR_NAME=project-box", "GIT_AUTHOR_EMAIL=noreply+pbox@christopherdavenport.tech",
+		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=noreply+pbox@christopherdavenport.tech",
 	)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
@@ -760,7 +760,7 @@ func Squash(ctx context.Context, dir string, base, head forge.Commit) (forge.Com
 	cmd.Env = append(os.Environ(),
 		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
 		"GIT_AUTHOR_NAME="+name, "GIT_AUTHOR_EMAIL="+email, "GIT_AUTHOR_DATE="+date,
-		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=box@invalid",
+		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=noreply+pbox@christopherdavenport.tech",
 	)
 	cmd.Stdin = strings.NewReader(message)
 	var commitOut, commitErr bytes.Buffer
