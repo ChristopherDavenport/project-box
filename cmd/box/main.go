@@ -532,7 +532,7 @@ func viaDaemon(addr, token, actor, cmd string, rest []string) error {
 			// The parts, because the total cannot be priced without them —
 			// a cached read and an output token count the same here and bill
 			// an order of magnitude apart.
-			if split := tokenSplit(sp); split != "" {
+			if split := tokenSplit(sp.Report); split != "" {
 				line += " (" + split + ")"
 			}
 			if sp.CostMicros > 0 || sp.MaxCostMicros > 0 {

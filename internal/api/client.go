@@ -111,6 +111,14 @@ func (c *Client) Flakes(ctx context.Context) ([]control.FlakeEntry, error) {
 	return out, c.do(ctx, "GET", "/v1/flakes", nil, &out)
 }
 
+// Landings lists every settled item, newest first, each carrying what it
+// cost to land, plus the per-landing projection over the meter's window
+// (when configured) and since boot.
+func (c *Client) Landings(ctx context.Context) (LandingsPage, error) {
+	var out LandingsPage
+	return out, c.do(ctx, "GET", "/v1/landings", nil, &out)
+}
+
 // Items lists the work queue, narrowed to the given states or unfiltered when
 // none are given.
 func (c *Client) Items(ctx context.Context, states ...string) ([]control.QueueEntry, error) {

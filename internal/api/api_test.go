@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -940,6 +942,184 @@ func TestSectionsOverTheWire(t *testing.T) {
 	beta, ok := byName["beta"]
 	if !ok || beta.Landed != 0 {
 		t.Fatalf("beta: declared with no landings yet, want zero not absent: %+v", byName)
+	}
+}
+
+// TestLandingsOverTheWire is issue #183 part 2's happy path: GET
+// /v1/landings lists two settled items newest first, each carrying its own
+// [queue.LandingCost], and the per-landing fold — both on the listing
+// itself and on /v1/status's spend block — sums only the one with a known
+// cost and counts the other in Unknown rather than silently reading it as
+// free.
+func TestLandingsOverTheWire(t *testing.T) {
+	w := rig(t)
+	w.srv.Meter = &capacity.Meter{Budget: capacity.Budget{Window: time.Hour}}
+	ts := httptest.NewServer(w.srv.Handler())
+	t.Cleanup(ts.Close)
+	ctx := context.Background()
+
+	q := &queue.Queue{Store: w.srv.Store, Runner: "d", TTL: time.Hour}
+
+	item1, err := q.Submit(ctx, queue.WorkItem{
+		ID: "wi-1", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: "close issue one", Repo: "app",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item1, lease1, err := q.Claim(ctx, item1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item1.Attempt = 2
+	item1.Cost = &queue.LandingCost{CostMicros: 3500, Tokens: 800, Runs: 3, Reviews: 1, Known: true}
+	if _, err := q.Done(ctx, item1, lease1, forge.Commit("sha-1")); err != nil {
+		t.Fatal(err)
+	}
+
+	item2, err := q.Submit(ctx, queue.WorkItem{
+		ID: "wi-2", Tenant: tn, Box: "shop", Ingress: "ing-2", Task: "close issue two", Repo: "app",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item2, lease2, err := q.Claim(ctx, item2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item2.Cost = &queue.LandingCost{Runs: 1, Unmetered: 1, Known: false}
+	if _, err := q.Done(ctx, item2, lease2, forge.Commit("sha-2")); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	page, err := c.Landings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Landings) != 2 {
+		t.Fatalf("want 2 landings, got %d: %+v", len(page.Landings), page.Landings)
+	}
+	if page.Landings[0].ID != "wi-2" || page.Landings[1].ID != "wi-1" {
+		t.Fatalf("want newest first (wi-2, wi-1), got %+v", page.Landings)
+	}
+	first := page.Landings[1]
+	if first.Head != "sha-1" || first.Attempt != 2 {
+		t.Fatalf("wi-1: head/attempt did not survive the wire: %+v", first)
+	}
+	if first.Cost == nil || !first.Cost.Known || first.Cost.CostMicros != 3500 ||
+		first.Cost.Tokens != 800 || first.Cost.Reviews != 1 {
+		t.Fatalf("wi-1: cost did not survive the wire: %+v", first.Cost)
+	}
+	second := page.Landings[0]
+	if second.Cost == nil || second.Cost.Known {
+		t.Fatalf("wi-2: cost should read unknown: %+v", second.Cost)
+	}
+
+	for _, pl := range []struct {
+		name string
+		got  *control.PerLanding
+	}{{"since_boot", &page.SinceBoot}, {"window", page.Window}} {
+		if pl.got == nil {
+			t.Fatalf("%s: want a per-landing fold, got none", pl.name)
+		}
+		if pl.got.Count != 2 || pl.got.Unknown != 1 || pl.got.CostMicros != 3500 {
+			t.Fatalf("%s: fold = %+v, want count 2 unknown 1 cost_micros 3500", pl.name, pl.got)
+		}
+	}
+
+	st, err := c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Spend == nil || st.Spend.PerLanding == nil {
+		t.Fatalf("status: want spend.per_landing, got %+v", st.Spend)
+	}
+	if got := st.Spend.PerLanding; got.Count != 2 || got.Unknown != 1 || got.CostMicros != 3500 {
+		t.Fatalf("status: per_landing = %+v, want count 2 unknown 1 cost_micros 3500", got)
+	}
+	// The embedding must not rename anything. Decoding through [Status] and
+	// [SpendReport] again would only prove the two sides of this same test
+	// agree with themselves — a tag added to the embedded field (nesting
+	// every [capacity.Report] key under spend.report) round-trips through
+	// that struct just as cleanly as today's flat shape does. The property
+	// this guards is the wire's, so it has to be read off the wire: fetch
+	// /v1/status raw and assert the keys [capacity.Report] has always
+	// reported are still top-level members of the spend object, beside
+	// per_landing rather than nesting it away from them.
+	res, err := http.Get(ts.URL + "/v1/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	var raw struct {
+		Spend map[string]json.RawMessage `json:"spend"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&raw); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{
+		"tokens", "cost_micros", "max_per_window", "window_sec",
+		"refusing", "running_builds", "per_landing",
+	} {
+		if _, ok := raw.Spend[key]; !ok {
+			t.Fatalf("status: spend.%s missing from the wire; keys are %v", key, slices.Sorted(maps.Keys(raw.Spend)))
+		}
+	}
+}
+
+// TestLandingsOmitsPerLandingWindowWithNoWindowConfigured: a meter with no
+// Window set has no window to project against, and the fold must be absent
+// on both endpoints — never a {0,0,0} that would misread as "an empty
+// window" rather than "no window at all" (docs/PLAN.md's unknown-never-
+// reads-as-zero rule, applied to a fold rather than a money figure).
+func TestLandingsOmitsPerLandingWindowWithNoWindowConfigured(t *testing.T) {
+	w := rig(t)
+	w.srv.Meter = &capacity.Meter{}
+	ts := httptest.NewServer(w.srv.Handler())
+	t.Cleanup(ts.Close)
+	ctx := context.Background()
+
+	q := &queue.Queue{Store: w.srv.Store, Runner: "d", TTL: time.Hour}
+	item, err := q.Submit(ctx, queue.WorkItem{ID: "wi-1", Tenant: tn, Box: "shop", Ingress: "ing-1", Task: "t", Repo: "app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, lease, err := q.Claim(ctx, item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	item.Cost = &queue.LandingCost{CostMicros: 100, Runs: 1, Known: true}
+	if _, err := q.Done(ctx, item, lease, forge.Commit("sha-1")); err != nil {
+		t.Fatal(err)
+	}
+
+	c, err := Dial("tcp:"+strings.TrimPrefix(ts.URL, "http://"), "", "chris")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := c.Landings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if page.Window != nil {
+		t.Fatalf("no window configured: want window fold absent, got %+v", page.Window)
+	}
+	if page.SinceBoot.Count != 1 {
+		t.Fatalf("since_boot should still fold with no window configured: %+v", page.SinceBoot)
+	}
+	st, err := c.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Spend == nil {
+		t.Fatal("status: want spend present with a meter wired")
+	}
+	if st.Spend.PerLanding != nil {
+		t.Fatalf("no window configured: want spend.per_landing absent, got %+v", st.Spend.PerLanding)
 	}
 }
 

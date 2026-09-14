@@ -848,6 +848,97 @@ func (r *Room) Sample(ctx context.Context, n int, seed string) ([]queue.WorkItem
 	return items, nil
 }
 
+// Landing is one settled item as an operator needs it to judge cost: what it
+// was, where and when it landed, and — via [queue.LandingCost] — what
+// landing it cost (issue #183).
+type Landing struct {
+	ID string `json:"id"`
+	// Line is the item's Summary, or a clipped first line of its Task when
+	// Summary is empty — the same fallback [Room.entry] uses for QueueEntry.
+	Line    string             `json:"line"`
+	Head    string             `json:"head"`
+	At      time.Time          `json:"at"`
+	Attempt int                `json:"attempt,omitempty"`
+	Cost    *queue.LandingCost `json:"cost,omitempty"`
+}
+
+// Landings lists every settled item, newest first, one row per item —
+// folded from the same "index/landings" scope [Queue.Done] writes and
+// [Room.Sample] and [Room.Sections] already read.
+//
+// Dedupes by Subject like those two, but keeps the LATEST record seen for
+// each id rather than the first: Sample only needs to know an id has ever
+// landed, so which occurrence it keeps is immaterial, but this listing shows
+// the head and the landed-at time themselves, and an item retried and landed
+// again must show its current landing, not its first.
+func (r *Room) Landings(ctx context.Context) ([]Landing, error) {
+	type raw struct {
+		head string
+		at   time.Time
+	}
+	rows := map[string]raw{}
+	var order []string
+	for rec, err := range r.Store.Log().Since(ctx, r.Tenant, "index/landings", 1) {
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := rows[rec.Subject]; !ok {
+			order = append(order, rec.Subject)
+		}
+		rows[rec.Subject] = raw{head: string(rec.Body), at: rec.At}
+	}
+	q := &queue.Queue{Store: r.Store, Runner: r.Actor}
+	out := make([]Landing, 0, len(order))
+	for _, id := range order {
+		row := rows[id]
+		w, err := q.Load(ctx, r.Tenant, id)
+		if err != nil {
+			return nil, err
+		}
+		line := w.Summary
+		if line == "" {
+			line = clip(firstLine(w.Task), 200)
+		}
+		out = append(out, Landing{
+			ID: id, Line: line, Head: row.head, At: row.at,
+			Attempt: w.Attempt, Cost: w.Cost,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].At.After(out[j].At) })
+	return out, nil
+}
+
+// PerLanding is a projection of the [Room.Landings] listing (docs/PLAN.md
+// §6: a count is a projection of the listing, never a second reading of
+// it): total cost summed over landings whose cost is known, how many
+// landings fell in the window, and how many of those had a cost this fold
+// could not price. Landings with unknown cost are excluded from the sum and
+// counted in Unknown instead — a dashboard that cannot tell cheap from
+// unmetered cannot be trusted with a budget.
+type PerLanding struct {
+	CostMicros int64 `json:"cost_micros"`
+	Count      int   `json:"count"`
+	Unknown    int   `json:"unknown"`
+}
+
+// FoldLandings sums cost over landings at or after cutoff, from a listing
+// [Room.Landings] already produced — never a second walk of the chain.
+func FoldLandings(landings []Landing, cutoff time.Time) PerLanding {
+	var out PerLanding
+	for _, l := range landings {
+		if l.At.Before(cutoff) {
+			continue
+		}
+		out.Count++
+		if l.Cost != nil && l.Cost.Known {
+			out.CostMicros += l.Cost.CostMicros
+			continue
+		}
+		out.Unknown++
+	}
+	return out
+}
+
 // SignOff records one reviewed item. Verdict "pass" closes the review;
 // anything else is a finding the reviewer wants followed — either way it is
 // the CC4.1 record.

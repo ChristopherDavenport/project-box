@@ -353,6 +353,65 @@ func TestSampleIsDeterministicAndRecorded(t *testing.T) {
 	}
 }
 
+// TestLandingsListsNewestFirstWithCost is issue #183 part 2's happy path:
+// [Room.Landings] folds "index/landings" newest first, one row per item,
+// carrying the line an operator would recognize it by and the
+// [queue.LandingCost] queue.Load folded back out of the done record. Its
+// projection, [FoldLandings], sums only the landing with a known cost and
+// counts the other in Unknown — a cutoff past both excludes them entirely,
+// never as a smaller true sum.
+func TestLandingsListsNewestFirstWithCost(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+
+	w1 := submit(t, q, "wi-1")
+	w1, lease1, err := q.Claim(ctx, w1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w1.Cost = &queue.LandingCost{CostMicros: 1000, Tokens: 300, Runs: 1, Known: true}
+	if _, err := q.Done(ctx, w1, lease1, forge.Commit("sha-1")); err != nil {
+		t.Fatal(err)
+	}
+
+	w2 := submit(t, q, "wi-2")
+	w2, lease2, err := q.Claim(ctx, w2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w2.Cost = &queue.LandingCost{Runs: 1, Unmetered: 1, Known: false}
+	if _, err := q.Done(ctx, w2, lease2, forge.Commit("sha-2")); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := r.Landings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 2 || out[0].ID != "wi-2" || out[1].ID != "wi-1" {
+		t.Fatalf("want newest first (wi-2, wi-1), got %+v", out)
+	}
+	if out[1].Line != "t" || out[1].Head != "sha-1" {
+		t.Fatalf("wi-1: line/head did not fold as expected: %+v", out[1])
+	}
+	if out[1].Cost == nil || !out[1].Cost.Known || out[1].Cost.CostMicros != 1000 {
+		t.Fatalf("wi-1: cost wrong: %+v", out[1].Cost)
+	}
+	if out[0].Cost == nil || out[0].Cost.Known {
+		t.Fatalf("wi-2: cost should read unknown: %+v", out[0].Cost)
+	}
+
+	fold := FoldLandings(out, time.Time{})
+	if fold.Count != 2 || fold.Unknown != 1 || fold.CostMicros != 1000 {
+		t.Fatalf("fold = %+v, want count 2 unknown 1 cost_micros 1000", fold)
+	}
+
+	future := FoldLandings(out, time.Now().Add(time.Hour))
+	if future.Count != 0 || future.Unknown != 0 || future.CostMicros != 0 {
+		t.Fatalf("cutoff past both landings = %+v, want all zero", future)
+	}
+}
+
 // TestQueueListsWhatACountCannot is issue #20 as an assertion. Fifteen units
 // went in one morning and `pending=14` was the entire view: no way to see what
 // the factory was sitting on, and no way to read the notes it had already

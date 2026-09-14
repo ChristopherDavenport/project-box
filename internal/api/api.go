@@ -203,6 +203,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/exceptions", s.exceptions)
 	mux.HandleFunc("GET /v1/flakes", s.flakes)
 	mux.HandleFunc("GET /v1/sections", s.sections)
+	mux.HandleFunc("GET /v1/landings", s.landings)
 	mux.HandleFunc("GET /v1/items", s.items)
 	mux.HandleFunc("GET /v1/items/{id}", s.item)
 	mux.HandleFunc("GET /v1/items/{id}/evidence", s.itemEvidence)
@@ -328,6 +329,17 @@ func (s *Server) room(r *http.Request) *control.Room {
 		Objective: s.Objective, Live: s.Live}
 }
 
+// SpendReport is /v1/status's spend block: the capacity meter's own report,
+// embedded so every existing key stays byte-identical, plus the operator's
+// per-landing projection beside it (issue #183). The meter has no notion of
+// a landing and the room has no notion of a credential, so PerLanding is
+// added here rather than on [capacity.Report] itself — it is the operator's
+// figure, not the meter's.
+type SpendReport struct {
+	*capacity.Report
+	PerLanding *control.PerLanding `json:"per_landing,omitempty"`
+}
+
 // Status is /v1/status.
 type Status struct {
 	Tenant  tenant.ID `json:"tenant"`
@@ -355,7 +367,7 @@ type Status struct {
 	// Spend is the capacity window's account. Nil when the server was wired
 	// without a meter; absent rather than zero, because a zero here would
 	// read as "nothing spent" when it means "nobody asked".
-	Spend *capacity.Report `json:"spend,omitempty"`
+	Spend *SpendReport `json:"spend,omitempty"`
 	// BuildCommit and BuildDirty are this daemon's own running build, from
 	// version.ThisBuild: the commit the binary was actually compiled from,
 	// and whether its tree had uncommitted changes. Both omitted when the
@@ -417,7 +429,17 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Meter != nil {
 		rep := s.Meter.Report()
-		st.Spend = &rep
+		sp := &SpendReport{Report: &rep}
+		if rep.Window > 0 {
+			landings, err := s.room(r).Landings(ctx)
+			if err != nil {
+				httpErr(w, 500, err.Error())
+				return
+			}
+			pl := control.FoldLandings(landings, time.Now().Truncate(rep.Window))
+			sp.PerLanding = &pl
+		}
+		st.Spend = sp
 	}
 	build := version.ThisBuild()
 	if s.Build != nil {
@@ -525,6 +547,39 @@ func (s *Server) sections(w http.ResponseWriter, r *http.Request) {
 		out[repo] = census
 	}
 	writeJSON(w, out)
+}
+
+// LandingsPage is GET /v1/landings: the listing newest first, with the
+// same per-landing projection folded over two cutoffs — the meter's own
+// rolling window, when one is configured, and this process's own uptime.
+// Both are projections of the one listing this handler already read, never
+// a second walk of the chain (docs/PLAN.md §6).
+type LandingsPage struct {
+	Landings  []control.Landing   `json:"landings"`
+	Window    *control.PerLanding `json:"window,omitempty"`
+	SinceBoot control.PerLanding  `json:"since_boot"`
+}
+
+// landings is GET /v1/landings: every settled item, newest first, each
+// carrying what it cost to land (issue #183) — the per-landing counterpart
+// to /v1/sections' per-section one.
+func (s *Server) landings(w http.ResponseWriter, r *http.Request) {
+	list, err := s.room(r).Landings(r.Context())
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	if list == nil {
+		list = []control.Landing{}
+	}
+	page := LandingsPage{Landings: list, SinceBoot: control.FoldLandings(list, s.Started)}
+	if s.Meter != nil {
+		if rep := s.Meter.Report(); rep.Window > 0 {
+			pl := control.FoldLandings(list, time.Now().Truncate(rep.Window))
+			page.Window = &pl
+		}
+	}
+	writeJSON(w, page)
 }
 
 // sessions is the per-unit live view: one entry per RUNNING unit, each with
