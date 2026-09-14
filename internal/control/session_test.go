@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/ChristopherDavenport/project-box/internal/agent/acp"
 	"github.com/ChristopherDavenport/project-box/internal/evidence"
 	"github.com/ChristopherDavenport/project-box/internal/ingress"
 	"github.com/ChristopherDavenport/project-box/internal/plan"
@@ -89,6 +90,41 @@ func agentResultOn(t *testing.T, r *Room, scope, ref string, wallMS, tokens int6
 	}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// builtOn writes the "built" record the loop writes right after a builder
+// attempt's own agent-run/agent-session/agent-result (internal/loop/loop.go
+// line 819), subject = the new head.
+func builtOn(t *testing.T, r *Room, scope, sha string) {
+	t.Helper()
+	if _, err := r.Store.Log().Append(context.Background(), evidence.Record{
+		Tenant: tn, Scope: scope, Kind: "built", Subject: sha, Body: []byte("{}"),
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// gateOn writes a "gate" record the way the loop's gateVerdictRecord
+// marshals — forge.Verdict's own default JSON encoding, Go-capitalized field
+// names (internal/loop/loop.go's gateVerdictRecord) — for a gate named
+// `gate` (e.g. the repo's check label, "commit-message", or acp.ReviewerName
+// "review") judging subject sha. Returns the record's chain id, the same id
+// a review row's VerdictRecordID should carry.
+func gateOn(t *testing.T, r *Room, scope, sha, gate, decision, reason string) string {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"Gate": gate, "Decision": decision, "Reason": reason,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, err := r.Store.Log().Append(context.Background(), evidence.Record{
+		Tenant: tn, Scope: scope, Kind: "gate", Subject: sha, Body: body,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rec.ID
 }
 
 // TestASessionSaysWhoWhereAndWhat is the issue's three bullets on one card.
@@ -453,6 +489,141 @@ func TestAgentSessionsFoldChainOrderRolesAttemptsAndCost(t *testing.T) {
 	}
 	if s.AgentCostUSD != 0.75 {
 		t.Errorf("agent cost = %v, want 0.75 (sum of the listed rows)", s.AgentCostUSD)
+	}
+}
+
+// TestAgentSessionsFoldHeadsRowsByRoleWithVerdicts is issue #189's chain: two
+// gated attempts, each builder/built/check-gate/reviewer/review-gate in
+// order, the first review passing and the second failing. It asserts every
+// bullet the issue named at once: builder rows carry the sha their attempt
+// produced, review rows carry the decision, reason and verdict record id
+// once one lands, attempts are numbered independently per role, and the
+// check gate's own verdict — same kind, same subject, different Gate name —
+// attaches to no row at all.
+func TestAgentSessionsFoldHeadsRowsByRoleWithVerdicts(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+	w := submit(t, q, "wi-verdicts")
+	w, _, err := q.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := "workitem/" + w.ID
+
+	// Attempt 1: builds sha1, the check gate passes it, the reviewer passes
+	// it too.
+	agentRunOn(t, r, scope, "ref-b1", "builder", "mason", "")
+	agentSessionOn(t, r, scope, "ref-b1", "sonnet", "sess-b1")
+	agentResultOn(t, r, scope, "ref-b1", 1000, 500, 0.5)
+	builtOn(t, r, scope, "sha1")
+	gateOn(t, r, scope, "sha1", "check", "pass", "go test ./... clean")
+	agentRunOn(t, r, scope, "ref-rv1", "gate", "reviewer-seat", "")
+	agentSessionOn(t, r, scope, "ref-rv1", "sonnet", "sess-rv1")
+	agentResultOn(t, r, scope, "ref-rv1", 2000, 800, 0.25)
+	rv1ID := gateOn(t, r, scope, "sha1", "review", "pass", "honours the origination")
+
+	// Attempt 2: builds sha2, the check gate passes it again, the reviewer
+	// fails it this time.
+	agentRunOn(t, r, scope, "ref-b2", "builder", "mason", "sess-b1")
+	agentSessionOn(t, r, scope, "ref-b2", "sonnet", "sess-b2")
+	agentResultOn(t, r, scope, "ref-b2", 1500, 600, 0.6)
+	builtOn(t, r, scope, "sha2")
+	gateOn(t, r, scope, "sha2", "check", "pass", "go test ./... clean")
+	agentRunOn(t, r, scope, "ref-rv2", "gate", "reviewer-seat", "")
+	agentSessionOn(t, r, scope, "ref-rv2", "sonnet", "sess-rv2")
+	agentResultOn(t, r, scope, "ref-rv2", 2200, 900, 0.3)
+	rv2ID := gateOn(t, r, scope, "sha2", "review", "fail", "drops the width column")
+
+	s, err := r.Session(ctx, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := s.AgentSessions
+	if len(rows) != 4 {
+		t.Fatalf("agent sessions = %d, want 4: %+v", len(rows), rows)
+	}
+	b1, rv1, b2, rv2 := rows[0], rows[1], rows[2], rows[3]
+
+	if b1.Role != "builder" || b1.Attempt != 1 || b1.Sha != "sha1" {
+		t.Errorf("ref-b1 = role=%q attempt=%d sha=%q, want builder attempt 1 sha1", b1.Role, b1.Attempt, b1.Sha)
+	}
+	if b2.Role != "builder" || b2.Attempt != 2 || b2.Sha != "sha2" {
+		t.Errorf("ref-b2 = role=%q attempt=%d sha=%q, want builder attempt 2 sha2", b2.Role, b2.Attempt, b2.Sha)
+	}
+	if b1.Decision != "" || b2.Decision != "" {
+		t.Errorf("builder rows must never carry a decision: b1=%q b2=%q", b1.Decision, b2.Decision)
+	}
+
+	if rv1.Role != "gate" || rv1.Sha != "sha1" {
+		t.Errorf("ref-rv1 = role=%q sha=%q, want gate sha1", rv1.Role, rv1.Sha)
+	}
+	if rv1.Decision != "pass" || rv1.Reason != "honours the origination" || rv1.VerdictRecordID != rv1ID {
+		t.Errorf("ref-rv1 verdict = decision=%q reason=%q id=%q, want pass/honours the origination/%s",
+			rv1.Decision, rv1.Reason, rv1.VerdictRecordID, rv1ID)
+	}
+	if rv2.Role != "gate" || rv2.Sha != "sha2" {
+		t.Errorf("ref-rv2 = role=%q sha=%q, want gate sha2", rv2.Role, rv2.Sha)
+	}
+	if rv2.Decision != "fail" || rv2.Reason != "drops the width column" || rv2.VerdictRecordID != rv2ID {
+		t.Errorf("ref-rv2 verdict = decision=%q reason=%q id=%q, want fail/drops the width column/%s",
+			rv2.Decision, rv2.Reason, rv2.VerdictRecordID, rv2ID)
+	}
+}
+
+// TestAgentSessionsFoldGateRowWithNoVerdictKeepsOnlyItsSha covers the gate
+// infra error case the issue named: a reviewer's agent-run lands but no
+// "review" gate record ever follows it (the gate errored rather than
+// answering). The row must still say which sha it was reviewing and must
+// carry no decision — unknown never reads as zero, so this must never
+// default to a pass or a fail.
+func TestAgentSessionsFoldGateRowWithNoVerdictKeepsOnlyItsSha(t *testing.T) {
+	r, q := setup(t)
+	ctx := context.Background()
+	w := submit(t, q, "wi-no-verdict")
+	w, _, err := q.Claim(ctx, w)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope := "workitem/" + w.ID
+
+	agentRunOn(t, r, scope, "ref-b1", "builder", "mason", "")
+	agentResultOn(t, r, scope, "ref-b1", 1000, 500, 0.5)
+	builtOn(t, r, scope, "sha1")
+	gateOn(t, r, scope, "sha1", "check", "pass", "clean")
+	agentRunOn(t, r, scope, "ref-rv1", "gate", "reviewer-seat", "")
+	// The loop's synthetic "commit-message" refusal also lands as a
+	// kind-"gate" record on this same subject, with no agent session behind
+	// it — same shape as a real review verdict, different Gate name. This is
+	// the case the name filter (body.Gate != reviewGateName), not just the
+	// subject-keyed correlation, exists to keep off ref-rv1's row: at this
+	// point ref-rv1 is already pendingReview["sha1"], so a filter keyed on
+	// subject alone would wrongly attach this refusal to it.
+	gateOn(t, r, scope, "sha1", "commit-message", "fail", "the adapter's placeholder")
+	agentResultOn(t, r, scope, "ref-rv1", 2000, 800, 0.25)
+	// No "review" gate record: the gate errored and recorded nothing.
+
+	s, err := r.Session(ctx, w.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := s.AgentSessions
+	if len(rows) != 2 {
+		t.Fatalf("agent sessions = %d, want 2: %+v", len(rows), rows)
+	}
+	rv1 := rows[1]
+	if rv1.Sha != "sha1" {
+		t.Errorf("ref-rv1 sha = %q, want sha1 even with no verdict", rv1.Sha)
+	}
+	if rv1.Decision != "" || rv1.Reason != "" || rv1.VerdictRecordID != "" {
+		t.Errorf("ref-rv1 = %+v, want no decision/reason/verdict id — its review never concluded", rv1)
+	}
+
+	// reviewGateName is data, not a shared symbol — acp.ReviewerName is the
+	// only thing that keeps it truthful. escalate_kind_test.go already
+	// imports internal/agent for the same contract-by-spelling reason; acp
+	// does not import control, so this stays cycle-free.
+	if reviewGateName != acp.ReviewerName {
+		t.Fatalf("reviewGateName = %q, want acp.ReviewerName %q", reviewGateName, acp.ReviewerName)
 	}
 }
 

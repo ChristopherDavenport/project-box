@@ -47,6 +47,34 @@ type resultRecord struct {
 	CostUSD float64 `json:"cost_usd"`
 }
 
+// gateVerdictBody is declared in origins.go — this package's one read of a
+// "gate" record's body, shared rather than redeclared here. The loop
+// marshals forge.Verdict's own default JSON encoding (Go-capitalized field
+// names) inside its gateVerdictRecord envelope (internal/loop/loop.go); this
+// mirrors the same read queue.gateVerdict and loop.findGateVerdict's local
+// verdictBody already do, rather than importing internal/forge for a shape
+// that is already the record's own encoding. json.Unmarshal matches field
+// names case-insensitively, so the capitalized wire keys land here without a
+// tag.
+
+const (
+	// agentRoleBuilder and agentRoleGate mirror agent.RoleBuilder and
+	// agent.RoleGate (internal/agent/agent.go), spelled locally rather than
+	// imported: this package reads a record's "role" as data the way
+	// runRecord's other fields are read, not as the runtime type that wrote
+	// it.
+	agentRoleBuilder = "builder"
+	agentRoleGate    = "gate"
+	// reviewGateName mirrors acp.ReviewerName (internal/agent/acp/reviewer.go)
+	// — the "gate" record this fold must correlate to a gate-role row is the
+	// one whose body names this gate, and only that one. A command gate (the
+	// repo's own check, run before the reviewer on the same head) and the
+	// loop's synthetic "commit-message" refusal are also kind-"gate" records
+	// with no agent session behind them; matching on the name, not the
+	// subject alone, is what keeps both off of every session row.
+	reviewGateName = "review"
+)
+
 // AgentSession is one attempt's own account, folded from the agent-run,
 // agent-session and agent-result records its agentref wrote on a unit's
 // chain — see [Room.agentSessions]. The chain already recorded every attempt
@@ -89,6 +117,29 @@ type AgentSession struct {
 	WallMS   int64     `json:"wall_ms,omitempty"`
 	Tokens   int64     `json:"tokens,omitempty"`
 	CostUSD  float64   `json:"cost_usd,omitempty"`
+	// Sha is the head this row concerns, and means a different thing by
+	// role. On a builder row it is the commit that attempt produced —
+	// folded from the "built" record the loop writes right after this same
+	// row's own agent-run/agent-session/agent-result (internal/loop/loop.go).
+	// On a gate-role row it is the commit under judgement: a reviewer's own
+	// agent-run record carries no sha (internal/agent/acp/reviewer.go), so
+	// this is the latest built sha the chain had recorded when that row's
+	// agent-run appeared. Empty on every other role, and on a builder or
+	// gate row whose correlated record this fold never saw.
+	Sha string `json:"sha,omitempty"`
+	// Decision, Reason and VerdictRecordID come off the "review" gate's own
+	// verdict record, correlated to a gate-role row by Sha — set only once
+	// that record lands on the chain. A gate-role row whose review never
+	// concluded (a gate infra error records nothing) keeps Sha and nothing
+	// else: unknown never reads as zero, and defaulting a decision here
+	// would be inventing a judgement nobody made. Never set on a builder
+	// row, and never set from the check gate's own verdict or the loop's
+	// synthetic "commit-message" refusal — both are kind-"gate" records too,
+	// on the same subject, but neither names this gate and neither belongs
+	// to a session row.
+	Decision        string `json:"decision,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+	VerdictRecordID string `json:"verdict_record_id,omitempty"`
 }
 
 // agentSessionFold accumulates agent-run, agent-session and agent-result
@@ -101,10 +152,30 @@ type agentSessionFold struct {
 	order    []string
 	byRef    map[string]*AgentSession
 	attempts map[string]int
+	// lastBuilder is the most recently observed builder-role row. A "built"
+	// record, written right after a builder attempt's own agent-run/session/
+	// result, stamps the sha it produced onto this row directly — the row
+	// that produced it — rather than needing a second index keyed by sha.
+	lastBuilder *AgentSession
+	// lastBuiltSha is the most recent "built" record's subject: the head a
+	// gate-role row appearing after it is judging. Carried across attempts
+	// because a gate role's own agent-run record names no sha (see
+	// AgentSession.Sha) — this is the only place on the chain that says
+	// which commit it was reviewing.
+	lastBuiltSha string
+	// pendingReview holds gate-role rows still waiting on a "review" gate's
+	// verdict, keyed by the sha they are judging. A row leaves this map the
+	// moment its verdict lands; a row whose verdict never arrives (a gate
+	// infra error records nothing) simply stays out of it forever, keeping
+	// only the Sha it was stamped with.
+	pendingReview map[string]*AgentSession
 }
 
 func newAgentSessionFold() *agentSessionFold {
-	return &agentSessionFold{byRef: map[string]*AgentSession{}, attempts: map[string]int{}}
+	return &agentSessionFold{
+		byRef: map[string]*AgentSession{}, attempts: map[string]int{},
+		pendingReview: map[string]*AgentSession{},
+	}
 }
 
 // observe folds one record in. Best effort, the same rule [Room.judgement]
@@ -122,8 +193,45 @@ func (f *agentSessionFold) observe(rec evidence.Record) {
 			AgentRef: rec.Subject, Role: got.Role, Seat: got.Seat,
 			Continues: got.Continues, Attempt: f.attempts[got.Role], Started: rec.At,
 		}
+		switch got.Role {
+		case agentRoleBuilder:
+			f.lastBuilder = as
+		case agentRoleGate:
+			// The reviewer's own agent-run record carries no sha (verified
+			// in internal/agent/acp/reviewer.go): the latest built sha the
+			// chain has seen is the only way to say what this row reviews.
+			// A chain with no built sha yet leaves this row uncorrelated —
+			// nothing to attach a verdict to later, rather than a guess.
+			if f.lastBuiltSha != "" {
+				as.Sha = f.lastBuiltSha
+				f.pendingReview[f.lastBuiltSha] = as
+			}
+		}
 		f.byRef[rec.Subject] = as
 		f.order = append(f.order, rec.Subject)
+	case "built":
+		// Written by the loop right after the builder's own agent-run/
+		// agent-session/agent-result (internal/loop/loop.go), so the most
+		// recently observed builder row is the attempt that produced it.
+		f.lastBuiltSha = rec.Subject
+		if f.lastBuilder != nil {
+			f.lastBuilder.Sha = rec.Subject
+		}
+	case "gate":
+		// Best effort, same rule as every other case: a body this reader
+		// cannot parse correlates to nothing rather than failing the fold.
+		var body gateVerdictBody
+		if json.Unmarshal(rec.Body, &body) != nil || body.Gate != reviewGateName {
+			// Not a review verdict — the check gate's own pass/fail on this
+			// same subject, the loop's synthetic "commit-message" refusal,
+			// or a body this reader could not parse. None of these belong
+			// to a session row.
+			return
+		}
+		if row, ok := f.pendingReview[rec.Subject]; ok {
+			row.Decision, row.Reason, row.VerdictRecordID = body.Decision, body.Reason, rec.ID
+			delete(f.pendingReview, rec.Subject)
+		}
 	case "agent-session":
 		var got sessionRecord
 		if json.Unmarshal(rec.Body, &got) != nil {
