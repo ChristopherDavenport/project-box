@@ -159,7 +159,12 @@ export class BoxDashboard extends LitElement {
           : nothing}
         ${this._tile(s.claims?.stopped ? 'Stopped' : 'Running', 'claims', {
           sub: s.claims?.actor ? `by ${s.claims.actor}` : 'never touched', tone: s.claims?.stopped ? 'negative' : 'positive' })}
-        ${sp ? this._tile(`${sp.running}/${sp.max_concurrent}`, 'running now', { href: '/sessions', sub: sp.started ? `${sp.started} started this window` : '' }) : nothing}
+        ${sp?.running_builds != null
+          ? this._tile(`${sp.running_builds}/${sp.max_concurrent}`, 'building now', { href: '/sessions', sub: sp.started ? `${sp.started} started this window` : '' })
+          : nothing}
+        ${sp?.running_judgements != null
+          ? this._tile(`${sp.running_judgements}/${sp.max_judgements}`, 'judging now', { href: '/sessions' })
+          : nothing}
         ${sp ? this._tile(fmtTokens(sp.tokens), 'tokens', { sub: sp.max_tokens ? `of ${fmtTokens(sp.max_tokens)} this window` : 'this window' }) : nothing}
         ${sp && (sp.cost_micros || sp.max_cost_micros)
           ? this._tile(fmtUSD(sp.cost_micros), 'spend', { sub: sp.max_cost_micros ? `of ${fmtUSD(sp.max_cost_micros)}` : 'this window' })
