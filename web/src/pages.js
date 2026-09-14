@@ -13,7 +13,7 @@ import {
 import { ActivityController } from './sse.js';
 import {
   age, title, taskURL, short, sameCommit, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, source, ask, place, hold, why,
-  describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail, cardTitle,
+  describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, PRIORITY_APPEARANCE, firstLine, clip, toolDetail, cardTitle,
   sessionHeading, currentSession, cardStage, roleSplit, roleSplitLine, ROLE_APPEARANCE, factCite, originTotals,
 } from './format.js';
 import { settled, orderList, planeOrder } from './order.js';
@@ -52,6 +52,11 @@ const WHERE = {
 // The table's columns, each with the value it sorts on. A column is sortable
 // or it is not a table — an operator hunting the oldest ready item, or every
 // row one dead runner is holding, is sorting.
+// Mirrors queue.Priority.Rank() on the wire: unset or unrecognised ranks as
+// 'normal', the same fallback OrDefault gives the pump's own claim order —
+// absence must never sort as though it were the lowest priority there is.
+const PRIORITY_RANK = { low: 1, normal: 2, high: 3, urgent: 4 };
+
 const COLUMNS = [
   { key: 'state', label: 'State', get: (e) => e.state },
   { key: 'work', label: 'Work', get: (e) => title(e) || e.id },
@@ -59,10 +64,13 @@ const COLUMNS = [
   { key: 'stage', label: 'Stage', get: (e) => e.stage ?? '' },
   { key: 'holder', label: 'Held by', get: (e) => e.runner ?? '' },
   { key: 'origin', label: 'Origin', get: (e) => origin(e) },
+  { key: 'priority', label: 'Priority', get: (e) => PRIORITY_RANK[e.priority ?? 'normal'] ?? PRIORITY_RANK.normal },
   { key: 'age', label: 'Age', get: (e) => e.age_sec ?? 0 },
 ];
 
 const stateTag = (state) => html`<jh-tag size="small" class=${STATE_APPEARANCE[state] ?? 'neutral'} label=${state}></jh-tag>`;
+// Normal is the silent default: only a row that actually differs gets a tag.
+const priorityTag = (p) => (p in PRIORITY_APPEARANCE ? html`<jh-tag size="small" class=${PRIORITY_APPEARANCE[p]} label=${p}></jh-tag>` : nothing);
 // A judgement's standing, once it has one: plan.Store.Standing's own words,
 // not the queue's — planned and resolved settled well, failed did not.
 const STANDING_APPEARANCE = { planned: 'positive', resolved: 'positive', failed: 'negative', retried: 'brand' };
@@ -331,9 +339,9 @@ export class BoxWork extends LitElement {
   constructor() {
     super();
     this._filter = 'live';
-    // No sort until asked: the server's order is oldest first, which is the
-    // order the factory would take the work in and the only one that is a
-    // fact about the queue rather than a preference of the reader.
+    // No sort until asked: the server's order is priority then age, which is
+    // the order the factory would take the work in and the only one that is
+    // a fact about the queue rather than a preference of the reader.
     this._sort = '';
     this._desc = false;
     this._activity = new ActivityController(this, { limit: 1, onEvent: () => this._refresh() });
@@ -396,10 +404,10 @@ export class BoxWork extends LitElement {
     return html`
       <div class="wrap">
         <table>
-          <caption>${rows.length} item(s), ${this._sort ? `sorted by ${this._sort}` : 'oldest first'}</caption>
+          <caption>${rows.length} item(s), ${this._sort ? `sorted by ${this._sort}` : 'priority, then age'}</caption>
           <colgroup>
             <col style="width: 108px"><col><col style="width: 150px"><col style="width: 110px">
-            <col style="width: 160px"><col style="width: 150px"><col style="width: 64px">
+            <col style="width: 160px"><col style="width: 150px"><col style="width: 90px"><col style="width: 64px">
           </colgroup>
           <thead>
             <tr>${COLUMNS.map((c) => html`
@@ -423,6 +431,7 @@ export class BoxWork extends LitElement {
                   ${e.stage ? html`<div class="helper">${age(e.in_state_sec)}</div>` : nothing}</td>
                 <td class=${e.lease_lapsed ? 'lapsed' : ''}>${hold(e) || html`<span class="muted">—</span>`}</td>
                 <td class="muted">${origin(e) || place(e)}</td>
+                <td>${priorityTag(e.priority)}</td>
                 <td class="nowrap">${age(e.age_sec)}</td>
               </tr>`)}
           </tbody>

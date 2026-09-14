@@ -351,6 +351,12 @@ export const KIND_APPEARANCE = {
 
 export const SEVERITY_APPEARANCE = { low: 'neutral', medium: 'neutral', high: 'negative', critical: 'negative' };
 
+// Priority's own map, kept distinct from SEVERITY_APPEARANCE so the two
+// columns are never confusable: no 'normal' key on purpose — a normal-
+// priority row gets no tag at all, so the column only draws the eye when a
+// row differs from the default.
+export const PRIORITY_APPEARANCE = { low: 'neutral', high: 'brand', urgent: 'negative' };
+
 export const appearanceOf = (kind) => KIND_APPEARANCE[kind] ?? 'neutral';
 
 const utf8 = new TextDecoder();
