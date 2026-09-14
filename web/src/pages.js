@@ -8,13 +8,13 @@ import { Task } from '@lit/task';
 import {
   getStatus, getItems, getExceptions, getFlakes, getSections, getItem, getItemEvidence, getIngress, getProvenance, getProvenanceChain, provenanceExportURL,
   getSessions, getSession, openIngress,getRunFrames, reload, retryItem, resolveItem,
-  getPlan, getIngressPlans, getPlanDiff,
+  getPlan, getIngressPlans, getPlanDiff, getOrigins, originsExportURL,
 } from './api.js';
 import { ActivityController } from './sse.js';
 import {
   age, title, taskURL, short, sameCommit, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, place, hold, why,
   describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail, cardTitle,
-  sessionHeading, currentSession, cardStage, roleSplit, roleSplitLine, ROLE_APPEARANCE,
+  sessionHeading, currentSession, cardStage, roleSplit, roleSplitLine, ROLE_APPEARANCE, factCite, originTotals,
 } from './format.js';
 import { settled, orderList, planeOrder } from './order.js';
 import { base, toast, focusInto } from './ui.js';
@@ -1570,6 +1570,299 @@ export class BoxProvenance extends LitElement {
   }
 }
 customElements.define('box-provenance', BoxProvenance);
+
+/**
+ * Origins: the audit story issue #187 asked for — every origination under a
+ * delivery key, newest first, told the way the chain itself would tell it.
+ * Every FACT line (an ingress, a plan, a build, a gate verdict, a rebase, a
+ * landing, a close) carries its own actor and cites the chain record it came
+ * from — tenant, scope, seq — so a reader can walk the same coordinates in
+ * the export and find the identical record. Every DERIVED line (the totals)
+ * says so and names the rows it folds. No diagram is drawn here: per
+ * docs/PLAN.md §6 a graph layout is computed in Go and shipped as
+ * coordinates, and this page draws only what /v1/origins/{key} sends —
+ * nothing is counted or summed a second time in the browser.
+ */
+export class BoxOrigins extends LitElement {
+  static properties = { originKey: { attribute: false } };
+  static styles = [base, facts, css`
+    :host { display: grid; gap: var(--jh-space-400); }
+    .story + .story { margin-top: var(--jh-space-400); padding-top: var(--jh-space-400); border-top: 1px solid var(--jh-color-divider-secondary); }
+    .story h2 { margin: 0 0 var(--jh-space-300); font: var(--jh-font-heading-medium-4); overflow-wrap: anywhere; }
+    .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; margin-bottom: var(--jh-space-200); }
+    .meta > * { min-width: 0; overflow-wrap: anywhere; }
+    section.block { margin-top: var(--jh-space-400); }
+    section.block h3 { margin: 0 0 var(--jh-space-200); font: var(--jh-font-body-md-semibold); }
+    .block h4 { margin: var(--jh-space-300) 0 var(--jh-space-100); font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); }
+    .fact { padding: var(--jh-space-200) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    .fact .flabel { font: var(--jh-font-helper-medium); color: var(--jh-color-content-secondary-enabled); margin-right: var(--jh-space-200); }
+    .fact .fcontent { overflow-wrap: anywhere; }
+    .fact .fcite { display: block; margin-top: 2px; font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .derived { font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled); }
+    .tag-derived { font-weight: 700; letter-spacing: 0.04em; color: var(--jh-color-content-brand-enabled); }
+    ol.nodes, ol.attempts, ol.sessions { list-style: none; margin: 0; padding: 0; }
+    ol.nodes li { padding: var(--jh-space-200) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); overflow-wrap: anywhere; }
+    .unit { margin-top: var(--jh-space-300); padding: var(--jh-space-300); border: 1px solid var(--jh-color-divider-secondary);
+            border-radius: var(--jh-border-radius-200); }
+    .unit h3 a { overflow-wrap: anywhere; }
+    .attempt { padding: var(--jh-space-200) 0; border-bottom: 1px dashed var(--jh-color-divider-secondary); }
+    .attempt .ahdr { font: var(--jh-font-body-md-semibold); margin-bottom: var(--jh-space-100); }
+    .session-line { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: baseline;
+                    font: var(--jh-font-helper-regular); color: var(--jh-color-content-secondary-enabled);
+                    padding: var(--jh-space-100) 0; border-bottom: 1px solid var(--jh-color-divider-secondary); }
+    .session-line > * { min-width: 0; overflow-wrap: anywhere; }
+    .session-line .running { color: var(--jh-color-content-positive-enabled); font-weight: 600; }
+    .actions { margin-bottom: var(--jh-space-400); }
+  `];
+
+  _task = new Task(this, {
+    task: async ([key], { signal }) => (key ? getOrigins(key, signal) : []),
+    args: () => [this.originKey],
+  });
+
+  // Every FACT line: the label, the content it asserts, and — always — the
+  // actor and chain coordinates (tenant, scope, seq) it came from, exactly as
+  // the API states them. `f` may be a FactRef itself or anything embedding
+  // one; absence renders as "unknown actor" rather than a blank line, since a
+  // fact with nobody attached to it is itself worth seeing.
+  _fact(label, content, f) {
+    return html`
+      <div class="fact">
+        <div class="fcontent"><span class="flabel">${label}</span>${content}</div>
+        <div class="fcite">${f?.actor || 'unknown actor'} · ${factCite(f)} · <box-when .at=${f?.at}></box-when></div>
+      </div>`;
+  }
+
+  _commit(sha, label = 'commit') {
+    return sha ? html`<box-hash label=${label} .value=${sha} href=${'/provenance/' + sha}></box-hash>` : html`<span class="muted">none</span>`;
+  }
+
+  _gate(label, g) {
+    if (!g) {
+      return html`<div class="fact"><div class="fcontent"><span class="flabel">${label}</span><span class="muted">not judged yet</span></div></div>`;
+    }
+    const decision = g.decision
+      ? html`<jh-tag size="small" class=${g.decision === 'pass' ? 'positive' : 'negative'} label=${g.decision}></jh-tag>`
+      : html`<span class="muted">no verdict recorded</span>`;
+    const carried = g.carried
+      ? html` <span class="helper">carried forward${g.reviewed ? html` from the review of ${this._commit(g.reviewed)}` : nothing}${g.original ? ` (record ${g.original})` : ''}${g.patch_id ? ` · patch ${g.patch_id}` : ''}</span>`
+      : nothing;
+    return this._fact(label, html`${decision} on ${this._commit(g.sha)}${g.reason ? html` — ${g.reason}` : nothing}${carried}`, g);
+  }
+
+  _attempt(a) {
+    return html`
+      <li class="attempt">
+        <div class="ahdr">Attempt ${a.n}</div>
+        ${a.built
+          ? this._fact('Built', html`${this._commit(a.built.sha)}${a.built.squashed_from ? html` · squashed from ${this._commit(a.built.squashed_from)}` : nothing}`, a.built)
+          : html`<div class="fact"><div class="fcontent"><span class="flabel">Built</span><span class="muted">not built yet</span></div></div>`}
+        ${this._gate('Check', a.check)}
+        ${this._gate('Review', a.review)}
+      </li>`;
+  }
+
+  _session(s) {
+    return html`
+      <li class="session-line">
+        <jh-tag size="small" class=${ROLE_APPEARANCE[s.role] ?? 'neutral'} label=${s.role || 'agent'}></jh-tag>
+        ${s.attempt ? html`<span>attempt ${s.attempt}${s.of ? ` of ${s.of}` : ''}</span>` : nothing}
+        ${s.seat ? html`<span>seat ${s.seat}</span>` : nothing}
+        ${s.model ? html`<span>${s.model}</span>` : nothing}
+        <span><box-hash label="agentref" .value=${s.agentref}></box-hash></span>
+        ${s.session ? html`<span>session <box-hash label="ACP session" .value=${s.session}></box-hash></span>` : nothing}
+        ${s.continues ? html`<span>continues <box-hash label="ACP session" .value=${s.continues}></box-hash></span>` : nothing}
+        ${s.sha ? html`<span>${this._commit(s.sha)}</span>` : nothing}
+        ${s.started ? html`<span>started <box-when .at=${s.started}></box-when></span>` : nothing}
+        ${s.finished
+          ? html`<span>ended <box-when .at=${s.ended}></box-when> · ${fmtTokens(s.tokens)} tokens · ${fmtCost(s.cost_usd)}</span>`
+          : html`<span class="running">running — cost unknown until it finishes</span>`}
+        ${s.decision ? html`<span><jh-tag size="small" class=${s.decision === 'pass' ? 'positive' : 'negative'} label=${s.decision}></jh-tag>${s.reason ? html` ${firstLine(s.reason)}` : nothing}</span>` : nothing}
+      </li>`;
+  }
+
+  _rebase(r) {
+    if (r.kind === 'rebase-refused') {
+      return this._fact('Rebase refused', html`onto ${this._commit(r.onto)}${r.reason ? html` — ${r.reason}` : nothing}`, r);
+    }
+    return this._fact('Rebased', html`${this._commit(r.was)} carried from ${this._commit(r.from)} onto ${this._commit(r.onto)}`, r);
+  }
+
+  _landing(l) {
+    return this._fact('Landed', html`${l.repo}${l.branch ? ` / ${l.branch}` : ''}: ${this._commit(l.was)} → ${this._commit(l.now)}`, l);
+  }
+
+  _pr(p) {
+    return this._fact('Pull request', html`<a href=${p.pr_url} target="_blank" rel="noopener">${p.pr_url}</a>${p.issue ? html` for issue ${p.issue}` : nothing}${p.completes_plan ? html` · <jh-tag size="small" class="positive" label="completes plan"></jh-tag>` : nothing}${p.note ? html` — ${p.note}` : nothing}`, p);
+  }
+
+  _landRefusal(r) {
+    const label = r.kind === 'land-conflict' ? 'Land conflict' : 'Land refused';
+    const content = r.kind === 'land-conflict'
+      ? html`${r.repo}${r.branch ? ` / ${r.branch}` : nothing}${r.expected_base ? html` — expected base ${this._commit(r.expected_base)}` : nothing}`
+      : html`${r.repo}${r.reason ? ` — ${r.reason}` : ''}`;
+    return this._fact(label, content, r);
+  }
+
+  _close(u) {
+    if (!u.closed) {
+      return html`<div class="fact"><div class="fcontent"><span class="flabel">Close</span><span class="muted">no close record — not reported closed</span></div></div>`;
+    }
+    const c = u.closed;
+    return this._fact('Closed', html`issue ${c.issue || '—'}${c.commit ? html` at ${this._commit(c.commit)}` : nothing}${c.pr_url ? html` · <a href=${c.pr_url} target="_blank" rel="noopener">${c.pr_url}</a>` : nothing}${c.closed_by ? html` · by ${c.closed_by}` : nothing}`, c);
+  }
+
+  _unit(u) {
+    return html`
+      <div class="unit">
+        <h3><a href=${'/items/' + u.item_id}>${u.node_id}</a>${u.summary ? html` — ${u.summary}` : nothing}</h3>
+        <div class="meta">
+          <span class="helper">${u.sections?.length ? `sections: ${u.sections.join(', ')}` : 'whole repository'}</span>
+          ${u.depends_on?.length ? html`<span class="helper">depends on ${u.depends_on.join(', ')}</span>` : nothing}
+        </div>
+        <section class="block">
+          <h4>Attempts (${u.attempts?.length ?? 0})</h4>
+          ${u.attempts?.length
+            ? html`<ol class="attempts" aria-label=${`Attempts for ${u.node_id}`}>${u.attempts.map((a) => this._attempt(a))}</ol>`
+            : html`<p class="empty">No attempts recorded.</p>`}
+        </section>
+        <section class="block">
+          <h4>Sessions (${u.sessions?.length ?? 0})</h4>
+          ${u.sessions?.length
+            ? html`<ol class="sessions" aria-label=${`Agent sessions for ${u.node_id}`}>${u.sessions.map((s) => this._session(s))}</ol>`
+            : html`<p class="empty">No agent sessions recorded.</p>`}
+        </section>
+        ${u.rebases?.length ? html`
+          <section class="block">
+            <h4>Rebases (${u.rebases.length})</h4>
+            ${u.rebases.map((r) => this._rebase(r))}
+          </section>` : nothing}
+        <section class="block">
+          <h4>Landing</h4>
+          ${u.landings?.length ? u.landings.map((l) => this._landing(l)) : html`<p class="empty">Not landed.</p>`}
+          ${u.prs?.map((p) => this._pr(p)) ?? nothing}
+          ${u.land_refusals?.map((r) => this._landRefusal(r)) ?? nothing}
+        </section>
+        <section class="block">
+          <h4>Close</h4>
+          ${this._close(u)}
+        </section>
+      </div>`;
+  }
+
+  _node(n) {
+    return html`
+      <li>
+        <code>${n.id}</code> — ${title(n)}
+        <div class="helper">
+          ${n.repo ? `repo ${n.repo} · ` : ''}sections: ${n.sections?.length ? n.sections.join(', ') : 'whole repository'}
+          ${n.depends_on?.length ? html` · depends on ${n.depends_on.map((d) => (n.edge_reasons?.[d] ? `${d} (${n.edge_reasons[d]})` : d)).join(', ')}` : nothing}
+        </div>
+      </li>`;
+  }
+
+  _plan(pf) {
+    const p = pf.plan;
+    return html`
+      <div>
+        ${this._fact('Plan sealed', html`
+          by ${p.decomposer}
+          <jh-tag size="small" class=${p.replayable ? 'positive' : 'neutral'} label=${p.replayable ? 'replayable' : 'judgement'}></jh-tag>
+          ${p.ref ? html` · <a href=${'/plans/' + p.ref}>full plan</a>` : nothing}
+          ${!p.replayable && p.agentref ? html` · agent <box-hash label="agentref" .value=${p.agentref}></box-hash>` : nothing}`, pf)}
+        <ol class="nodes" aria-label="Plan nodes, in order">${(p.nodes ?? []).map((n) => this._node(n))}</ol>
+      </div>`;
+  }
+
+  _planEvent(e) {
+    return this._fact(e.kind, e.reason ? html`${e.reason}` : html`<span class="muted">no reason recorded</span>`, e);
+  }
+
+  _judgement(story) {
+    return html`
+      <section class="block">
+        <h3>Judgement</h3>
+        ${story.plans?.length ? story.plans.map((pf) => this._plan(pf)) : html`<p class="empty">No plan recorded yet.</p>`}
+        ${story.plan_events?.length ? html`
+          <div>
+            <h4>Plan events</h4>
+            ${story.plan_events.map((e) => this._planEvent(e))}
+          </div>` : nothing}
+        <div>
+          <h4>Planner sessions (${story.sessions?.length ?? 0})</h4>
+          ${story.sessions?.length
+            ? html`<ol class="sessions">${story.sessions.map((s) => this._session(s))}</ol>`
+            : html`<p class="empty">No planner sessions recorded.</p>`}
+        </div>
+      </section>`;
+  }
+
+  _ingressSection(story) {
+    const ing = story.ingress;
+    return html`
+      <section class="block">
+        <h3>Ingress</h3>
+        ${this._fact('Delivered', html`
+          <a href=${'/ingress/' + story.ingress_id}>${story.ingress_id}</a>
+          ${story.route ? ` on ${story.route}` : ''}
+          ${story.key ? ` for ${story.key}` : ''}
+          ${ing.requester ? ` by ${ing.requester}` : ''}
+          ${story.box || story.repo ? ` · ${[story.box, story.repo].filter(Boolean).join(' / ')}` : ''}
+          ${ing.title ? html`<div>${ing.title}</div>` : nothing}
+          ${ing.note ? html`<div class="helper">${ing.note}</div>` : nothing}`, ing)}
+      </section>`;
+  }
+
+  _totals(t) {
+    const o = originTotals(t);
+    return html`
+      <section class="block">
+        <h4>Totals</h4>
+        <p class="derived">
+          <span class="tag-derived">DERIVED</span>
+          ${o.attempts} attempt(s) ·
+          ${o.tokens === 'unknown'
+            ? html`cost unknown — 0 of ${o.sessions} session(s) covered`
+            : html`${o.tokens} tokens · ${o.cost}${o.wallSec != null ? ` · ${o.wallSec}s wall` : ''} — ${o.covered} of ${o.sessions} session(s) covered${o.partial ? ', partial sum' : ''}`}
+          <span class="helper">folded from the planner's and every unit's agent-session rows above</span>
+        </p>
+      </section>`;
+  }
+
+  _story(story) {
+    return html`
+      <div class="story">
+        <h2>${story.ingress_id}${story.key && story.key !== this.originKey ? html` <span class="helper">(${story.key})</span>` : nothing}</h2>
+        ${this._ingressSection(story)}
+        ${this._judgement(story)}
+        <section class="block">
+          <h3>Units (${story.units?.length ?? 0})</h3>
+          ${story.units?.length ? story.units.map((u) => this._unit(u)) : html`<p class="empty">No units decomposed yet.</p>`}
+        </section>
+        ${this._totals(story.totals)}
+      </div>`;
+  }
+
+  render() {
+    return html`
+      <jh-card header-title="Origins" header-subtitle=${this.originKey} padding="medium">
+        ${this._task.render({
+          pending: () => loading('origins'),
+          error: failed,
+          complete: (stories) => (stories?.length ?? 0) === 0
+            ? html`<p class="empty">Nothing is recorded under this key. Either it never came through this factory, or it has not been delivered yet.</p>`
+            : html`
+              <div class="actions">
+                <jh-button appearance="secondary" size="small" label="Evidence artifact"
+                  href=${originsExportURL(this.originKey)} target="_blank"></jh-button>
+                <span class="helper">Every origination under this key, as one self-contained file — the same record this page renders, verifiable offline.</span>
+              </div>
+              ${stories.map((s) => this._story(s))}`,
+        })}
+      </jh-card>`;
+  }
+}
+customElements.define('box-origins', BoxOrigins);
 
 /** Plan: the decomposition graph for one origination, rendered before
  *  anything claims a node. The ordered node list is the representation of

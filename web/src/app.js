@@ -248,6 +248,7 @@ export class BoxApp extends LitElement {
     { path: '/sections', render: () => html`<box-sections></box-sections>` },
     { path: '/items/:id', render: ({ id }) => html`<box-item .itemId=${id}></box-item>` },
     { path: '/ingress/:id', render: ({ id }) => html`<box-ingress .ingressId=${id}></box-ingress>` },
+    { path: '/origins/:key', render: ({ key }) => html`<box-origins .originKey=${key}></box-origins>` },
     { path: '/provenance/:sha', render: ({ sha }) => html`<box-provenance .sha=${sha}></box-provenance>` },
     { path: '/plans/:ref', render: ({ ref }) => html`<box-plan .ref=${ref}></box-plan>` },
     { path: '/submit', render: () => html`<box-submit></box-submit>` },

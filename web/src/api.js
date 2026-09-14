@@ -72,6 +72,11 @@ export const getItemEvidence = (id, signal) => fetchJSON(`/v1/items/${encodeURIC
 export const getIngress = (id, signal) => fetchJSON(`/v1/ingress/${encodeURIComponent(id)}`, signal);
 export const getProvenanceChain = (sha, signal) => fetchJSON(`/v1/provenance/${encodeURIComponent(sha)}/chain`, signal);
 export const provenanceExportURL = (sha) => `/v1/provenance/${encodeURIComponent(sha)}/export`;
+// The audit door: every origination whose delivery key equals key or
+// extends it with a '-suffix' (a resubmission), newest first, each with its
+// whole story from ingress to close.
+export const getOrigins = (key, signal) => fetchJSON(`/v1/origins/${encodeURIComponent(key)}`, signal);
+export const originsExportURL = (key) => `/v1/origins/${encodeURIComponent(key)}/export`;
 export const getPlan = (ref, signal) => fetchJSON(`/v1/plans/${encodeURIComponent(ref)}`, signal);
 export const getIngressPlans = (id, signal) => fetchJSON(`/v1/ingress/${encodeURIComponent(id)}/plans`, signal);
 export const getPlanDiff = (ref, other, signal) =>

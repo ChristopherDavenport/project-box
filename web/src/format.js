@@ -574,6 +574,37 @@ export function toolDetail(f) {
   return clip(t.replace(re, ''), 300);
 }
 
+/** factCite renders a FACT line's chain locator exactly as the API states it
+ *  — tenant, scope and seq — so a reader can verify the claim against the
+ *  chain export without a second read of the store. */
+export function factCite(f) {
+  return `${f?.tenant ?? ''}/${f?.scope ?? ''}#${f?.seq ?? 0}`;
+}
+
+/**
+ * originTotals turns an origin story's Totals — DERIVED strictly from the
+ * session rows it lists, never a second reading of control/capacity's charge
+ * records — into the words a reader sees. Covered is how many of Sessions
+ * carried a result; when NONE did, the true spend is unknown and must not
+ * read as the $0 the omitted fields would otherwise imply. When some but not
+ * all are covered, the figures are a real partial sum, so they render as
+ * numbers — captioned as partial, never presented as the whole story.
+ */
+export function originTotals(t) {
+  const sessions = t?.sessions ?? 0;
+  const covered = t?.covered ?? 0;
+  const known = covered > 0;
+  return {
+    sessions,
+    covered,
+    attempts: t?.attempts ?? 0,
+    partial: sessions > covered,
+    tokens: known ? fmtTokens(t.tokens ?? 0) : 'unknown',
+    cost: known ? fmtCost(t.cost_usd ?? 0) : 'unknown',
+    wallSec: known ? Math.round((t.wall_ms ?? 0) / 1000) : null,
+  };
+}
+
 /** itemOf is the work item a record is about, if it is about one. */
 export function itemOf(raw) {
   const r = norm(raw);
