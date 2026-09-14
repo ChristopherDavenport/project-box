@@ -62,6 +62,10 @@ func TestPollOpensOneIngressPerLabeledIssueAndRedeliversIdempotently(t *testing.
 	if ing.Note != wantNote {
 		t.Fatalf("note = %q, want %q", ing.Note, wantNote)
 	}
+	wantSource := Source{Subject: "runner", Method: "poll", Channel: "route:issues"}
+	if ing.Source != wantSource {
+		t.Fatalf("source = %+v, want %+v", ing.Source, wantSource)
+	}
 
 	// A second poll of the same still-open, still-labeled issue redelivers:
 	// same ingress, no error, and the router's own idempotency answered it —

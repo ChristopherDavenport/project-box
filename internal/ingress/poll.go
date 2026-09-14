@@ -72,6 +72,7 @@ func (p *Poller) Poll(ctx context.Context, route Route, target string, now time.
 			Title:    iss.Title,
 			Payload:  []byte(taskText(iss, route.Contract)),
 			Received: now,
+			Source:   Source{Subject: p.Actor, Method: "poll", Channel: "route:" + route.Name},
 		}); err != nil {
 			return fmt.Errorf("ingress: poll %s: opening issue #%d: %w", route.Name, iss.Number, err)
 		}

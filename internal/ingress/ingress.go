@@ -75,6 +75,13 @@ type Ingress struct {
 	// they were carried.
 	Route string `json:"route,omitempty"`
 	Key   string `json:"key,omitempty"`
+	// Source is who delivered this occurrence, copied from the delivery that
+	// opened it. It answers a different question than Requester: Requester is
+	// the authority routed work inherits, Source is who handed the delivery
+	// over — a poller, a person running `box submit`, the factory reopening
+	// its own. Empty on ingresses opened before sources were recorded, same
+	// as Route and Key above.
+	Source Source `json:"source,omitempty"`
 	// Note carries the delivery's payload as the ingress's own words — the
 	// task text intake hands the work item.
 	Note string `json:"note,omitempty"`
@@ -195,6 +202,30 @@ const (
 	RouteRedMain  RouteKind = "red-main"    // post-land checks disagreeing with an optimistic branch
 )
 
+// Source is who delivered one occurrence of work — not the authority it
+// routes under, which is [Route.Requester] or [Ingress.Requester], but the
+// wire's own account of who handed it over.
+type Source struct {
+	// Subject is the authenticated principal the wire asserted: a person, a
+	// service account, a poller's own identity. It is who, not on whose
+	// authority — that is Requester, recorded beside this rather than
+	// replaced by it.
+	Subject string `json:"subject,omitempty"`
+	// Method is what vouched for Subject: "peer", "token", "oidc" for
+	// wire-authenticated deliveries, or a producer-truthful value like
+	// "poll" or "factory" for deliveries a producer inside the box asserts
+	// about itself rather than an external caller proving.
+	Method string `json:"method,omitempty"`
+	// Channel is how the work arrived: "hand" for an operator-run delivery,
+	// "script" for an unattended caller, "route:<name>" for a configured
+	// route, "factory" for the factory reopening its own.
+	Channel string `json:"channel,omitempty"`
+	// Run names the run that opened this delivery, set only by the
+	// factory's own re-openings — see loop.OpenRepair. Externally delivered
+	// work leaves it empty; there is no run to name.
+	Run string `json:"run,omitempty"`
+}
+
 // Route is a configured path from an external event to an [Ingress].
 //
 // RouteCensus deserves note: the estate is itself a source of work. A
@@ -239,6 +270,13 @@ type Route struct {
 	// resolved once at boxcfg.Load, so the route carries the working
 	// contract itself rather than a place to find it.
 	Contract string
+	// Require names the authentication methods a delivery must arrive under
+	// — "peer", "token", "oidc", and so on. It is enforced at the wire, by
+	// the API handler that has a request to inspect and can refuse one that
+	// arrived under the wrong method; [StoreRouter] has no request and does
+	// not enforce it. Empty means the wire enforces nothing beyond its own
+	// defaults.
+	Require []string `json:"require,omitempty"`
 }
 
 // Delivery is one firing of a route.
@@ -267,7 +305,12 @@ type Delivery struct {
 	Depth int
 	// Prior is the attempt this delivery reopens, set only by the factory
 	// reopening its own work; see [Ingress.Prior].
-	Prior    *agent.Prior
+	Prior *agent.Prior
+	// Source is who delivered this occurrence; see [Source]. Copied onto
+	// the [Ingress] StoreRouter.Open builds unchanged — StoreRouter has no
+	// request to inspect, so it records what its caller asserted rather
+	// than judging it.
+	Source   Source `json:"source,omitempty"`
 	Received time.Time
 }
 

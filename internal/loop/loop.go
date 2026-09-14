@@ -303,6 +303,12 @@ func OpenRepair(router *ingress.StoreRouter, route ingress.Route, maxDepth int) 
 		ing, _, err := router.Open(ctx, route, ingress.Delivery{
 			Key: "red-" + prior.Sha, Payload: []byte(prior.Reason), Depth: item.Depth + 1,
 			Prior: &prior,
+			// Subject names the router's own Runner — the identity this
+			// daemon runs as, the only truthful "who" available to a
+			// re-opening nothing external asserted. Run names the item
+			// whose red landing summoned this repair, so a reader can walk
+			// from the repair back to the attempt that failed.
+			Source: ingress.Source{Subject: router.Runner, Method: "factory", Channel: "factory", Run: item.ID},
 		})
 		if err != nil {
 			return "", err

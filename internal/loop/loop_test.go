@@ -955,6 +955,10 @@ func TestRepairChainIsBounded(t *testing.T) {
 	if ing.Depth != 1 {
 		t.Fatalf("repair opened at depth %d, want 1", ing.Depth)
 	}
+	wantSource := ingress.Source{Subject: e.router.Runner, Method: "factory", Channel: "factory", Run: "wi-0"}
+	if ing.Source != wantSource {
+		t.Fatalf("repair source = %+v, want %+v", ing.Source, wantSource)
+	}
 
 	if _, err := red(ctx, queue.WorkItem{ID: "wi-1", Depth: 1}, agent.Prior{Sha: "sha-b", Reason: "still failing"}); err != nil {
 		t.Fatalf("depth 1 is still inside the bound: %v", err)
