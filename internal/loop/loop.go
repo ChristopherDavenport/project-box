@@ -284,6 +284,15 @@ const DefaultMaxHandoffs = 3
 // genuinely wrong does not run up a bill arguing with the same gate.
 const DefaultAttempts = 2
 
+// maxConsecutivePlaceholders bounds how many placeholder commits in a row
+// one claim retries before parking (issue #195). A placeholder is the ACP
+// adapter's own fallback when a builder's turn ends without a commit — see
+// [placeholderCommitReason] — never a change anyone offered for judgement,
+// so it draws from this bound instead of [DefaultAttempts]/[Loop.attemptBudget]:
+// one retry in the same claim, and a second placeholder in a row means the
+// builder is producing nothing to judge, which parks.
+const maxConsecutivePlaceholders = 1
+
 // DefaultGateRetries bounds how many more times a gate that errored is
 // re-asked when nothing configures a bound. Two more tries — three asks in
 // all — is enough to clear a flaky miss without turning a genuinely broken
@@ -927,6 +936,15 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	budget := l.attemptBudget(item)
 	attempt := 0
 	var history []string
+	// ceremony counts this claim's CONSECUTIVE placeholder-commit refusals
+	// (issue #195): incremented when the gate stage below recognizes a
+	// build's own head as [placeholderCommitReason]'s ceremony shape rather
+	// than a change, reset to zero the moment a build produces a real
+	// commit. A ceremony refusal never spends attempt (below, in the
+	// DecisionFail branch) — it is a verdict on the adapter's fallback, not
+	// on anything a gate or reviewer judged — so it is bounded separately
+	// by [maxConsecutivePlaceholders].
+	var ceremony int
 	// flaking holds the most recent outside-diff refusal as a flake
 	// candidate across this claim's attempts (issue #131): set when the
 	// gate stage below annotates a refusal, consumed the moment a LATER
@@ -1201,6 +1219,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 		var gateWindowSpent *WindowSpent
 		var gateWindowReset time.Time
 		if why := placeholderCommitReason(msg, item.Task); why != "" {
+			ceremony++
 			// No gate runs: no reviewer, no check command, no Meter charge.
 			// Recorded exactly as a gate verdict always is, on subject head,
 			// so queue.priorVerdicts threads it to the next builder's Prior
@@ -1213,6 +1232,10 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 			}
 			verdicts = []forge.Verdict{v}
 		} else {
+			// A real commit: whatever streak of placeholders came before it
+			// in this claim is over, so the next one (if any) is a fresh
+			// first offense, not a continuation of this one.
+			ceremony = 0
 			// Gates already satisfied on THIS head are carried, not re-run. An item
 			// waiting on a person is re-drained every tick for as long as the review
 			// takes, and re-running the whole suite each time is how a worker that is
@@ -1427,6 +1450,47 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 
 		if forge.Resolve(verdicts) == forge.DecisionFail {
 			reason := reasons(verdicts)
+			if ceremony > 0 {
+				// A placeholder commit is ceremony, not a change offered for
+				// judgement (issue #195): it never spends the shared
+				// attempt budget the way a gate or reviewer refusal does.
+				// One retry in the same claim is free — Prior repeats
+				// THIS attempt's own ordinal rather than the next one, so
+				// the builder it wakes is never told it burned an attempt
+				// it didn't — and a second placeholder in a row means the
+				// adapter is producing nothing to judge, which parks.
+				if ceremony <= maxConsecutivePlaceholders {
+					history = append(history, fmt.Sprintf("attempt %d was a placeholder commit: %s", attempt, reason))
+					prior := &agent.Prior{
+						Run: item.ID, Repo: l.Repo.Name, Sha: string(head),
+						Checks:  failing(verdicts),
+						Reason:  fmt.Sprintf("attempt %d of %d; %s", attempt, budget, strings.Join(history, "; ")),
+						Attempt: attempt,
+						Of:      budget,
+					}
+					l.record(ctx, item, "attempt", string(head),
+						fmt.Sprintf(`{"attempt":%d,"of":%d,"reason":%q,"budget":%q}`, attempt, budget, reason, "ceremony"))
+					var rerr error
+					item, claim, rerr = q.Retain(ctx, item, claim, prior, attempt)
+					if rerr != nil {
+						return q.Fail(ctx, item, claim, queue.CauseInfra, fmt.Sprintf("retaining a ceremony retry: %v", rerr))
+					}
+					held.set("claim", claim)
+					// The build this bought is not attempt+1: it is the
+					// same attempt, rebuilt, so the top of the loop's own
+					// increment must land back on the ordinal just retained
+					// rather than skipping past it.
+					attempt--
+					continue
+				}
+				// A placeholder is never a reviewed candidate worth
+				// resuming at the gate — nothing here judged a change, so
+				// there is nothing worth a free recheck of. Plain Park,
+				// not ParkKeeping.
+				return q.Park(ctx, item, claim, queue.SeverityMedium,
+					fmt.Sprintf("%d placeholder commits in a row, past the ceremony bound of %d: %s",
+						ceremony, maxConsecutivePlaceholders, reason))
+			}
 			if attempt < budget {
 				// Under budget: feedback, not an exception. Told to the next
 				// build through the SAME layer a repair wakes with — the
@@ -1444,7 +1508,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 					Of:      budget,
 				}
 				l.record(ctx, item, "attempt", string(head),
-					fmt.Sprintf(`{"attempt":%d,"of":%d,"reason":%q}`, next, budget, reason))
+					fmt.Sprintf(`{"attempt":%d,"of":%d,"reason":%q,"budget":%q}`, next, budget, reason, "attempts"))
 				var rerr error
 				item, claim, rerr = q.Retain(ctx, item, claim, prior, next)
 				if rerr != nil {
