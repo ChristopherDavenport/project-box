@@ -603,6 +603,20 @@ type Queue struct {
 	Runner string
 	// TTL bounds a claim; a runner that dies mid-item frees it by expiry.
 	TTL time.Duration
+	// Interrupt is invoked when a claim is superseded or the item leaves for
+	// a terminal or operator-held state while a build may still be in
+	// flight; nil means no one is listening. It fires after the transition
+	// record is written, outside any lock, so a hook that cancels a build
+	// whose settle then arrives finds that settle fenced, never blocked or
+	// reordered by this call.
+	//
+	// It is not invoked from [Queue.Stop]: Stop halts claiming, and the
+	// pump's drain deliberately lets paid runs already in flight finish
+	// rather than kill them mid-item. A superseded run is a different
+	// shape — its outcome is already refused by [Queue.fence] before this
+	// hook ever runs, so letting it keep spending is pure waste, not a run
+	// worth the courtesy Stop extends.
+	Interrupt func(id string)
 }
 
 // Identity is who an operator-initiated write is attributed to: Name and Pid
@@ -1091,7 +1105,16 @@ func (q *Queue) Recover(ctx context.Context, w WorkItem) (WorkItem, bool, error)
 	if rerr != nil {
 		return w, false, rerr
 	}
-	return w, true, q.index(ctx, w.Tenant, "pending", w.ID, w.Note)
+	ierr := q.index(ctx, w.Tenant, "pending", w.ID, w.Note)
+	// The lease acquisition above proves the prior holder no longer HOLDS the
+	// claim; it does not prove the runner is dead. A runner stalled past its
+	// TTL is exactly the #211 collision — still alive, still writing to the
+	// tree — so whatever it is running gets canceled here rather than left to
+	// race the successor this recovery just re-queued.
+	if q.Interrupt != nil {
+		q.Interrupt(w.ID)
+	}
+	return w, true, ierr
 }
 
 // Resolve closes a parked or failed item without a landing: the operator
@@ -1231,6 +1254,13 @@ func (q *Queue) reopen(ctx context.Context, t tenant.ID, id string, who Identity
 		Actor: who.Name, Pid: who.Pid, OnBehalfOf: onBehalfOf, Body: mustMarshal(w),
 	}); err != nil {
 		return w, err
+	}
+	// Both directions leave a build that may still be running behind: Resolve
+	// says nothing more is owed, and Retry is about to let a successor
+	// dispatch on the same item. Either way a ghost still holding the old
+	// lease must be canceled, not merely outrun.
+	if q.Interrupt != nil {
+		q.Interrupt(w.ID)
 	}
 	if to == StatePending {
 		// Back into the drain's index. The drain folds it by subject and

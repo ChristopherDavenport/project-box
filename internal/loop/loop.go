@@ -197,6 +197,15 @@ type Loop struct {
 	// sets this field keeps meaning what it always meant. The daemon wires
 	// this from box configuration; this package only enforces it.
 	Widen string
+	// Interrupt, when set, cancels the build running under the named item
+	// id. [Loop.reapGhost] calls it on a genuine ghost — a holder proved not
+	// running — right before releasing that ghost's lease, so a runner
+	// merely stalled past its TTL (issue #211) is stopped before a successor
+	// dispatches into the same tree. Nil means no one is listening, which is
+	// every existing construction of Loop: this field exists because loop
+	// cannot import pump (pump imports loop), so the pump wires its own
+	// cancellation in here rather than the reverse.
+	Interrupt func(id string)
 }
 
 // WidenTests is the [Loop.Widen] policy that grants a structured
@@ -2818,6 +2827,17 @@ func (l *Loop) reapGhost(ctx context.Context, item queue.WorkItem, req forge.Lea
 			return forge.Lease{}, holder, "", false
 		}
 		state = string(w.State)
+		// This holder is provably not the caller's own leaked lease, so
+		// whatever is running under its name is a still-running builder that
+		// stalled past its TTL (issue #211), not this item's own retry. Cancel
+		// it before the lease below is released and re-acquired, so the
+		// successor this reap is about to hand a fresh claim to never runs
+		// beside it. Never done on the self-leak branch above: there, cur.Run
+		// IS req.Run, and canceling would kill the very run asking to reap
+		// its own leaked lease.
+		if l.Interrupt != nil {
+			l.Interrupt(cur.Run)
+		}
 	}
 
 	note = fmt.Sprintf("held by %s, which is not running", cur.Run)

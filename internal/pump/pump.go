@@ -91,6 +91,76 @@ type Pump struct {
 	// posting its outcome is unrelated traffic that must never contend with
 	// that swap.
 	runs runTally
+	// builds tracks the cancel func for every build dispatch currently in
+	// flight, keyed by item id, so [Pump.CancelBuild] can stop the one
+	// goroutine actually running it rather than merely being outrun by a
+	// fence (issue #270). Its own mutex, never p.mu, for the same reason
+	// runs has one: CancelBuild fires from a queue hook or a loop's
+	// reapGhost, arbitrary goroutines that must never contend with a Loops
+	// swap.
+	builds buildRegistry
+	// wireOnce installs both cancellation hooks — p.Queue.Interrupt and
+	// every configured Loop's Interrupt — the first time [Pump.Tick] or
+	// [Pump.Drain] runs. Nothing constructs a Pump through a function; the
+	// daemon builds the struct literal directly, so there is no single
+	// place to wire eagerly, and paying a sync.Once check on every later
+	// call is cheaper than a constructor nobody would be forced to use.
+	wireOnce sync.Once
+}
+
+// buildCancel is one build dispatch's cancel func, held behind a pointer so
+// [buildRegistry.deregister] can tell "the entry I registered" from "a later
+// dispatch's entry that happens to share this item's id" by identity rather
+// than by comparing func values, which Go does not allow. This is the
+// generation guard: a superseded build's goroutine deregisters only its own
+// entry, never a successor's that has since claimed the same id.
+type buildCancel struct {
+	cancel context.CancelFunc
+}
+
+// buildRegistry maps an in-flight build's item id to the means of stopping
+// it. See [Pump.builds] for why it carries its own mutex.
+type buildRegistry struct {
+	mu   sync.Mutex
+	live map[string]*buildCancel
+}
+
+// register records cancel under id, returning the entry the caller must hand
+// back to [buildRegistry.deregister] when the build ends.
+func (r *buildRegistry) register(id string, cancel context.CancelFunc) *buildCancel {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.live == nil {
+		r.live = make(map[string]*buildCancel)
+	}
+	entry := &buildCancel{cancel: cancel}
+	r.live[id] = entry
+	return entry
+}
+
+// deregister removes id's entry, but only if it is still exactly the entry
+// the caller registered — a re-dispatch of the same id (Recover, then a
+// later tick's re-claim) has since overwritten it with its own, and that
+// entry belongs to the new build, not this one.
+func (r *buildRegistry) deregister(id string, entry *buildCancel) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.live[id] == entry {
+		delete(r.live, id)
+	}
+}
+
+// cancel stops the build registered under id, if any. A miss — no build
+// registered, or one that already finished and deregistered itself — is a
+// silent no-op: canceling something that no longer exists is not an error,
+// it is the common case.
+func (r *buildRegistry) cancel(id string) {
+	r.mu.Lock()
+	entry := r.live[id]
+	r.mu.Unlock()
+	if entry != nil {
+		entry.cancel()
+	}
 }
 
 // Quiesce blocks until every in-flight run settles or the context ends,
@@ -112,6 +182,50 @@ func (p *Pump) SetLoops(loops map[string]*loop.Loop) {
 	p.mu.Lock()
 	p.Loops = loops
 	p.mu.Unlock()
+	// A reload swaps the whole table, and a freshly swapped-in Loop has
+	// never had [loop.Loop.Interrupt] wired — [Pump.ensureWired]'s Once has
+	// already fired by the time any reload happens, so nothing else will
+	// wire this new table.
+	p.wireLoops()
+}
+
+// CancelBuild stops the build running under item id, if [Pump.builds] has
+// one registered. It is installed as both p.Queue.Interrupt and every
+// configured Loop's Interrupt by [Pump.ensureWired] — a supersede or reopen
+// reaches it through the queue, a stalled ghost through reapGhost — so
+// either caller stops the actual goroutine instead of merely being outrun by
+// the fence it already lost to.
+//
+// No-ops on an id with nothing registered: settled work, a judgement or
+// replan dispatch (never registered here — see the comments at their
+// dispatch sites), or a build that already finished on its own.
+func (p *Pump) CancelBuild(id string) {
+	p.builds.cancel(id)
+}
+
+// ensureWired installs both cancellation hooks exactly once: p.Queue's
+// Interrupt, fired by [queue.Queue.Recover] and the two directions of
+// [queue.Queue.Retry]/[queue.Queue.Resolve]'s reopen, and p.CancelBuild on
+// every currently-configured Loop, fired by [loop.Loop]'s reapGhost. Called
+// at the top of Tick and Drain — tests call Drain directly, so Tick alone
+// would leave them unwired — rather than in a constructor, because nothing
+// builds a Pump through one; the daemon assembles the struct literal
+// directly.
+func (p *Pump) ensureWired() {
+	p.wireOnce.Do(func() {
+		p.Queue.Interrupt = p.CancelBuild
+		p.wireLoops()
+	})
+}
+
+// wireLoops sets [loop.Loop.Interrupt] to p.CancelBuild on every
+// currently-configured loop.
+func (p *Pump) wireLoops() {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	for _, lp := range p.Loops {
+		lp.Interrupt = p.CancelBuild
+	}
 }
 
 // SetKinds swaps the declaration table, under the same lock and for the same
@@ -571,6 +685,7 @@ func landReady(item queue.WorkItem) bool {
 // ever asked. [Pump.Quiesce] is the barrier for anyone who needs every
 // dispatched run to have actually finished, not just been started.
 func (p *Pump) Drain(ctx context.Context) (int, error) {
+	p.ensureWired()
 	settled, tallyErr := p.runs.swap()
 
 	var candidates []queue.WorkItem
@@ -725,13 +840,23 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			item = claimed
 		}
 
+		// Registered BEFORE the goroutine starts, not inside it: a supersede
+		// arriving between this line and the goroutine's first statement must
+		// still find an entry to cancel, not a window where the build is
+		// dispatched but not yet stoppable.
+		bctx, cancel := context.WithCancel(ctx)
+		entry := p.builds.register(item.ID, cancel)
 		p.inflight.Add(1)
-		go func(item queue.WorkItem, claim forge.Lease, grant *loop.SectionGrant) {
+		go func(item queue.WorkItem, claim forge.Lease, grant *loop.SectionGrant, bctx context.Context, cancel context.CancelFunc, entry *buildCancel) {
 			defer p.inflight.Done()
 			defer release()
-			out, err := lp.RunHolding(ctx, item, claim, grant)
+			defer func() {
+				p.builds.deregister(item.ID, entry)
+				cancel()
+			}()
+			out, err := lp.RunHolding(bctx, item, claim, grant)
 			p.runs.record(item, out, err)
-		}(item, claim, grant)
+		}(item, claim, grant, bctx, cancel, entry)
 	}
 	return settled, errors.Join(unreadable, firstErr, tallyErr)
 }
@@ -750,6 +875,7 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 // answers this tick is pending again in time for this same tick's Drain to
 // claim it, the same ordering intake's newly-submitted items already get.
 func (p *Pump) Tick(ctx context.Context) (int, error) {
+	p.ensureWired()
 	_, intakeErr := p.Intake(ctx)
 	_, replanErr := p.Replan(ctx)
 	settled, drainErr := p.Drain(ctx)
@@ -894,6 +1020,11 @@ func (p *Pump) dispatchJudgement(ctx context.Context, ing ingress.Ingress, decl 
 		return err
 	}
 	p.inflight.Add(1)
+	// Not registered in [Pump.builds]: [Pump.CancelBuild] and the hooks that
+	// call it (issue #270) are scoped to builds — a judgement decomposition
+	// is a planner call, not a build a supersede could ever race, since
+	// nothing claims a queue item's lease until the plan it produces is
+	// submitted as one.
 	go func() {
 		defer p.inflight.Done()
 		defer release()
@@ -1024,6 +1155,10 @@ func (p *Pump) dispatchReplan(ctx context.Context, item queue.WorkItem) error {
 		return err
 	}
 	p.inflight.Add(1)
+	// Not registered in [Pump.builds], for the same reason
+	// dispatchJudgement's own dispatch is not: a replan is a planner call
+	// under its own replanClaimRepo lease, never a build a supersede on the
+	// item's own queue claim could race.
 	go func() {
 		defer p.inflight.Done()
 		defer release()
