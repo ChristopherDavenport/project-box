@@ -202,6 +202,19 @@ func (h *heldLeases) snapshot() []forge.Lease {
 	return out
 }
 
+// keyed is snapshot with the keys kept, for a caller that must treat one of
+// them specially — [Heartbeat.Pulse]'s "claim" classification — rather than
+// guess which lease of an unkeyed list it was from the shape of its ref.
+func (h *heldLeases) keyed() map[string]forge.Lease {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make(map[string]forge.Lease, len(h.byKey))
+	for k, v := range h.byKey {
+		out[k] = v
+	}
+	return out
+}
+
 // renewOnResume subscribes a fresh [heldLeases] tracker to l.Suspend so
 // that every lease it currently tracks is renewed, with l.TTL, the moment a
 // resume is detected. Renewing with the full TTL from post-resume now is

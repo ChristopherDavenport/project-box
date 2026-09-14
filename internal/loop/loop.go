@@ -206,6 +206,15 @@ type Loop struct {
 	// cannot import pump (pump imports loop), so the pump wires its own
 	// cancellation in here rather than the reverse.
 	Interrupt func(id string)
+	// Pulse, when set, makes the loop renewal-aware between resumes: every
+	// call to [Loop.RunHolding] tracks its run with it (see [Heartbeat]),
+	// and the daemon's per-frame progress hook drives Pulse(ctx, item.ID)
+	// once per frame so a claim lease renewed once at checkout keeps
+	// renewing while the build or review keeps talking, well past its TTL
+	// (issue #211). Nil preserves exactly today's behavior — a claim that
+	// relies on its own TTL and Checkout's one-time renewal alone — which is
+	// every existing construction of Loop (the [Suspend] precedent).
+	Pulse *Heartbeat
 }
 
 // WidenTests is the [Loop.Widen] policy that grants a structured
@@ -610,6 +619,15 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 	held, detachRenewal := l.renewOnResume(ctx)
 	defer detachRenewal()
 	held.set("claim", claim)
+
+	// Tracks this run with l.Pulse (see [Heartbeat]) so the daemon's
+	// per-frame progress hook — a separate unit's wiring — can renew every
+	// lease held here well before the claim's TTL lapses under a run that
+	// never stops talking (issue #211). detachPulse belongs beside
+	// detachRenewal's own defer for the same reason: a run that returns must
+	// stop being renewable the moment it is no longer running.
+	detachPulse := l.trackPulse(item, held)
+	defer detachPulse()
 
 	if deny, err := l.authorize(ctx, item, authz.ActionPropose); err != nil {
 		return q.Fail(ctx, item, claim, queue.CauseInfra, err.Error())
