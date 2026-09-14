@@ -323,9 +323,15 @@ boxes:
     # is over. A deploy stops claims, waits for running work to settle
     # exactly as restart.sh does, checks and rebuilds the daemon at main's
     # new head, re-execs on the same socket and store, and rolls back —
-    # parking a deploy exception — if the new binary fails to come up. Gated
-    # to the seven sections whose landings can actually change the daemon's
-    # own tree; a landing in docs or room does not restart it.
+    # parking a deploy exception — if the new binary fails to come up. Only
+    # docs is inert here (#210): boxd is the process serving the web bundle
+    # (web/embed.go's //go:embed all:dist becomes d.API.UI), so a room-only
+    # landing is a change to what the daemon serves, not a no-op on it — and
+    # internal/checks, in deploy's paths, is linked into cmd/boxd, so deploy
+    # is not inert either. Warranting them costs at most one extra deploy
+    # per housekeeping pass, since #216 folds any number of watched landings
+    # into a single cumulative build.Commit->head comparison rather than
+    # firing once per landing.
     self_deploy:
       from: main
-      sections: [daemon, loop, agent, forge, evidence, intake, capacity]
+      sections: [daemon, loop, agent, forge, evidence, intake, capacity, room, deploy]

@@ -290,3 +290,43 @@ func TestDogfoodSectionMapMatchesCoChangeEvidence(t *testing.T) {
 		}
 	}
 }
+
+// TestSelfDeployWarrantsEverySectionButDocs: issue #210. boxd is the process
+// serving the web bundle (web/embed.go's //go:embed all:dist becomes
+// d.API.UI), so a room-only landing changes what the daemon serves even
+// though it never touches internal/daemon itself — and internal/checks, in
+// deploy's paths, is linked into cmd/boxd, so deploy is not inert either.
+// docs is the one section whose paths (docs, README.md, CLAUDE.md) reach
+// nothing the running binary executes or serves, which is what makes it the
+// sole section self_deploy may skip.
+//
+// This asserts against the repo's own declared section list rather than a
+// copy of it, so a future section-map redraw that forgets to re-derive the
+// warrant fails here — that already happened once, when #200's redraw had
+// to add intake and capacity to self_deploy.sections by hand.
+func TestSelfDeployWarrantsEverySectionButDocs(t *testing.T) {
+	c, err := Load(dogfoodConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bx := c.Boxes[0]
+	sd := bx.SelfDeploy
+	if sd == nil {
+		t.Fatal("no self_deploy block in the dogfood config")
+	}
+	warranted := make(map[string]bool, len(sd.Sections))
+	for _, s := range sd.Sections {
+		warranted[s] = true
+	}
+	for _, s := range bx.Repos[0].Sections {
+		if s.Name == "docs" {
+			if warranted[s.Name] {
+				t.Error(`self_deploy.sections includes "docs" — its paths (docs, README.md, CLAUDE.md) reach nothing the running binary executes or serves, so a docs-only landing warrants no deploy`)
+			}
+			continue
+		}
+		if !warranted[s.Name] {
+			t.Errorf("self_deploy.sections is missing declared section %q — its landings can change what the running daemon does or serves and are silently skipped", s.Name)
+		}
+	}
+}
