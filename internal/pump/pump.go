@@ -500,19 +500,21 @@ func sectionsIntersect(a, b []string) bool {
 // moved to the very front of the dispatch order, ahead of the head itself:
 // finishing a holder's re-claim (rebase, re-gate, push) is what actually
 // frees the section the head is waiting on, and with a tight capacity budget
-// the dispatch-loop's break on a busy or exhausted meter would otherwise hand
-// the only seat to the head every tick, leaving the holder — the one thing
-// that could unblock it — never claimed at all.
+// a busy or exhausted meter refusing every later candidate on that same
+// account (issue #217) would otherwise hand the only seat to the head every
+// tick, leaving the holder — the one thing that could unblock it — never
+// claimed at all.
 //
 // A candidate not [drainCandidate.ok] or not [drainCandidate.polled] is
 // skipped entirely — held on a person or unrouted, it is not contending for
 // a section this tick either way.
 //
 // Issue #143 (corrected): under a full capacity budget, Drain's dispatch
-// loop breaks the moment a slot is busy or exhausted (see the break below),
-// so whoever sits first in this order takes the only seat — and submission
-// order alone prices a unit that owes only a rebase, a re-gate, and a push
-// the same as one that has not even started a build. A [landReady] candidate
+// loop refuses every later candidate paced by the same exhausted meter (see
+// the refused set below, issue #217) — so within a shared account, whoever
+// sits first in this order takes the only seat — and submission order alone
+// prices a unit that owes only a rebase, a re-gate, and a push the same as
+// one that has not even started a build. A [landReady] candidate
 // is moved ahead of every non-head, non-holder candidate that would start a
 // fresh build, even when nobody in its group has starved: finishing a
 // landing frees its section sooner than any build does, and every build
@@ -836,6 +838,14 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 			firstErr = fmt.Errorf("pump: item %s: %w", item.ID, err)
 		}
 	}
+	// refused remembers which meters have already turned a candidate away
+	// this pass (issue #217). Each loop can wire its own account, so a spent
+	// window on one loop's meter is not news about any other's: the old
+	// break treated the whole dispatch order as paced by a single shared
+	// meter, stranding a candidate whose own loop's account still had room
+	// behind one that had none. Keyed by the meter actually charged, so a
+	// pool of loops sharing one meter (today's wiring) still refuses as one.
+	refused := map[*capacity.Meter]bool{}
 	for _, dc := range dcs {
 		if !dc.ok || !dc.polled {
 			continue
@@ -856,19 +866,38 @@ func (p *Pump) Drain(ctx context.Context) (int, error) {
 		// existing park path, exactly as before: dispatched with a seat and
 		// no grant, so leaseSections runs again inside Run and parks it.
 
-		release, err := p.Meter.Acquire(ctx, item.ID)
+		// Issue #217: each loop paces on its own account when it is given
+		// one, falling back to the pump's own meter — today's single-account
+		// wiring — when it is not.
+		meter := lp.Meter
+		if meter == nil {
+			meter = p.Meter
+		}
+		if refused[meter] {
+			// Already paced this pass: skip without spending another
+			// Acquire call, but keep walking the order — a candidate further
+			// down may pace on a different, still-open account.
+			grant.Release()
+			continue
+		}
+
+		release, err := meter.Acquire(ctx, item.ID)
 		if errors.Is(err, capacity.ErrBudget) || errors.Is(err, capacity.ErrBusy) ||
 			errors.Is(err, capacity.ErrUnmetered) || errors.Is(err, capacity.ErrCredential) {
-			// Pacing, not failure: the rest waits for the next tick. An
+			// Pacing, not failure: this account waits for the next tick. An
 			// unmetered window is pacing too — the meter has lost track of
-			// spend, and the factory holds until the window turns over
+			// spend, and the account holds until the window turns over
 			// rather than running on an account it cannot read. A credential
-			// mismatch or an unnamed one under a brake is the same shape: a
-			// factory that has stopped on purpose because it no longer knows
+			// mismatch or an unnamed one under a brake is the same shape: an
+			// account that has stopped on purpose because it no longer knows
 			// — or was never told — which account it is spending, not a
-			// tick that failed.
+			// tick that failed. A spent window on this account must not
+			// strand another account's work, so this no longer breaks the
+			// whole dispatch order (issue #217) — it only marks this meter
+			// refused and moves on to the next candidate.
 			grant.Release()
-			break
+			refused[meter] = true
+			continue
 		}
 		if err != nil {
 			grant.Release()
