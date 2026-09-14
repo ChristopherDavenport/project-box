@@ -217,6 +217,102 @@ export function breakdown(by) {
     .join(' · ');
 }
 
+// Colour is a second channel beside the word, never the only one — the same
+// rule STATE_APPEARANCE already holds itself to. jh-tag only ships three
+// coloured hooks (see ui.js's base styles), so builder/gate/planner each get
+// a distinct one and every other role falls back to the uncoloured default.
+export const ROLE_APPEARANCE = { builder: 'brand', gate: 'neutral', planner: 'positive' };
+
+// The stage word a role names while it holds a run — the dashboard's split
+// and a card's stage tag both read off this same map, so the two can never
+// name a role two different things.
+const ROLE_STAGE = { builder: 'building', gate: 'reviewing', planner: 'planning' };
+
+/**
+ * sessionHeading is one agent-session row's own header, folded once so the
+ * sessions page and the item page draw an identical row from an identical
+ * rule instead of two copies free to drift apart. Role is always its own
+ * tag. A gate row is headed by the "review" gate's verdict once it has
+ * judged — pass or fail, the reason's first sentence, and the chain id of
+ * the record that said so — and by "reviewing <sha>" before that, since
+ * AgentSession.Sha on a gate row is the commit under judgement. A builder
+ * row is headed by its attempt and, once it has one, the sha it produced.
+ * Every other role (planner among them) keeps the attempt alone — the same
+ * heading every role had before verdicts and shas existed to say more.
+ */
+export function sessionHeading(row) {
+  const role = row?.role || 'agent';
+  const roleAppearance = ROLE_APPEARANCE[role] ?? 'neutral';
+  if (role === 'gate') {
+    if (row?.decision) {
+      return {
+        role, roleAppearance,
+        verdict: {
+          decision: row.decision,
+          appearance: row.decision === 'pass' ? 'positive' : 'negative',
+          reason: row.reason ? firstLine(row.reason) : '',
+          recordId: row.verdict_record_id || '',
+        },
+      };
+    }
+    return { role, roleAppearance, text: row?.sha ? `reviewing ${short(row.sha)}` : '' };
+  }
+  const parts = [];
+  if (row?.attempt) parts.push(`attempt ${row.attempt}${row?.of ? ` of ${row.of}` : ''}`);
+  if (role === 'builder' && row?.sha) parts.push(`built ${short(row.sha)}`);
+  return { role, roleAppearance, text: parts.join(' · ') };
+}
+
+/** currentSession is the row a unit's card speaks for right now: the newest
+ *  unfinished attempt, or, once every attempt has finished, the newest one.
+ *  Rows arrive oldest first, so both rules are just "which end to read". */
+export function currentSession(sessions) {
+  const rows = sessions ?? [];
+  for (let i = rows.length - 1; i >= 0; i--) if (!rows[i].finished) return rows[i];
+  return rows.length ? rows[rows.length - 1] : null;
+}
+
+/**
+ * cardStage is the word a running card's stage tag reads, and the model
+ * behind it — the honest version of the backend's own stage, which marks
+ * every agent-run "building" whichever role wrote it (control.stageOf) and
+ * marks a judgement's card no stage at all (a judgement has no queue entry
+ * to carry one). Overridden only where that backend word cannot be trusted
+ * to say who is actually holding the run; every other stage — queued,
+ * gating, landing, done — is the backend's own word, unchanged.
+ */
+export function cardStage(s) {
+  const cur = currentSession(s?.agent_sessions);
+  const roleStage = cur && ROLE_STAGE[cur.role];
+  const untrustworthy = s?.judgement || s?.stage === 'building';
+  const label = roleStage && untrustworthy ? roleStage : (s?.stage || '');
+  if (!label) return null;
+  const model = label === roleStage ? (cur.model || '') : '';
+  return { label, model };
+}
+
+/** roleSplit projects the sessions listing into how many units each role
+ *  currently holds — a straight count of one field already on the wire for
+ *  every row, never a parallel counter and never derived from spend. */
+export function roleSplit(sessions) {
+  const counts = { building: 0, reviewing: 0, planning: 0 };
+  for (const s of sessions ?? []) {
+    const cur = currentSession(s.agent_sessions);
+    const stage = cur && ROLE_STAGE[cur.role];
+    if (stage) counts[stage]++;
+  }
+  return counts;
+}
+
+/** roleSplitLine renders roleSplit's counts as the dashboard's running-count
+ *  line, in a fixed order, omitting any role holding nothing. */
+export function roleSplitLine(counts) {
+  return ['building', 'reviewing', 'planning']
+    .filter((k) => (counts?.[k] ?? 0) > 0)
+    .map((k) => `${k} ${counts[k]}`)
+    .join(' · ');
+}
+
 // Colour is a second channel beside the word, never the only one. The jh-tag
 // hooks these map onto are set per class in the views' styles.
 export const STATE_APPEARANCE = {

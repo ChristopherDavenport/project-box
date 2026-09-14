@@ -14,6 +14,7 @@ import { ActivityController } from './sse.js';
 import {
   age, title, taskURL, short, sameCommit, fmtTokens, fmtUSD, fmtCost, tokenSplit, breakdown, origin, place, hold, why,
   describe, itemOf, appearanceOf, STATE_APPEARANCE, SEVERITY_APPEARANCE, firstLine, clip, toolDetail, cardTitle,
+  sessionHeading, currentSession, cardStage, roleSplit, roleSplitLine, ROLE_APPEARANCE,
 } from './format.js';
 import { settled, orderList, planeOrder } from './order.js';
 import { base, toast, focusInto } from './ui.js';
@@ -119,11 +120,16 @@ export class BoxDashboard extends LitElement {
   // Every item, once: the live list is a filter over it, and the titles that
   // let the feed say "Landed: <task>" instead of "indexed wi-ing-… index/landings".
   _items = new Task(this, { task: async (_, { signal }) => getItems([], signal), args: () => [] });
+  // The running tile's own seat fraction comes off the capacity report and
+  // says nothing about who holds each seat — this is the listing roleSplit
+  // projects to say the rest, fetched here rather than derived from spend
+  // so the split can never drift from what /sessions itself would show.
+  _sessions = new Task(this, { task: async (_, { signal }) => getSessions(signal), args: () => [] });
   _activity = new ActivityController(this, { onEvent: () => this._refresh() });
 
   _refresh() {
     clearTimeout(this._timer);
-    this._timer = setTimeout(() => { this._status.run(); this._items.run(); }, 400);
+    this._timer = setTimeout(() => { this._status.run(); this._items.run(); this._sessions.run(); }, 400);
   }
 
   disconnectedCallback() {
@@ -150,6 +156,11 @@ export class BoxDashboard extends LitElement {
   _statusCard(s) {
     const q = s.exception_queue;
     const sp = s.spend;
+    // A projection of the sessions listing itself, never spend.running: the
+    // seat fraction above says how many seats are full, this says who is in
+    // them. Undefined while the sessions fetch is still pending renders as
+    // no line at all rather than a false "nobody running".
+    const split = this._sessions.value ? roleSplitLine(roleSplit(this._sessions.value)) : '';
     return html`
       <div class="tiles">
         ${this._tile(s.pending, 'pending', { href: '/work', sub: 'owed a run' })}
@@ -160,7 +171,10 @@ export class BoxDashboard extends LitElement {
         ${this._tile(s.claims?.stopped ? 'Stopped' : 'Running', 'claims', {
           sub: s.claims?.actor ? `by ${s.claims.actor}` : 'never touched', tone: s.claims?.stopped ? 'negative' : 'positive' })}
         ${sp?.running_builds != null
-          ? this._tile(`${sp.running_builds}/${sp.max_concurrent}`, 'building now', { href: '/sessions', sub: sp.started ? `${sp.started} started this window` : '' })
+          ? this._tile(`${sp.running_builds}/${sp.max_concurrent}`, 'building now', {
+              href: '/sessions',
+              sub: [split, sp.started ? `${sp.started} started this window` : ''].filter(Boolean).join(' · '),
+            })
           : nothing}
         ${sp?.running_judgements != null
           ? this._tile(`${sp.running_judgements}/${sp.max_judgements}`, 'judging now', { href: '/sessions' })
@@ -550,6 +564,25 @@ function frameList(frames, emptyMessage, live) {
         </li>`)}</ol>`;
 }
 
+/** sessionHeadingSpan draws one agent-session row's own header from
+ *  [sessionHeading]: the role's own tag, then either a review's verdict —
+ *  pass or fail, its reason's first sentence, and a link to the gate record
+ *  — or the row's own headline (an attempt, a built sha, "reviewing
+ *  <sha>"). Shared by the sessions page and the item page so the same row
+ *  never draws two ways; `verdictHref` differs only in whether the link
+ *  crosses pages (the sessions page) or stays on this one (the item page). */
+function sessionHeadingSpan(row, verdictHref) {
+  const h = sessionHeading(row);
+  return html`
+    <jh-tag size="small" class=${h.roleAppearance} label=${h.role}></jh-tag>
+    ${h.verdict
+      ? html`
+        <jh-tag size="small" class=${h.verdict.appearance} label=${h.verdict.decision}></jh-tag>
+        ${h.verdict.reason ? html`<span>${h.verdict.reason}</span>` : nothing}
+        ${h.verdict.recordId ? html`<a href=${verdictHref(h.verdict.recordId)}>gate record</a>` : nothing}`
+      : (h.text ? html`<span>${h.text}</span>` : nothing)}`;
+}
+
 /**
  * Sessions: one card per running unit — what it is, how far it has got, and
  * the sequence of agent sessions it is, issue #107's own framing.
@@ -566,6 +599,11 @@ export class BoxSessions extends LitElement {
     :host { display: block; }
     .grid { display: grid; gap: var(--jh-space-400); grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); align-items: start; }
     .grid > * { min-width: 0; }
+    /* The title band says who holds the run before a word does — a border
+       in the role's own colour, the same ones jh-tag.brand/positive use. */
+    jh-card.role-builder { border-left: var(--jh-space-100) solid var(--jh-color-content-brand-enabled); }
+    jh-card.role-gate { border-left: var(--jh-space-100) solid var(--jh-color-content-secondary-enabled); }
+    jh-card.role-planner { border-left: var(--jh-space-100) solid var(--jh-color-content-positive-enabled); }
     .meta { display: flex; gap: var(--jh-space-200); flex-wrap: wrap; align-items: center; font: var(--jh-font-helper-regular);
             color: var(--jh-color-content-secondary-enabled); margin-bottom: var(--jh-space-200); }
     .meta > * { min-width: 0; overflow-wrap: anywhere; }
@@ -657,10 +695,9 @@ export class BoxSessions extends LitElement {
     });
   }
 
-  _sessionMeta(s) {
+  _sessionMeta(s, itemId) {
     return html`<span class="session-meta">
-      <b>${s.role || 'agent'}</b>
-      ${s.attempt ? html`<span>attempt ${s.attempt}${s.of ? ` of ${s.of}` : ''}</span>` : nothing}
+      ${sessionHeadingSpan(s, (recordId) => `/items/${itemId}#gate-${recordId}`)}
       ${s.model ? html`<span>${s.model}</span>` : nothing}
       ${s.agentref ? html`<span><box-hash label="agentref" .value=${s.agentref}></box-hash></span>` : nothing}
       ${s.started
@@ -670,14 +707,14 @@ export class BoxSessions extends LitElement {
     </span>`;
   }
 
-  _sessionRow(s, childrenOf, framesOf, live) {
+  _sessionRow(s, childrenOf, framesOf, live, itemId) {
     const frames = framesOf(s.agentref);
     const children = childrenOf.get(s.agentref) ?? [];
     return html`
       <details class="session" ?open=${!s.finished}>
-        <summary>${this._sessionMeta(s)}</summary>
+        <summary>${this._sessionMeta(s, itemId)}</summary>
         ${frameList(frames, 'Nothing said yet.', live)}
-        ${children.map((c) => this._sessionRow(c, childrenOf, framesOf, live))}
+        ${children.map((c) => this._sessionRow(c, childrenOf, framesOf, live, itemId))}
       </details>`;
   }
 
@@ -696,11 +733,20 @@ export class BoxSessions extends LitElement {
         ${frameList(orderList(live, unattributed), 'Nothing here.', live)}
       </details>` : nothing;
     const t = cardTitle(title(s) || s.id);
+    // The current session is who holds the run right now — the title band
+    // says so at a glance, and the meta line below says so in words.
+    const cur = currentSession(s.agent_sessions);
+    const roleClass = cur ? `role-${cur.role}` : '';
+    const stage = cardStage(s);
     return html`
-      <jh-card header-title=${t.label} title=${t.full} header-subtitle=${origin(s) || place(s)} padding="medium">
+      <jh-card class=${roleClass} header-title=${t.label} title=${t.full} header-subtitle=${origin(s) || place(s)} padding="medium">
         <div class="meta">
           ${s.judgement ? html`<jh-tag size="small" label="judgement"></jh-tag>` : stateTag(s.state)}
-          ${s.stage ? html`<jh-tag size="small" label=${s.stage}></jh-tag><span>${age(s.in_state_sec)} in stage</span>` : nothing}
+          ${cur ? html`<jh-tag size="small" class=${ROLE_APPEARANCE[cur.role] ?? 'neutral'} label=${cur.role}></jh-tag>` : nothing}
+          ${stage
+            ? html`<jh-tag size="small" label=${stage.model ? `${stage.label} — ${stage.model}` : stage.label}></jh-tag>
+                   ${s.judgement ? nothing : html`<span>${age(s.in_state_sec)} in stage</span>`}`
+            : nothing}
           ${s.seat ? html`<span>seat <b>${s.seat}</b></span>` : nothing}
           ${s.runner ? html`<span>${hold(s)}</span>` : nothing}
         </div>
@@ -725,7 +771,7 @@ export class BoxSessions extends LitElement {
                      Silence about the run, not an idle agent.</p>`)
           : html`
             ${live ? nothing : earlier}
-            ${order.roots.map((row) => this._sessionRow(row, order.childrenOf, order.framesOf, live))}
+            ${order.roots.map((row) => this._sessionRow(row, order.childrenOf, order.framesOf, live, s.id))}
             ${live ? earlier : nothing}`}
       </jh-card>`;
   }
@@ -1106,8 +1152,7 @@ export class BoxItem extends LitElement {
   // is the most either can honestly say.
   _sessionSummary(s, promptRefs) {
     return html`<span class="session-meta">
-      <b>${s.role || 'agent'}</b>
-      ${s.attempt ? html`<span>attempt ${s.attempt}${s.of ? ` of ${s.of}` : ''}</span>` : nothing}
+      ${sessionHeadingSpan(s, (recordId) => `#gate-${recordId}`)}
       ${s.model ? html`<span>${s.model}</span>` : nothing}
       ${s.agentref ? html`<span>${this._agentRefLink(s.agentref, promptRefs)}</span>` : nothing}
       ${s.session ? html`<span><box-hash label="ACP session" .value=${s.session}></box-hash></span>` : nothing}
@@ -1252,7 +1297,7 @@ export class BoxItem extends LitElement {
     return html`
       <ol class="chain" aria-label=${live ? 'Run timeline, newest first' : 'Run timeline, from the start'}>
         ${orderList(live, evidence).map((r) => html`
-          <li id=${r.Kind === 'agent-prompt' ? 'agent-prompt-' + r.Subject : nothing}>
+          <li id=${r.Kind === 'agent-prompt' ? 'agent-prompt-' + r.Subject : r.Kind === 'gate' ? 'gate-' + r.ID : nothing}>
             ${kindTag(r.Kind)}
             <div>
               <div class="what">${describe(r)}</div>
