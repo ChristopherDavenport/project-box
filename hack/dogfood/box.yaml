@@ -101,7 +101,8 @@ budget:
   # The brake in the currency that actually bound. The account's five-hour
   # window is shared with the human on this machine and invisible to the
   # meter until a run ends; every run now reports it, and above this share
-  # the meter refuses new starts until the window resets. Half is Chris's.
+  # the meter refuses new starts until the window resets; the rest is the
+  # operator's.
   # `hack/dogfood/window.py` asks the same question before a round starts.
   window_reserve: 0.5
   # This factory runs on the subscription on this machine, which is why
