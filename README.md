@@ -12,7 +12,7 @@ producing evidence an external auditor can test.
 
 ## Build and test
 
-Go 1.25.13+ (`go.mod` pins it; with `GOTOOLCHAIN=local`, upgrade or run
+Go 1.26.11+ (`go.mod` pins it; with `GOTOOLCHAIN=local`, upgrade or run
 with `GOTOOLCHAIN=auto`).
 
 ```sh
