@@ -110,7 +110,7 @@ func (builder) Build(_ context.Context, ws forge.Workspace, task string) (forge.
 	if _, err := gitforge.RevParse(context.Background(), ws.Dir, "HEAD"); err != nil {
 		return "", err
 	}
-	if err := gitforge.CommitAll(context.Background(), ws.Dir, "build: "+task); err != nil {
+	if err := gitforge.CommitAll(context.Background(), ws.Dir, forge.Identity{}, "build: "+task); err != nil {
 		return "", err
 	}
 	out, err := gitforge.RevParse(context.Background(), ws.Dir, "HEAD")

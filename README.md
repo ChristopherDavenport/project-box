@@ -10,9 +10,16 @@ producing evidence an external auditor can test.
   criteria, and §10 as the running status log. The commit history is the
   build journal; read it phase by phase.
 
+**Status: experimental.** One operator builds this, and it builds itself
+(`hack/dogfood`). The configuration schema, the API, and the store layout
+change without notice or migration, and nothing here is supported for
+production use. Issues are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md)
+for how an issue becomes work and [SECURITY.md](SECURITY.md) for how to
+report a vulnerability.
+
 ## Build and test
 
-Go 1.25.13+ (`go.mod` pins it; with `GOTOOLCHAIN=local`, upgrade or run
+Go 1.26.11+ (`go.mod` pins it; with `GOTOOLCHAIN=local`, upgrade or run
 with `GOTOOLCHAIN=auto`).
 
 ```sh
@@ -145,6 +152,13 @@ credential value.
 bound). Nothing else does: the lease TTL is renewed while a run holds it, so
 without this an agent that hangs runs until the daemon stops.
 
+`commit_identity: {name, email}` is who the box is when it writes a commit
+itself: the committer of a squash or replay, the author of a revert or a
+rendered deploy, and the `Co-Authored-By` trailer builders sign with.
+Absent, it is `project-box <noreply+pbox@christopherdavenport.tech>`, so a
+commit says a box made it. Name both fields or neither; changing it needs
+a restart.
+
 ## Where work is expressed
 
 A repository's `sections:` are its named regions — paths, a purpose the
@@ -258,14 +272,18 @@ go run ./hack/deployloop -remote ...   # the deploy loop against any env repo
 go run ./hack/continuity -agent ...    # the seat-continuity experiment (spends real sessions)
 BOX_ACP_LIVE=/path/to/claude-agent-acp go test -run TestLive ./internal/agent/acp/  # one real agent run
 ./hack/dogfood/run.sh                  # the factory pointed at itself; then:
-./hack/dogfood/submit.py               # ...its own open issues, routed in
+./hack/dogfood/submit.py               # ...its own open issues labelled `box`, routed in
 ```
 
-`hack/dogfood` is this repository's own box (issue #7): one repo, one seat,
-`max_concurrent: 1`, the gated lane, landing on `refs/heads/factory` and
-never on main. It spends real sessions and needs `gh` authenticated — the
-forge reaches a private HTTPS remote only through the credential channel
-`run.sh` sets up, which the script explains. State lands in
+`hack/dogfood` is this repository's own box (issue #7), and it is the
+running instance that builds this repository, not a template to run as-is:
+the gated lane, landing on main through pull requests the factory opens,
+spending real sessions on the operator's own subscription. It needs `gh`
+authenticated — the forge reaches the HTTPS remote only through the
+credential channel `run.sh` sets up, which the script explains. It takes
+only open issues labelled `box`: anyone can open an issue on a public
+repository, only a collaborator can label one, and every issue taken
+becomes a builder's prompt with a push token behind it. State lands in
 `../project-box-state/`, beside the checkout rather than inside it — a
 workspace under the checkout would advertise the checkout (issue #73).
 
@@ -307,3 +325,9 @@ reason the record needs before it acts.
 `docs/PLAN.md` §10 says exactly where things stand and what is next; the
 phase commits carry the rationale. The live-verification scripts above
 recreate every environment the tests assume from nothing.
+
+## License
+
+MIT; see [LICENSE](LICENSE). The control room inlines and bundles
+Apache-2.0 and BSD-3-Clause web components, whose notices are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

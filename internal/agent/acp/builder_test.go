@@ -844,7 +844,7 @@ func TestTheSectionReachesThePromptAndTheRef(t *testing.T) {
 // actually was; the prompt now says so, in the words that back the runtime's
 // own path judgement of file-shaped tool calls.
 func TestThePromptNamesTheWorkspace(t *testing.T) {
-	got := prompt(agent.Bundle{}, "the task", "", "/work/tree-1")
+	got := prompt(agent.Bundle{}, "the task", "", "/work/tree-1", forge.Identity{})
 	for _, want := range []string{"/work/tree-1", "repository root", "refused"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("prompt missing %q:\n%s", want, got)
@@ -853,9 +853,26 @@ func TestThePromptNamesTheWorkspace(t *testing.T) {
 	// A Build with no workspace path (a probe, an experiment) gets no
 	// section naming one, the same way an empty contextDir gets no
 	// "Reference material" section.
-	got = prompt(agent.Bundle{}, "the task", "", "")
+	got = prompt(agent.Bundle{}, "the task", "", "", forge.Identity{})
 	if strings.Contains(got, "## Where you are") {
 		t.Errorf("an empty workspace path still produced a section naming one:\n%s", got)
+	}
+}
+
+// TestThePromptAsksForTheBoxsCoAuthorTrailer: the trailer a builder is asked
+// to sign with is the installation's commit identity, and the box's own
+// no-reply identity when it names none.
+func TestThePromptAsksForTheBoxsCoAuthorTrailer(t *testing.T) {
+	for _, tc := range []struct {
+		id   forge.Identity
+		want string
+	}{
+		{forge.Identity{}, `"Co-Authored-By: project-box <noreply+pbox@christopherdavenport.tech>"`},
+		{forge.Identity{Name: "Acme Factory", Email: "factory@acme.example"}, `"Co-Authored-By: Acme Factory <factory@acme.example>"`},
+	} {
+		if got := prompt(agent.Bundle{}, "the task", "", "", tc.id); !strings.Contains(got, tc.want) {
+			t.Errorf("prompt for %+v missing %s:\n%s", tc.id, tc.want, got)
+		}
 	}
 }
 

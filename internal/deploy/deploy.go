@@ -29,6 +29,9 @@ type Builder struct {
 	Service  render.Service
 	Target   render.Target
 	Template string
+	// Identity authors and commits the deploy. The zero value is
+	// [forge.DefaultIdentity].
+	Identity forge.Identity
 }
 
 // Build renders and commits. The commit message carries the declaration's
@@ -50,26 +53,27 @@ func (b Builder) Build(ctx context.Context, ws forge.Workspace, task string) (fo
 		return "", err
 	}
 	msg := fmt.Sprintf("deploy %s %s:%s to %s\n\n%s", b.Service.Name, b.Service.Image, b.Service.Tag, b.Target.Env, task)
-	if _, err := gitIn(ctx, ws.Dir, "add", "."); err != nil {
+	if _, err := gitIn(ctx, b.Identity, ws.Dir, "add", "."); err != nil {
 		return "", err
 	}
-	if _, err := gitIn(ctx, ws.Dir, "commit", "-m", msg); err != nil {
+	if _, err := gitIn(ctx, b.Identity, ws.Dir, "commit", "-m", msg); err != nil {
 		return "", err
 	}
-	out, err := gitIn(ctx, ws.Dir, "rev-parse", "HEAD")
+	out, err := gitIn(ctx, b.Identity, ws.Dir, "rev-parse", "HEAD")
 	if err != nil {
 		return "", err
 	}
 	return forge.Commit(strings.TrimSpace(out)), nil
 }
 
-func gitIn(ctx context.Context, dir string, args ...string) (string, error) {
+func gitIn(ctx context.Context, id forge.Identity, dir string, args ...string) (string, error) {
+	if err := id.Validate(); err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_AUTHOR_NAME=project-box", "GIT_AUTHOR_EMAIL=noreply+pbox@christopherdavenport.tech",
-		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=noreply+pbox@christopherdavenport.tech")
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	cmd.Env = append(cmd.Env, id.Env()...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {

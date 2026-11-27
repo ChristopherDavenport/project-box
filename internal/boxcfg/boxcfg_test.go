@@ -1177,3 +1177,41 @@ boxes:
 		t.Fatalf("err = %v, want it to name the duplicated claim", err)
 	}
 }
+
+// TestCommitIdentityIsNamedWholeOrNotAtAll: absent is the box's own no-reply
+// identity, both fields is an installation's own, and one without the other
+// is refused rather than completed from the host.
+func TestCommitIdentityIsNamedWholeOrNotAtAll(t *testing.T) {
+	const boxes = `
+boxes:
+  - name: shop
+    agent: claude-agent-acp
+    repos:
+      - name: app
+        remote: /tmp/app.git
+`
+	for _, tc := range []struct {
+		name, identity, want string
+	}{
+		{"absent", "", "project-box <noreply+pbox@christopherdavenport.tech>"},
+		{"named", "commit_identity: {name: Acme Factory, email: factory@acme.example}\n", "Acme Factory <factory@acme.example>"},
+		{"name only", "commit_identity: {name: Acme Factory}\n", ""},
+		{"email only", "commit_identity: {email: factory@acme.example}\n", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := Load(writeCfg(t, "tenant: acme\n"+tc.identity+boxes))
+			if tc.want == "" {
+				if err == nil || !strings.Contains(err.Error(), "commit_identity") {
+					t.Fatalf("Load = %v, want a commit_identity refusal", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := c.CommitIdentity.Identity().String(); got != tc.want {
+				t.Fatalf("identity = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

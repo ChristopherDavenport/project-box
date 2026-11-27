@@ -34,6 +34,13 @@ import (
 
 // Mirror is a tenant-bound implementation of [forge.Mirror].
 type Mirror struct {
+	// Identity is who this mirror set's tenant commits as when the box
+	// writes a commit itself — the compensating revert here, and the
+	// squash, replay and adapter commit its callers make in a workspace
+	// it leased. The zero value is [forge.DefaultIdentity]. Set it before
+	// first use; it is read, never written, once work is running.
+	Identity forge.Identity
+
 	root   string
 	tenant tenant.ID
 	leaser forge.Leaser
@@ -526,7 +533,7 @@ func (l *Lander) compensate(ctx context.Context, cs forge.ChangeSet, landed []fo
 			return out, err
 		}
 		msg := fmt.Sprintf("Revert forward: undo %s of changeset %s\n\nMember %s failed to land; every member must be independently safe,\nso the landed members are restored to their pre-changeset trees.", p.Now, cs.ID, "later")
-		rev, err := run(ctx, mirror, "commit-tree", strings.TrimSpace(tree), "-p", string(p.Now), "-m", msg)
+		rev, err := runAs(ctx, l.m.Identity, mirror, "commit-tree", strings.TrimSpace(tree), "-p", string(p.Now), "-m", msg)
 		lk.Unlock()
 		if err != nil {
 			return out, err
@@ -561,16 +568,25 @@ func (l *Lander) record(ctx context.Context, cs forge.ChangeSet, kind, subject, 
 
 // run executes git with a hermetic environment: no user or system config, so
 // tests and runners behave identically regardless of whose machine this is.
+// It is for commands that write no commit; one that does goes through runAs
+// with the identity it writes under.
 func run(ctx context.Context, dir string, args ...string) (string, error) {
+	return runAs(ctx, forge.Identity{}, dir, args...)
+}
+
+// runAs is run with the identity a commit it writes carries. The identity is
+// always set, even for commands that write none: with no user config, git
+// would otherwise guess one from the host's user and hostname.
+func runAs(ctx context.Context, id forge.Identity, dir string, args ...string) (string, error) {
+	if err := id.Validate(); err != nil {
+		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if dir != "" {
 		cmd.Dir = dir
 	}
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_AUTHOR_NAME=project-box", "GIT_AUTHOR_EMAIL=noreply+pbox@christopherdavenport.tech",
-		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=noreply+pbox@christopherdavenport.tech",
-	)
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	cmd.Env = append(cmd.Env, id.Env()...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &stderr
 	if err := cmd.Run(); err != nil {
@@ -616,13 +632,15 @@ var ErrRebaseConflict = errors.New("git: rebase conflicted")
 // otherwise have to rebuild — a whole second agent session to produce the
 // change it is already holding. Replaying costs a git operation and a gate
 // run. Without it, narrowing the lease would trade tokens for wall-clock.
-func Rebase(ctx context.Context, dir string, newBase, oldBase forge.Commit) (forge.Commit, error) {
+//
+// The replayed commits keep their authors; id is their committer.
+func Rebase(ctx context.Context, dir string, id forge.Identity, newBase, oldBase forge.Commit) (forge.Commit, error) {
 	// The workspace's origin is the mirror, which Fetch has already advanced;
 	// this brings the new base's objects into the tree.
 	if _, err := run(ctx, dir, "fetch", "origin"); err != nil {
 		return "", fmt.Errorf("git: fetch before rebase: %w", err)
 	}
-	if _, err := run(ctx, dir, "rebase", "--onto", string(newBase), string(oldBase)); err != nil {
+	if _, err := runAs(ctx, id, dir, "rebase", "--onto", string(newBase), string(oldBase)); err != nil {
 		if _, aerr := run(ctx, dir, "rebase", "--abort"); aerr != nil {
 			return "", fmt.Errorf("%w, and the abort failed too — the tree is not landable: %v", ErrRebaseConflict, aerr)
 		}
@@ -632,12 +650,13 @@ func Rebase(ctx context.Context, dir string, newBase, oldBase forge.Commit) (for
 	return forge.Commit(strings.TrimSpace(out)), err
 }
 
-// CommitAll stages and commits everything in the tree.
-func CommitAll(ctx context.Context, dir, message string) error {
+// CommitAll stages and commits everything in the tree, authored and
+// committed as id.
+func CommitAll(ctx context.Context, dir string, id forge.Identity, message string) error {
 	if _, err := run(ctx, dir, "add", "-A"); err != nil {
 		return err
 	}
-	_, err := run(ctx, dir, "commit", "-m", message)
+	_, err := runAs(ctx, id, dir, "commit", "-m", message)
 	return err
 }
 
@@ -738,7 +757,9 @@ func Commits(ctx context.Context, dir string, from, to forge.Commit) ([]string, 
 // that was already singular would break resume and gate-carry for no reason.
 // An unknown base or head is an error, never head or an empty commit —
 // unknown never reads as zero.
-func Squash(ctx context.Context, dir string, base, head forge.Commit) (forge.Commit, error) {
+//
+// The squashed commit keeps head's author and date; id is its committer.
+func Squash(ctx context.Context, dir string, id forge.Identity, base, head forge.Commit) (forge.Commit, error) {
 	out, err := run(ctx, dir, "rev-list", "--count", fmt.Sprintf("%s..%s", base, head))
 	if err != nil {
 		return "", fmt.Errorf("git: rev-list --count %s..%s: %w", base, head, err)
@@ -772,13 +793,16 @@ func Squash(ctx context.Context, dir string, base, head forge.Commit) (forge.Com
 	}
 	name, email, date := fields[0], fields[1], fields[2]
 
+	if err := id.Validate(); err != nil {
+		return "", fmt.Errorf("git commit-tree: %w", err)
+	}
 	cmd := exec.CommandContext(ctx, "git", "commit-tree", tree, "-p", string(base))
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_AUTHOR_NAME="+name, "GIT_AUTHOR_EMAIL="+email, "GIT_AUTHOR_DATE="+date,
-		"GIT_COMMITTER_NAME=project-box", "GIT_COMMITTER_EMAIL=noreply+pbox@christopherdavenport.tech",
-	)
+	// id.Env sets author and committer both; the author entries after it
+	// win, so the squash keeps head's author and only the committer is id.
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	cmd.Env = append(cmd.Env, id.Env()...)
+	cmd.Env = append(cmd.Env, "GIT_AUTHOR_NAME="+name, "GIT_AUTHOR_EMAIL="+email, "GIT_AUTHOR_DATE="+date)
 	cmd.Stdin = strings.NewReader(message)
 	var commitOut, commitErr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &commitOut, &commitErr

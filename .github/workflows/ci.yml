@@ -7,6 +7,12 @@ on:
     branches: [main]
   pull_request:
 
+# The job reads the tree and nothing else. Without this block the token
+# carries whatever the repository's default grants, and on a public
+# repository a workflow is code anyone can propose.
+permissions:
+  contents: read
+
 jobs:
   checks:
     runs-on: ubuntu-latest
@@ -25,14 +31,15 @@ jobs:
     env:
       SPANNER_EMULATOR_HOST: localhost:9010
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      # Pinned by commit, not tag: a tag can be moved. Dependabot bumps these.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version-file: go.mod
       # The bundle is generated here, not committed: go:embed reads web/dist
       # at build time, so node comes before the first go command. It was
       # committed for a month; see web/embed.go for why that stopped.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: 22
           cache: npm

@@ -85,8 +85,29 @@ type Config struct {
 	// pluggable, not a departure from the posture that network auth (OIDC,
 	// a gate's bearer token) is a LAYER IN FRONT of the socket — see
 	// docs/ARCHITECTURE.md's ingress section.
-	Auth  Auth  `yaml:"auth"`
-	Boxes []Box `yaml:"boxes"`
+	Auth Auth `yaml:"auth"`
+	// CommitIdentity is who the box is when it writes a commit itself — a
+	// squash, a rebase replay, a compensating revert, a rendered deploy, the
+	// commit made for an agent that left its tree dirty — and the
+	// Co-Authored-By trailer builders are asked to sign with. Absent is
+	// [forge.DefaultIdentity], the project's own no-reply address, so a
+	// commit says a box made it. An installation that wants its own names
+	// both fields; one without the other is refused, never completed from
+	// the host. It is the daemon's identity, so changing it needs a restart.
+	CommitIdentity CommitIdentity `yaml:"commit_identity"`
+	Boxes          []Box          `yaml:"boxes"`
+}
+
+// CommitIdentity is [Config.CommitIdentity] as the file spells it.
+type CommitIdentity struct {
+	Name  string `yaml:"name"`
+	Email string `yaml:"email"`
+}
+
+// Identity is the configured identity as the forge takes it; the zero value
+// resolves to [forge.DefaultIdentity] where it is used.
+func (c CommitIdentity) Identity() forge.Identity {
+	return forge.Identity{Name: c.Name, Email: c.Email}
 }
 
 // Runs is the retention of the run log — every tool call and its title, what
@@ -924,6 +945,9 @@ func (c *Config) validate() error {
 	}
 	if !strings.HasPrefix(c.Listen, "unix:") {
 		return fmt.Errorf("boxcfg: listen %q — the daemon is socket-only; front it with boxgate for the network", c.Listen)
+	}
+	if err := c.CommitIdentity.Identity().Validate(); err != nil {
+		return fmt.Errorf("boxcfg: commit_identity: %w", err)
 	}
 	if c.Every == "" {
 		c.Every = "15s"
