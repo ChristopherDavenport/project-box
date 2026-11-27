@@ -1,0 +1,16 @@
+# govulncheck in hack/check.sh fails the build on a reachable advisory;
+# this opens the bump before that happens, not after.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
