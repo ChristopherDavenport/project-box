@@ -10,6 +10,13 @@ producing evidence an external auditor can test.
   criteria, and §10 as the running status log. The commit history is the
   build journal; read it phase by phase.
 
+**Status: experimental.** One operator builds this, and it builds itself
+(`hack/dogfood`). The configuration schema, the API, and the store layout
+change without notice or migration, and nothing here is supported for
+production use. Issues are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md)
+for how an issue becomes work and [SECURITY.md](SECURITY.md) for how to
+report a vulnerability.
+
 ## Build and test
 
 Go 1.26.11+ (`go.mod` pins it; with `GOTOOLCHAIN=local`, upgrade or run
@@ -311,3 +318,9 @@ reason the record needs before it acts.
 `docs/PLAN.md` §10 says exactly where things stand and what is next; the
 phase commits carry the rationale. The live-verification scripts above
 recreate every environment the tests assume from nothing.
+
+## License
+
+MIT; see [LICENSE](LICENSE). The control room inlines and bundles
+Apache-2.0 and BSD-3-Clause web components, whose notices are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

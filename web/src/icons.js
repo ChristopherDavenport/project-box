@@ -1,4 +1,5 @@
-// Glyphs from @jack-henry/jh-icons (SPDX-License-Identifier: Apache-2.0),
+// Glyphs from @jack-henry/jh-icons (SPDX-License-Identifier: Apache-2.0;
+// Copyright 2025 Jack Henry; NOTICE in THIRD_PARTY_NOTICES.md),
 // inlined: jh-icon takes SVG in its default slot, and a bundle that fetches
 // nothing at runtime is the whole point of go:embed serving the room.
 import { html } from 'lit';
