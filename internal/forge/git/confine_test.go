@@ -166,7 +166,7 @@ func TestConfinedRunnerCannotReadOutsideItsContextSet(t *testing.T) {
 	if err != nil || !dirty {
 		t.Fatalf("workspace dirty = %v (err %v), want the confined run's change to be visible to git", dirty, err)
 	}
-	if err := CommitAll(ctx, ws.Dir, "what the confined agent left"); err != nil {
+	if err := CommitAll(ctx, ws.Dir, forge.Identity{}, "what the confined agent left"); err != nil {
 		t.Fatalf("the confined run's work is not landable: %v", err)
 	}
 }

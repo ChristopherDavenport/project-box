@@ -14,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/ChristopherDavenport/project-box/internal/api"
+	"github.com/ChristopherDavenport/project-box/internal/forge"
 	"github.com/ChristopherDavenport/project-box/internal/queue"
 	"github.com/ChristopherDavenport/project-box/internal/tenant"
 )
@@ -164,6 +165,37 @@ func TestReloadAddsARepoWithoutRestart(t *testing.T) {
 	}
 	if !saw {
 		t.Fatal("the reload left no evidence")
+	}
+}
+
+// TestCommitIdentityReachesTheMirrorAndHoldsAcrossReload: the configured
+// identity is what the mirror set commits as, and like the tenant it is the
+// daemon's identity — a reload that changes it is refused, the old one
+// still running.
+func TestCommitIdentityReachesTheMirrorAndHoldsAcrossReload(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "box.yaml")
+	writeCfg(t, cfgPath, filepath.Join(dir, "box.db"), filepath.Join(dir, "forge"), map[string]string{"api": bare(t, "api")})
+	named := strings.Replace(mustRead(t, cfgPath), "tenant: acme", "tenant: acme\ncommit_identity: {name: Acme Factory, email: factory@acme.example}", 1)
+	os.WriteFile(cfgPath, []byte(named), 0o644)
+	d, err := New(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	want := forge.Identity{Name: "Acme Factory", Email: "factory@acme.example"}
+	if d.mirror.Identity != want {
+		t.Fatalf("mirror identity = %+v, want %+v", d.mirror.Identity, want)
+	}
+
+	changed := strings.Replace(named, "factory@acme.example", "other@acme.example", 1)
+	os.WriteFile(cfgPath, []byte(changed), 0o644)
+	if _, err := d.Reload(ctx, "chris"); err == nil || !strings.Contains(err.Error(), "commit_identity") {
+		t.Fatalf("commit_identity change should refuse: %v", err)
+	}
+	if d.mirror.Identity != want {
+		t.Fatalf("after a refused reload the mirror commits as %+v, want %+v", d.mirror.Identity, want)
 	}
 }
 

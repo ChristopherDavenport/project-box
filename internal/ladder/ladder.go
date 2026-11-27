@@ -158,7 +158,7 @@ func (l *Ladder) promote(ctx context.Context, env Env, cand string) error {
 	run := &loop.Loop{
 		Store: l.Store, Runner: l.Runner, Mirror: l.Mirror,
 		Repo: env.Repo, Branch: env.Repo.DefaultBranch,
-		Builder: deploy.Builder{Service: svc, Target: render.Target{Env: env.Name, Namespace: env.Namespace}},
+		Builder: deploy.Builder{Service: svc, Target: render.Target{Env: env.Name, Namespace: env.Namespace}, Identity: l.Mirror.Identity},
 		Gates:   env.Gates, Lane: forge.LaneGated, TTL: l.TTL,
 	}
 	q := &queue.Queue{Store: l.Store, Runner: l.Runner, TTL: l.TTL}

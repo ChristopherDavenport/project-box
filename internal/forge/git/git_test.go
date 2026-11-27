@@ -1086,7 +1086,7 @@ func TestSquashOfStackedCommitsCollapsesToOneCarryingHeadsTreeAndSecondMessage(t
 
 	mustGit(t, dir, "checkout", "--detach", string(head))
 
-	squashed, err := Squash(ctx, dir, base, head)
+	squashed, err := Squash(ctx, dir, forge.Identity{}, base, head)
 	if err != nil {
 		t.Fatalf("squash: %v", err)
 	}
@@ -1132,7 +1132,7 @@ func TestSquashOfASingleCommitOverBaseReturnsHeadUnchanged(t *testing.T) {
 
 	mustGit(t, dir, "checkout", "--detach", string(head))
 
-	got, err := Squash(ctx, dir, base, head)
+	got, err := Squash(ctx, dir, forge.Identity{}, base, head)
 	if err != nil {
 		t.Fatalf("squash: %v", err)
 	}
@@ -1155,7 +1155,7 @@ func TestSquashOfAnEmptyRangeReturnsHeadUnchanged(t *testing.T) {
 
 	mustGit(t, dir, "checkout", "--detach", string(head))
 
-	got, err := Squash(ctx, dir, head, head)
+	got, err := Squash(ctx, dir, forge.Identity{}, head, head)
 	if err != nil {
 		t.Fatalf("squash: %v", err)
 	}
@@ -1174,10 +1174,10 @@ func TestSquashOfAnUnknownRevErrors(t *testing.T) {
 	base := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
 
 	unknown := forge.Commit(strings.Repeat("a", 40))
-	if _, err := Squash(ctx, dir, base, unknown); err == nil {
+	if _, err := Squash(ctx, dir, forge.Identity{}, base, unknown); err == nil {
 		t.Fatal("squash against an unknown head: want error, got nil")
 	}
-	if _, err := Squash(ctx, dir, unknown, base); err == nil {
+	if _, err := Squash(ctx, dir, forge.Identity{}, unknown, base); err == nil {
 		t.Fatal("squash against an unknown base: want error, got nil")
 	}
 }
@@ -1189,4 +1189,51 @@ func agentContext(commit forge.Commit, path string) (set agentpkg.ContextSet) {
 	}
 	set.Repos = []agentpkg.ContextRepo{cr}
 	return set
+}
+
+// TestTheBoxCommitsAsItsConfiguredIdentity: a commit the box writes itself
+// carries the installation's identity, and a squash keeps the author of the
+// work it collapses — only the committer is the box.
+func TestTheBoxCommitsAsItsConfiguredIdentity(t *testing.T) {
+	ctx := context.Background()
+	id := forge.Identity{Name: "Acme Factory", Email: "factory@acme.example"}
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	if err := CommitAll(ctx, dir, id, "base"); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGit(t, dir, "log", "-1", "--format=%an <%ae>|%cn <%ce>"); strings.TrimSpace(got) != "Acme Factory <factory@acme.example>|Acme Factory <factory@acme.example>" {
+		t.Fatalf("CommitAll identity = %q", got)
+	}
+	base := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+
+	for _, line := range []string{"first", "second"} {
+		os.WriteFile(filepath.Join(dir, "file.txt"), []byte(line+"\n"), 0o644)
+		mustGit(t, dir, "commit", "-am", line)
+	}
+	head := forge.Commit(strings.TrimSpace(mustGit(t, dir, "rev-parse", "HEAD")))
+	squashed, err := Squash(ctx, dir, id, base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustGit(t, dir, "log", "-1", "--format=%an <%ae>|%cn <%ce>", string(squashed)); strings.TrimSpace(got) != forge.DefaultIdentity().String()+"|Acme Factory <factory@acme.example>" {
+		t.Fatalf("squash identity = %q, want head's author and the box as committer", got)
+	}
+}
+
+// TestAHalfNamedIdentityWritesNoCommit: refused before git runs, so git never
+// gets the chance to complete it from the host.
+func TestAHalfNamedIdentityWritesNoCommit(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init")
+	os.WriteFile(filepath.Join(dir, "file.txt"), []byte("base\n"), 0o644)
+	err := CommitAll(ctx, dir, forge.Identity{Name: "Acme Factory"}, "base")
+	if !errors.Is(err, forge.ErrPartialIdentity) {
+		t.Fatalf("CommitAll with a name and no email = %v, want ErrPartialIdentity", err)
+	}
+	if _, err := run(ctx, dir, "rev-parse", "--verify", "HEAD"); err == nil {
+		t.Fatal("a commit was written under a half-named identity")
+	}
 }

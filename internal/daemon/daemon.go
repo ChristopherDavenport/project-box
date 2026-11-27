@@ -254,6 +254,7 @@ func New(path string) (*Daemon, error) {
 		s.Close()
 		return nil, err
 	}
+	m.Identity = cfg.CommitIdentity.Identity()
 	router := &ingress.StoreRouter{Store: s, Tenant: t, Runner: cfg.Runner}
 	d := &Daemon{
 		ConfigPath: path, store: s, tenant: t, mirror: m,
@@ -858,6 +859,7 @@ func (d *Daemon) Reload(ctx context.Context, actor string) (string, error) {
 		{"db", old.DB, ncfg.DB},
 		{"root", old.Root, ncfg.Root},
 		{"listen", old.Listen, ncfg.Listen},
+		{"commit_identity", old.CommitIdentity.Identity().String(), ncfg.CommitIdentity.Identity().String()},
 	} {
 		if f.was != f.now {
 			return "", fmt.Errorf("daemon: %s is the daemon's identity, not its configuration — changing it (%q -> %q) needs a restart; reload refused, old config still running", f.name, f.was, f.now)

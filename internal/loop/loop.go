@@ -876,7 +876,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 			// tree and its objects are certainly reachable: git.Rebase is
 			// about to move HEAD out from under it.
 			oldPatchID, oidErr := git.PatchID(ctx, adopted.Dir, forge.Commit(item.BuiltBase), forge.Commit(item.Built))
-			replayed, rerr := git.Rebase(ctx, adopted.Dir, base, forge.Commit(item.BuiltBase))
+			replayed, rerr := git.Rebase(ctx, adopted.Dir, l.Mirror.Identity, base, forge.Commit(item.BuiltBase))
 			if rerr == nil {
 				ws, head, resumed = adopted, replayed, true
 				item.RebaseCount++
@@ -992,7 +992,7 @@ func (l *Loop) RunHolding(ctx context.Context, item queue.WorkItem, claim forge.
 					// it (issue #155). base..head of one commit or fewer
 					// returns head verbatim, so a single-commit build's sha
 					// never moves.
-					squashed, sqerr := git.Squash(ctx, ws.Dir, base, head)
+					squashed, sqerr := git.Squash(ctx, ws.Dir, l.Mirror.Identity, base, head)
 					if sqerr != nil {
 						return &squashFailure{err: fmt.Errorf("squash build attempt onto %s: %w", base, sqerr)}
 					}

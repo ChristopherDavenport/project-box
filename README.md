@@ -152,6 +152,13 @@ credential value.
 bound). Nothing else does: the lease TTL is renewed while a run holds it, so
 without this an agent that hangs runs until the daemon stops.
 
+`commit_identity: {name, email}` is who the box is when it writes a commit
+itself: the committer of a squash or replay, the author of a revert or a
+rendered deploy, and the `Co-Authored-By` trailer builders sign with.
+Absent, it is `project-box <noreply+pbox@christopherdavenport.tech>`, so a
+commit says a box made it. Name both fields or neither; changing it needs
+a restart.
+
 ## Where work is expressed
 
 A repository's `sections:` are its named regions — paths, a purpose the
