@@ -5,6 +5,13 @@ One ingress per issue, keyed `issue-<n>` so re-running this is idempotent —
 intake turns an ingress into a work item exactly once, and a second submit
 of the same key reports opened=false rather than queueing a duplicate.
 
+Only issues carrying the `box` label are work. Anyone can open an issue on
+a public repository, and every issue submitted here becomes a builder's
+prompt with a push token behind it; the label is a person's decision about
+what the box takes, and only collaborators can apply it. That holds for an
+issue named by number too: naming it is not labelling it. An issue whose
+labels are unknown (a cache written before this gate) is not labelled.
+
 Issues are read from ../project-box-state/issues.json, fetched with `gh`
 when that file is absent. Pass issue numbers to submit only those. The cache
 is a convenience, never a source of truth: if a requested number is missing
@@ -32,6 +39,8 @@ STATE = ROOT.parent / "project-box-state"
 BOX = ROOT / "bin" / "box"
 SOCKET = "unix:" + str(STATE / "boxd.sock")
 REPO = "ChristopherDavenport/project-box"
+# The same name boxcfg's polling route uses for the same decision.
+LABEL = "box"
 # Must match hack/dogfood/box.yaml: the tenant scopes every key, and the
 # route is the vocabulary the daemon's config defines.
 TENANT = "davenport"
@@ -63,7 +72,7 @@ def fetch_issues() -> list:
     """The one gh call this script makes — a seam so tests can avoid gh."""
     out = subprocess.run(
         ["gh", "issue", "list", "--repo", REPO, "--state", "open",
-         "--limit", "200", "--json", "number,title,body"],
+         "--label", LABEL, "--limit", "200", "--json", "number,title,body,labels"],
         capture_output=True, text=True, check=True,
     ).stdout
     return json.loads(out)
@@ -92,6 +101,19 @@ def refresh_cache() -> list:
     issues = fetch_issues()
     _write_cache(issues)
     return issues
+
+
+def labelled(issues: list) -> tuple:
+    """Splits issues into (carrying LABEL, numbers that don't). gh's fetch
+    already filters by label; this re-asks because a cache may predate the
+    gate, and an absent labels field is an unknown, which is not a yes."""
+    keep, dropped = [], set()
+    for i in issues:
+        if any(l.get("name") == LABEL for l in i.get("labels") or []):
+            keep.append(i)
+        else:
+            dropped.add(i["number"])
+    return keep, dropped
 
 
 def _human_age(seconds: float) -> str:
@@ -137,20 +159,26 @@ def main() -> int:
         del args[i:i + 2]
     only = {int(a) for a in args if a.isdigit()}
 
+    issues, unlabelled = labelled(issues)
     missing_status = 0
     if only:
         missing = only - {i["number"] for i in issues}
         # A cache is a convenience, never a source of truth: a number it
-        # hasn't heard of gets one refetch before this script gives up on
-        # it. A fresh fetch this run has already answered that question.
+        # hasn't heard of, or holds without the label, gets one refetch
+        # before this script gives up on it — the label may have been
+        # applied since. A fresh fetch this run has already answered that.
         if missing and from_cache:
-            issues = refresh_cache()
+            issues, unlabelled = labelled(refresh_cache())
             missing = only - {i["number"] for i in issues}
         for n in sorted(missing):
-            print(f"#{n} not among gh's open issues for {REPO}", file=sys.stderr)
+            print(f"#{n} not among gh's open issues labelled {LABEL!r} for {REPO}",
+                  file=sys.stderr)
         if missing:
             missing_status = 1
         issues = [i for i in issues if i["number"] in only]
+    else:
+        for n in sorted(unlabelled):
+            print(f"#{n} skipped: no {LABEL!r} label", file=sys.stderr)
 
     for issue in sorted(issues, key=lambda i: i["number"]):
         n, title = issue["number"], issue["title"]

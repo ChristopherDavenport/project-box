@@ -258,14 +258,18 @@ go run ./hack/deployloop -remote ...   # the deploy loop against any env repo
 go run ./hack/continuity -agent ...    # the seat-continuity experiment (spends real sessions)
 BOX_ACP_LIVE=/path/to/claude-agent-acp go test -run TestLive ./internal/agent/acp/  # one real agent run
 ./hack/dogfood/run.sh                  # the factory pointed at itself; then:
-./hack/dogfood/submit.py               # ...its own open issues, routed in
+./hack/dogfood/submit.py               # ...its own open issues labelled `box`, routed in
 ```
 
-`hack/dogfood` is this repository's own box (issue #7): one repo, one seat,
-`max_concurrent: 1`, the gated lane, landing on `refs/heads/factory` and
-never on main. It spends real sessions and needs `gh` authenticated — the
-forge reaches a private HTTPS remote only through the credential channel
-`run.sh` sets up, which the script explains. State lands in
+`hack/dogfood` is this repository's own box (issue #7), and it is the
+running instance that builds this repository, not a template to run as-is:
+the gated lane, landing on main through pull requests the factory opens,
+spending real sessions on the operator's own subscription. It needs `gh`
+authenticated — the forge reaches the HTTPS remote only through the
+credential channel `run.sh` sets up, which the script explains. It takes
+only open issues labelled `box`: anyone can open an issue on a public
+repository, only a collaborator can label one, and every issue taken
+becomes a builder's prompt with a push token behind it. State lands in
 `../project-box-state/`, beside the checkout rather than inside it — a
 workspace under the checkout would advertise the checkout (issue #73).
 
